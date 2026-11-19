@@ -596,10 +596,11 @@ impl<
     ) {
         // FT統計
         let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
-        let weight_min = ft.weights.iter().copied().min().unwrap_or(0);
-        let weight_max = ft.weights.iter().copied().max().unwrap_or(0);
-        let weight_nonzero: usize = ft.weights.iter().filter(|&&x| x != 0).count();
-        let weight_total = ft.weights.len();
+        let weights = || ft.piece_weights();
+        let weight_min = weights().min().unwrap_or(0);
+        let weight_max = weights().max().unwrap_or(0);
+        let weight_nonzero = weights().filter(|&x| x != 0).count();
+        let weight_total = weights().len();
 
         info!("[NNUE Load] FT bias sum: {bias_sum}");
         info!("[NNUE Load] FT weight: min={weight_min}, max={weight_max}");
@@ -1336,6 +1337,11 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         ls_match_size!(self, net => net.num_buckets)
     }
 
+    #[cfg(feature = "layerstack-arch")]
+    pub(super) fn piece_ft_storage(&self) -> &'static str {
+        ls_match_size!(self, net => net.feature_transformer.piece_ft_storage())
+    }
+
     /// ネットに記録された bucket spec を返す。
     pub fn bucket_spec(&self) -> Option<super::BucketSpec> {
         ls_match_size!(self, net => net.bucket_spec())
@@ -1836,75 +1842,15 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         let stack_dims = stack.architecture_dims();
         macro_rules! do_update {
             ($net:expr, $stack:expr, $cache_variant:ident) => {{
-                let current_entry = $stack.current();
-                if current_entry.accumulator.computed_accumulation {
-                    return;
-                }
-
-                #[cfg(feature = "nnue-threat")]
-                if $net.feature_transformer.has_threat {
-                    let threat_cache = if let Some(
-                        super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
-                    ) = cache { Some(c) } else { None };
-                    $net.feature_transformer.update_with_threat_ancestor(pos, $stack, threat_cache);
-                    return;
-                }
-
-                let mut updated = false;
-
-                if let Some(prev_idx) = current_entry.previous {
-                    let prev_computed = $stack.entry_at(prev_idx).accumulator.computed_accumulation;
-                    if prev_computed {
-                        let dirty_piece = $stack.current().dirty_piece;
-                        let (prev_acc, current_acc) =
-                            $stack.get_prev_and_current_accumulators(prev_idx);
-                        if let Some(
-                            super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
-                        ) = cache
-                        {
-                            $net.update_accumulator_with_cache(
-                                pos,
-                                &dirty_piece,
-                                current_acc,
-                                prev_acc,
-                                c,
-                            );
-                        } else {
-                            $net.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
-                        }
-                        updated = true;
-                    }
-                }
-
-                if !updated {
-                    // FT 幅 1536 以上では差分を連ねるより Finny refresh が安いため、
-                    // 祖先探索は深さ 1 までにする。それより狭い幅では深さ 4 まで探索する。
-                    #[cfg(not(feature = "nnue-effect-bucket"))]
-                    let max_depth = if $stack.current().accumulator.accumulation[0].len() >= 1536 {
-                        1
-                    } else {
-                        4
-                    };
-                    #[cfg(feature = "nnue-effect-bucket")]
-                    let max_depth = 0;
-                    if let Some((source_idx, _depth)) =
-                        $stack.find_usable_accumulator(max_depth)
-                    {
-                        updated = $net.forward_update_incremental(pos, $stack, source_idx);
-                    }
-                }
-
-                if !updated {
-                    let acc = &mut $stack.current_mut().accumulator;
-                    if let Some(
-                        super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
-                    ) = cache
-                    {
-                        $net.refresh_accumulator_with_cache(pos, acc, c);
-                    } else {
-                        $net.refresh_accumulator(pos, acc);
-                    }
-                }
+                let cache = if let Some(
+                    super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
+                ) = cache
+                {
+                    Some(c)
+                } else {
+                    None
+                };
+                $net.feature_transformer.ensure_accumulator(pos, $stack, cache);
             }};
         }
 
@@ -2629,6 +2575,11 @@ impl LayerStacksNetwork {
     /// 現在 load されている net の bucket 数 (= `.bin` header の `num_buckets`)
     pub fn num_buckets(&self) -> usize {
         ls_match_ft!(self, by_ft => by_ft.num_buckets())
+    }
+
+    #[cfg(feature = "layerstack-arch")]
+    pub(super) fn piece_ft_storage(&self) -> &'static str {
+        ls_match_ft!(self, by_ft => by_ft.piece_ft_storage())
     }
 
     /// ネットに記録された bucket spec を返す。
@@ -3377,6 +3328,175 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "nnue-effect-bucket"))]
+    fn check_packed8_accumulators<const N: usize>() {
+        use super::super::ls_feature_spec::HalfKaHmMergedSpec;
+        use super::super::piece_weights;
+        use super::*;
+        use crate::nnue::accumulator::{AlignedBox, WeightBox};
+        use crate::nnue::accumulator_layer_stacks::AccumulatorCacheLayerStacks;
+        use crate::types::Move;
+
+        let mut pos = Position::new();
+        pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+        let mut ft =
+            FeatureTransformerLayerStacks::<N, HalfKaHmMergedSpec>::for_output_transform_tests();
+        ft.biases.0.fill(41);
+        ft.biases.0[0] = i16::MAX;
+        ft.biases.0[N / 2] = i16::MIN;
+        let mut weights = AlignedBox::new_zeroed(HalfKaHmMergedSpec::DIMENSIONS * N);
+        for (i, value) in weights.iter_mut().enumerate() {
+            *value = if i % 32 == 0 {
+                if (i / N).is_multiple_of(2) { -254 } else { 254 }
+            } else {
+                2 * ((i.wrapping_mul(17) % 11) as i16 - 5)
+            };
+        }
+        let mut reference_weights = weights.clone().into();
+        ft.weights = piece_weights::select(WeightBox::from(weights), N).unwrap();
+        assert_eq!(ft.piece_ft_storage(), "int8 x 2");
+
+        #[cfg(feature = "nnue-psqt")]
+        if N == 768 {
+            ft.psqt_weights = AlignedBox::new_zeroed(HalfKaHmMergedSpec::DIMENSIONS).into();
+            for (i, weight) in ft.psqt_weights.make_mut().iter_mut().enumerate() {
+                *weight = (i % 17) as i32 - 8;
+            }
+            ft.psqt_num_buckets = 1;
+            ft.has_psqt = true;
+        }
+
+        #[cfg(feature = "nnue-threat")]
+        {
+            use super::super::{threat_features, threat_width};
+            let width = threat_width::width(N);
+            let mut weights = AlignedBox::new_zeroed(threat_features::THREAT_DIMENSIONS * width);
+            for (i, value) in weights.iter_mut().enumerate() {
+                *value = ((i * 73 + i / width * 19) % 17) as i8 - 8;
+            }
+            ft.threat_weights = weights.into();
+        }
+
+        let mut layer_stacks = LayerStacks::with_num_buckets(1);
+        let bucket = &mut layer_stacks.buckets[0];
+        bucket.edit_l1(|l1| l1.weights.make_mut().fill(1));
+        bucket.l2.weights.make_mut().fill(1);
+        bucket.output.weights.make_mut().fill(8);
+        let mut net = NetworkLayerStacks::<N, 16, 30, 32, HalfKaHmMergedSpec> {
+            feature_transformer: ft,
+            layer_stacks,
+            fv_scale: 16,
+            num_buckets: 1,
+            bucket_spec: None,
+            _ft: PhantomData,
+        };
+
+        let moves = [
+            "7g7f", "3c3d", "8h2b+", "3a2b", "B*7g", "B*3c", "5i6h", "5a6b", "6h5i",
+        ];
+        for use_threat in [false, true] {
+            #[cfg(feature = "nnue-threat")]
+            {
+                net.feature_transformer.has_threat = use_threat;
+            }
+            #[cfg(not(feature = "nnue-threat"))]
+            if use_threat {
+                continue;
+            }
+
+            pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+            let mut packed = AccumulatorStackLayerStacks::<N>::new();
+            let mut reference = AccumulatorStackLayerStacks::<N>::new();
+            let mut packed_cache = AccumulatorCacheLayerStacks::new();
+            let mut reference_cache = AccumulatorCacheLayerStacks::new();
+            let mut nonzero_score = false;
+            for (ply, move_text) in
+                std::iter::once(None).chain(moves.into_iter().map(Some)).enumerate()
+            {
+                if let Some(move_text) = move_text {
+                    let mv = pos.to_move(Move::from_usi(move_text).unwrap()).unwrap();
+                    assert!(pos.is_legal(mv));
+                    let dirty = pos.do_move(mv, pos.gives_check(mv));
+                    for stack in [&mut packed, &mut reference] {
+                        stack.push();
+                        stack.current_mut().dirty_piece = dirty;
+                    }
+                }
+
+                // 3 手分をまとめて適用。玉が動く 7 手目では親も未計算で Finny に戻る。
+                if !matches!(ply, 0 | 3 | 4 | 7..=9) {
+                    continue;
+                }
+                if ply == 3 {
+                    assert_eq!(packed.find_usable_accumulator(4), Some((0, 3)));
+                    #[cfg(feature = "nnue-threat")]
+                    if use_threat {
+                        use super::super::{accumulator::IndexList, threat_features};
+                        let mut board = threat_features::ThreatBoard::new(&pos);
+                        for index in (1..=ply).rev() {
+                            board.undo(&packed.entry_at(index).dirty_piece);
+                        }
+                        assert!(
+                            [Color::Black, Color::White]
+                                .into_iter()
+                                .all(|side| board.same_mirror(&pos, side))
+                        );
+                        assert!(threat_features::append_threat_endpoint_diff(
+                            &board,
+                            &pos,
+                            &mut std::array::from_fn(|_| IndexList::new()),
+                            &mut std::array::from_fn(|_| IndexList::new()),
+                        ));
+                    }
+                }
+                if ply == 7 {
+                    assert_eq!(packed.find_usable_accumulator(4), None);
+                }
+
+                // 1536 幅の 3 手目では祖先探索上限により、通常の full refresh を通る。
+                let cached = ply != 3 || use_threat;
+                let ft = &mut net.feature_transformer;
+                ft.ensure_accumulator(&pos, &mut packed, cached.then_some(&mut packed_cache));
+                std::mem::swap(&mut ft.weights, &mut reference_weights);
+                assert_eq!(ft.piece_ft_storage(), "i16");
+                ft.ensure_accumulator(&pos, &mut reference, cached.then_some(&mut reference_cache));
+                let mut fresh = AccumulatorLayerStacks::new();
+                ft.refresh_accumulator(&pos, &mut fresh);
+                std::mem::swap(&mut ft.weights, &mut reference_weights);
+
+                let actual = &packed.current().accumulator;
+                let reference_acc = &reference.current().accumulator;
+                assert!(actual.computed_accumulation && reference_acc.computed_accumulation);
+                for expected in [reference_acc, &fresh] {
+                    assert_eq!(actual.accumulation, expected.accumulation, "width={N}, ply={ply}");
+                    #[cfg(feature = "nnue-threat")]
+                    assert_eq!(actual.threat_accumulation, expected.threat_accumulation);
+                    #[cfg(feature = "nnue-psqt")]
+                    assert_eq!(actual.psqt_accumulation, expected.psqt_accumulation);
+                    let score = net.evaluate_with_bucket(&pos, expected, 0);
+                    assert_eq!(net.evaluate_with_bucket(&pos, actual, 0), score);
+                    nonzero_score |= score != Value::ZERO;
+                }
+            }
+            assert!(nonzero_score);
+        }
+    }
+
+    #[cfg(not(feature = "nnue-effect-bucket"))]
+    #[cfg_attr(
+        not(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        )),
+        ignore = "requires an AVX-512F/BW build"
+    )]
+    #[test]
+    fn packed8_search_updates_match_i16_at_two_widths() {
+        check_packed8_accumulators::<768>();
+        check_packed8_accumulators::<1536>();
+    }
+
     fn synthetic_evaluate_with_bucket_matches_legacy_both_sides<const N: usize, const L2: usize>(
         use_threat: bool,
     ) {
@@ -3539,27 +3659,26 @@ mod tests {
         eprintln!("FT bias sum: {bias_sum}");
 
         // Feature Transformer の重みの一部を確認
-        let weight_sample: Vec<i16> = network.feature_transformer.weights[0..10].to_vec();
+        let weights = || network.feature_transformer.piece_weights();
+        let weight_sample: Vec<i16> = weights().take(10).collect();
         eprintln!("FT weight sample (first 10): {weight_sample:?}");
 
         // 異なるオフセットで重みを確認
-        let weight_total = network.feature_transformer.weights.len();
-        let weight_nonzero: usize =
-            network.feature_transformer.weights.iter().filter(|&&x| x != 0).count();
+        let weight_total = weights().len();
+        let weight_nonzero: usize = weights().filter(|&x| x != 0).count();
         eprintln!("FT weight total: {weight_total}, nonzero: {weight_nonzero}");
 
         // 中間位置の重みをサンプル
         let mid_offset = weight_total / 2;
-        let weight_mid_sample: Vec<i16> =
-            network.feature_transformer.weights[mid_offset..mid_offset + 10].to_vec();
+        let weight_mid_sample: Vec<i16> = weights().skip(mid_offset).take(10).collect();
         eprintln!("FT weight sample (mid): {weight_mid_sample:?}");
 
         // 最初のnonzero重みの位置を探す
-        let first_nonzero_pos = network.feature_transformer.weights.iter().position(|&x| x != 0);
+        let first_nonzero_pos = weights().position(|x| x != 0);
         if let Some(weight_pos) = first_nonzero_pos {
             let sample_end = (weight_pos + 10usize).min(weight_total);
             let first_nonzero_sample: Vec<i16> =
-                network.feature_transformer.weights[weight_pos..sample_end].to_vec();
+                weights().skip(weight_pos).take(sample_end - weight_pos).collect();
             eprintln!("First nonzero at position {weight_pos}, sample: {first_nonzero_sample:?}");
             // 特徴インデックスを計算 (weight layout: [feature_index][output_dim])
             let feature_idx = weight_pos / TEST_L1;
@@ -3587,8 +3706,7 @@ mod tests {
             let offset = first_idx * TEST_L1;
             eprintln!("  Weight offset for feature {first_idx}: {offset}");
             if offset + 10 <= weight_total {
-                let active_weight_sample: Vec<i16> =
-                    network.feature_transformer.weights[offset..offset + 10].to_vec();
+                let active_weight_sample: Vec<i16> = weights().skip(offset).take(10).collect();
                 eprintln!("  Weight sample for first active feature: {active_weight_sample:?}");
             }
         }

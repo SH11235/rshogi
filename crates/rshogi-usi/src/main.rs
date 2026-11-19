@@ -825,6 +825,9 @@ impl UsiEngine {
     fn load_nnue_with_current_deltas(&mut self, path: &Path) -> io::Result<NetDeltaReport> {
         let deltas = self.current_net_deltas();
         let report = init_nnue_with_deltas(path, &deltas)?;
+        if let Some(storage) = get_network().and_then(|net| net.layer_stack_piece_ft_storage()) {
+            eprintln!("info string NNUE LayerStack piece FT storage={storage}");
+        }
         if !deltas.is_empty() || self.net_deltas_dirty {
             eprintln!(
                 "info string net deltas applied: {} coefficients (clamped: {})",

@@ -19,6 +19,7 @@ use super::features::FeatureSet;
 use super::leb128::read_layer_stacks_ft_i16;
 use super::ls_feature_spec::LsFeatureSpec;
 use super::piece_list::PieceNumber;
+use super::piece_weights::{self, PieceWeight, PieceWeights, with_piece_weights};
 #[cfg(feature = "nnue-threat")]
 use super::stats::count_threat_multiply;
 use super::stats::{count_refresh, count_update};
@@ -148,6 +149,7 @@ fn feature_index_from_bona_piece<FT: LsFeatureSpec>(
 /// nnue-pytorch用のFeatureTransformer（L1次元出力）
 ///
 /// `FT` は LS の Feature Transformer 軸 (5 種類のうち 1 つ) を表す marker type。
+/// 駒 FT 係数は [`Self::piece_weights`] で列挙し、[`Self::piece_weight`] で個別に取得できる。
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
@@ -156,7 +158,7 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 
     /// 重み `[FT::DIMENSIONS][L1]`
     /// 64バイトアラインメントで確保
-    pub weights: WeightBox<i16>,
+    pub(super) weights: PieceWeights,
 
     /// PSQT バイアス（先頭 `num_buckets` 個のみ有効、それ以降はゼロ）
     ///
@@ -336,8 +338,85 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         self.threat_weights.share("FT threat");
     }
 
+    /// ファイル上の駒 FT 係数をフラットなインデックスで取得する。
+    ///
+    /// `index` が [`Self::piece_weights`] の長さ以上の場合はパニックする。
+    pub fn piece_weight(&self, index: usize) -> i16 {
+        piece_weights::coefficient(&self.weights, index)
+    }
+
+    /// 駒 FT 係数をファイルと同じ順序（特徴インデックス、出力次元の順）で返す。
+    ///
+    /// 圧縮格納時は元の i16 配列を解放するため、係数は非公開の格納領域からイテレータで返す。
+    /// イテレータの `len()` で係数の総数を取得できる。
+    pub fn piece_weights(&self) -> impl ExactSizeIterator<Item = i16> + '_ {
+        piece_weights::coefficients(&self.weights)
+    }
+
+    /// 駒 FT のメモリ上の格納形式を返す。
+    pub fn piece_ft_storage(&self) -> &'static str {
+        piece_weights::storage(&self.weights)
+    }
+
+    #[cfg(test)]
+    fn unpacked_for_tests(&self) -> PieceTransformer<'_, L1, FT, i16> {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        let weights = match &self.weights {
+            PieceWeights::I16(weights) => weights,
+            PieceWeights::I8x2(_) => panic!("test requires unpacked FT weights"),
+        };
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        )))]
+        let weights = &self.weights;
+        PieceTransformer {
+            ft: self,
+            rows: weights,
+        }
+    }
+
+    fn validate_width() -> io::Result<()> {
+        // 固定幅の駒 FT 更新は SIMD ベクトル単位で処理する。
+        let lanes = if cfg!(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        )) {
+            32
+        } else if cfg!(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512bw")
+        )) {
+            16
+        } else if cfg!(any(
+            all(target_arch = "x86_64", target_feature = "sse2", not(target_feature = "avx2")),
+            all(target_arch = "wasm32", target_feature = "simd128")
+        )) {
+            8
+        } else {
+            return Ok(());
+        };
+        if L1 == 0 || !L1.is_multiple_of(lanes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Fixed-width LayerStacks FT width must be a positive multiple of {lanes}, got {L1}"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// ファイルから読み込み（非圧縮形式）
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
+        Self::validate_width()?;
         // バイアスを読み込み
         let mut biases = [0i16; L1];
         let mut buf = [0u8; 2];
@@ -356,7 +435,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         Ok(Self {
             biases: Aligned(biases),
-            weights: weights.into(),
+            weights: piece_weights::select(weights.into(), L1)?,
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
@@ -391,10 +470,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         reader: &mut R,
         #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
+        Self::validate_width()?;
         let weight_size = FT::DIMENSIONS * L1;
         let mut biases = [0i16; L1];
         #[cfg(feature = "prepacked-nnue")]
-        let weights = if let Some(packed) = packed {
+        let weights: WeightBox<i16> = if let Some(packed) = packed {
             for bias in &mut biases {
                 let mut bytes = [0; 2];
                 reader.read_exact(&mut bytes)?;
@@ -411,7 +491,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 .into();
         Ok(Self {
             biases: Aligned(biases),
-            weights,
+            weights: piece_weights::select(weights, L1)?,
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
@@ -1060,7 +1140,116 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     }
 
     /// 差分計算を使わずにAccumulatorを計算
+    #[inline]
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks<L1>) {
+        with_piece_weights!(self.weights, |rows| PieceTransformer { ft: self, rows }
+            .refresh_accumulator(pos, acc))
+    }
+
+    /// 差分計算でAccumulatorを更新
+    #[inline]
+    pub fn update_accumulator(
+        &self,
+        pos: &Position,
+        dirty_piece: &DirtyPiece,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        prev_acc: &AccumulatorLayerStacks<L1>,
+    ) {
+        with_piece_weights!(self.weights, |rows| PieceTransformer { ft: self, rows }
+            .update_accumulator(pos, dirty_piece, acc, prev_acc))
+    }
+
+    /// 差分計算でAccumulatorを更新（キャッシュ使用版）
+    ///
+    /// 玉移動時に full refresh が必要な視点では、AccumulatorCaches（Finny Tables）
+    /// を参照して差分更新を行う。キャッシュにヒットした場合、全駒加算の代わりに
+    /// 前回のキャッシュ状態との差分のみを適用するため高速。
+    #[inline]
+    pub fn update_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        dirty_piece: &DirtyPiece,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        prev_acc: &AccumulatorLayerStacks<L1>,
+        cache: &mut AccumulatorCacheLayerStacks<L1>,
+    ) {
+        with_piece_weights!(self.weights, |rows| PieceTransformer { ft: self, rows }
+            .update_accumulator_with_cache(pos, dirty_piece, acc, prev_acc, cache))
+    }
+
+    /// キャッシュ使用版の refresh（両視点）
+    #[inline]
+    pub fn refresh_accumulator_with_cache(
+        &self,
+        pos: &Position,
+        acc: &mut AccumulatorLayerStacks<L1>,
+        cache: &mut AccumulatorCacheLayerStacks<L1>,
+    ) {
+        with_piece_weights!(self.weights, |rows| PieceTransformer { ft: self, rows }
+            .refresh_accumulator_with_cache(pos, acc, cache))
+    }
+
+    #[cfg(any(
+        feature = "layerstack-arch",
+        all(test, not(feature = "nnue-effect-bucket"))
+    ))]
+    #[inline]
+    pub(super) fn ensure_accumulator(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
+        cache: Option<&mut AccumulatorCacheLayerStacks<L1>>,
+    ) {
+        if stack.current().accumulator.computed_accumulation {
+            return;
+        }
+        with_piece_weights!(self.weights, |rows| PieceTransformer { ft: self, rows }
+            .ensure_accumulator(pos, stack, cache))
+    }
+
+    #[cfg(all(test, feature = "nnue-threat"))]
+    fn update_with_threat_ancestor(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
+        cache: Option<&mut AccumulatorCacheLayerStacks<L1>>,
+    ) {
+        with_piece_weights!(self.weights, |rows| PieceTransformer { ft: self, rows }
+            .update_with_threat_ancestor(pos, stack, cache))
+    }
+
+    /// 複数手分の差分を適用してアキュムレータを更新
+    #[inline]
+    pub fn forward_update_incremental(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
+        source_idx: usize,
+    ) -> bool {
+        with_piece_weights!(self.weights, |rows| PieceTransformer { ft: self, rows }
+            .forward_update_incremental(pos, stack, source_idx))
+    }
+}
+
+// 格納形式の分岐を accumulator 操作の入口に置き、行の処理を型ごとに特殊化する。
+struct PieceTransformer<'a, const L1: usize, FT: LsFeatureSpec, W: PieceWeight> {
+    ft: &'a FeatureTransformerLayerStacks<L1, FT>,
+    rows: &'a [W],
+}
+
+impl<const L1: usize, FT: LsFeatureSpec, W: PieceWeight> std::ops::Deref
+    for PieceTransformer<'_, L1, FT, W>
+{
+    type Target = FeatureTransformerLayerStacks<L1, FT>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.ft
+    }
+}
+
+impl<'a, const L1: usize, FT: LsFeatureSpec, W: PieceWeight> PieceTransformer<'a, L1, FT, W> {
+    fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks<L1>) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             let accumulation = acc.get_mut(p);
@@ -1091,8 +1280,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         acc.computed_score = false;
     }
 
-    /// 差分計算でAccumulatorを更新
-    pub fn update_accumulator(
+    fn update_accumulator(
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
@@ -1224,12 +1412,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         acc.computed_score = false;
     }
 
-    /// 差分計算でAccumulatorを更新（キャッシュ使用版）
-    ///
-    /// 玉移動時に full refresh が必要な視点では、AccumulatorCaches（Finny Tables）
-    /// を参照して差分更新を行う。キャッシュにヒットした場合、全駒加算の代わりに
-    /// 前回のキャッシュ状態との差分のみを適用するため高速。
-    pub fn update_accumulator_with_cache(
+    fn update_accumulator_with_cache(
         &self,
         pos: &Position,
         dirty_piece: &DirtyPiece,
@@ -1367,8 +1550,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         acc.computed_score = false;
     }
 
-    /// キャッシュ使用版の refresh（両視点）
-    pub fn refresh_accumulator_with_cache(
+    fn refresh_accumulator_with_cache(
         &self,
         pos: &Position,
         acc: &mut AccumulatorLayerStacks<L1>,
@@ -1484,7 +1666,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 &self.psqt_biases,
                 accumulation,
                 psqt_acc,
-                &self.weights,
+                self.rows,
                 idx_fn,
                 |pacc, idx| self.add_psqt_weights(pacc, idx),
                 |pacc, idx| self.sub_psqt_weights(pacc, idx),
@@ -1497,14 +1679,64 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             piece_list,
             &self.biases.0,
             accumulation,
-            &self.weights,
+            self.rows,
             idx_fn,
         );
     }
 
-    /// 駒側の更新方法とは独立に、Threat の計算済み祖先を再利用する。
+    #[cfg(any(
+        feature = "layerstack-arch",
+        all(test, not(feature = "nnue-effect-bucket"))
+    ))]
+    fn ensure_accumulator(
+        &self,
+        pos: &Position,
+        stack: &mut AccumulatorStackLayerStacks<L1>,
+        cache: Option<&mut AccumulatorCacheLayerStacks<L1>>,
+    ) {
+        #[cfg(feature = "nnue-threat")]
+        if self.has_threat {
+            self.update_with_threat_ancestor(pos, stack, cache);
+            return;
+        }
+
+        if let Some(previous) = stack.current().previous
+            && stack.entry_at(previous).accumulator.computed_accumulation
+        {
+            let dirty = stack.current().dirty_piece;
+            let (prev, curr) = stack.get_prev_and_current_accumulators(previous);
+            if let Some(cache) = cache {
+                self.update_accumulator_with_cache(pos, &dirty, curr, prev, cache);
+            } else {
+                self.update_accumulator(pos, &dirty, curr, prev);
+            }
+            return;
+        }
+
+        // 広い FT では複数手の差分より Finny refresh の方が安い。
+        let max_depth = if cfg!(feature = "nnue-effect-bucket") {
+            0
+        } else if L1 >= 1536 {
+            1
+        } else {
+            4
+        };
+        if let Some((source, _)) = stack.find_usable_accumulator(max_depth)
+            && self.forward_update_incremental(pos, stack, source)
+        {
+            return;
+        }
+
+        let current = &mut stack.current_mut().accumulator;
+        if let Some(cache) = cache {
+            self.refresh_accumulator_with_cache(pos, current, cache);
+        } else {
+            self.refresh_accumulator(pos, current);
+        }
+    }
+
     #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
-    pub(super) fn update_with_threat_ancestor(
+    fn update_with_threat_ancestor(
         &self,
         pos: &Position,
         stack: &mut AccumulatorStackLayerStacks<L1>,
@@ -1628,8 +1860,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         acc.computed_score = false;
     }
 
-    /// 複数手分の差分を適用してアキュムレータを更新
-    pub fn forward_update_incremental(
+    fn forward_update_incremental(
         &self,
         pos: &Position,
         stack: &mut AccumulatorStackLayerStacks<L1>,
@@ -1772,6 +2003,15 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
     fn add_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        if let Some(weights) = W::packed(self.rows) {
+            super::ft_packed8::update(weights, None, accumulation, [], [index]);
+            return;
+        }
         let weights = self.weight_row(index);
 
         // AVX-512 BW: 512bit = 32 x i16, L1/32 iterations
@@ -1876,17 +2116,18 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     }
 
     #[inline]
-    fn weight_row(&self, index: usize) -> &[i16] {
+    fn weight_row(&self, index: usize) -> &'a [i16] {
+        let weights = W::unpacked(self.rows);
         let Some(offset) = index.checked_mul(L1) else {
-            feature_index_oob(index, self.weights.len() / L1);
+            feature_index_oob(index, weights.len() / L1);
         };
         let Some(end) = offset.checked_add(L1) else {
-            feature_index_oob(index, self.weights.len() / L1);
+            feature_index_oob(index, weights.len() / L1);
         };
-        if end > self.weights.len() {
-            feature_index_oob(index, self.weights.len() / L1);
+        if end > weights.len() {
+            feature_index_oob(index, weights.len() / L1);
         }
-        &self.weights[offset..end]
+        &weights[offset..end]
     }
 
     #[inline]
@@ -2052,6 +2293,21 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             target_feature = "avx512f",
             target_feature = "avx512bw"
         ))]
+        if let Some(weights) = W::packed(self.rows) {
+            super::ft_packed8::update(
+                weights,
+                Some(source),
+                accumulation,
+                [sub_index],
+                [add_index],
+            );
+            return;
+        }
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
         {
             const { assert!(L1.is_multiple_of(32)) };
             let sub_weights = self.weight_row(sub_index);
@@ -2133,6 +2389,21 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         sub_index1: usize,
         add_index1: usize,
     ) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        if let Some(weights) = W::packed(self.rows) {
+            super::ft_packed8::update(
+                weights,
+                Some(source),
+                accumulation,
+                [sub_index0, sub_index1],
+                [add_index0, add_index1],
+            );
+            return;
+        }
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
@@ -2234,6 +2505,15 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         sub_index: usize,
         add_index: usize,
     ) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        if let Some(weights) = W::packed(self.rows) {
+            super::ft_packed8::update(weights, None, accumulation, [sub_index], [add_index]);
+            return;
+        }
         let sub_weights = self.weight_row(sub_index);
         let add_weights = self.weight_row(add_index);
 
@@ -2357,6 +2637,21 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         sub_index1: usize,
         add_index1: usize,
     ) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        if let Some(weights) = W::packed(self.rows) {
+            super::ft_packed8::update(
+                weights,
+                None,
+                accumulation,
+                [sub_index0, sub_index1],
+                [add_index0, add_index1],
+            );
+            return;
+        }
         let sub_weights0 = self.weight_row(sub_index0);
         let add_weights0 = self.weight_row(add_index0);
         let sub_weights1 = self.weight_row(sub_index1);
@@ -2515,6 +2810,15 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// weights と accumulation は 64 バイトアラインされている前提で aligned load/store を使用。
     #[inline]
     fn sub_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        if let Some(weights) = W::packed(self.rows) {
+            super::ft_packed8::update(weights, None, accumulation, [index], []);
+            return;
+        }
         let weights = self.weight_row(index);
 
         // AVX-512 BW: 512bit = 32 x i16, L1/32 iterations
@@ -2632,6 +2936,36 @@ mod tests {
 
     type TestSpec = HalfKaHmMergedSpec;
     type TestFt = FeatureTransformerLayerStacks<TEST_L1, TestSpec>;
+
+    #[test]
+    fn fixed_width_loaders_handle_width_48_for_compiled_simd() {
+        const WIDTH: usize = 48;
+        type Ft = FeatureTransformerLayerStacks<WIDTH, TestSpec>;
+        let element_count = (1 + TestSpec::DIMENSIONS) * WIDTH;
+        let raw = vec![0; 2 * element_count];
+        let mut compressed = crate::nnue::leb128::LEB128_MAGIC.to_vec();
+        compressed.extend_from_slice(&(element_count as u32).to_le_bytes());
+        compressed.resize(compressed.len() + element_count, 0);
+
+        for result in [
+            Ft::read(&mut raw.as_slice()),
+            Ft::read_leb128(&mut compressed.as_slice()),
+        ] {
+            if cfg!(all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw"
+            )) {
+                let error = result.err().expect("width 48 must be rejected");
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                assert!(error.to_string().contains("multiple of 32, got 48"));
+            } else {
+                let ft = result.unwrap();
+                assert_eq!(ft.piece_ft_storage(), "i16");
+                assert_eq!(ft.piece_weights().len(), TestSpec::DIMENSIONS * WIDTH);
+            }
+        }
+    }
 
     fn make_test_transformer() -> TestFt {
         FeatureTransformerLayerStacks::<TEST_L1, TestSpec> {
@@ -3094,8 +3428,8 @@ mod tests {
             let mut expected = Aligned([0i16; TEST_L1]);
             expected.0.copy_from_slice(&source.0);
             for pair in 0..PAIRS {
-                let sub = ft.weight_row(pair * 2);
-                let add = ft.weight_row(pair * 2 + 1);
+                let sub = ft.unpacked_for_tests().weight_row(pair * 2);
+                let add = ft.unpacked_for_tests().weight_row(pair * 2 + 1);
                 let mut sub_wrapped = false;
                 let mut add_wrapped = false;
                 for (i, value) in expected.0.iter_mut().enumerate() {
@@ -3109,10 +3443,20 @@ mod tests {
 
             let mut actual = Aligned([0x5a5ai16; TEST_L1]);
             match PAIRS {
-                1 => ft.apply_sub_add_fused_from_source(&source.0, &mut actual.0, 0, 1),
-                2 => {
-                    ft.apply_double_sub_add_fused_from_source(&source.0, &mut actual.0, 0, 1, 2, 3)
-                }
+                1 => ft.unpacked_for_tests().apply_sub_add_fused_from_source(
+                    &source.0,
+                    &mut actual.0,
+                    0,
+                    1,
+                ),
+                2 => ft.unpacked_for_tests().apply_double_sub_add_fused_from_source(
+                    &source.0,
+                    &mut actual.0,
+                    0,
+                    1,
+                    2,
+                    3,
+                ),
                 _ => unreachable!(),
             }
             assert_eq!(actual.0, expected.0, "case={case}, pairs={PAIRS}");
@@ -3156,10 +3500,10 @@ mod tests {
             &mut added,
         );
         for index in removed.iter() {
-            ft.sub_weights(accumulation, index);
+            ft.unpacked_for_tests().sub_weights(accumulation, index);
         }
         for index in added.iter() {
-            ft.add_weights(accumulation, index);
+            ft.unpacked_for_tests().add_weights(accumulation, index);
         }
     }
 
@@ -3176,7 +3520,7 @@ mod tests {
                 cache,
                 None,
                 &mut output,
-                &self.weights,
+                self.unpacked_for_tests().rows,
                 removed,
                 added,
             );
@@ -3210,10 +3554,10 @@ mod tests {
         let mut tiled = Aligned(sequential.0);
 
         for index in removed.iter() {
-            ft.sub_weights(&mut sequential.0, index);
+            ft.unpacked_for_tests().sub_weights(&mut sequential.0, index);
         }
         for index in added.iter() {
-            ft.add_weights(&mut sequential.0, index);
+            ft.unpacked_for_tests().add_weights(&mut sequential.0, index);
         }
         ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
 
@@ -3244,7 +3588,7 @@ mod tests {
             let mut sequential = Aligned(init.0);
             let mut tiled = Aligned(init.0);
             for index in removed.iter() {
-                ft.sub_weights(&mut sequential.0, index);
+                ft.unpacked_for_tests().sub_weights(&mut sequential.0, index);
             }
             ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
             assert_eq!(sequential.0, tiled.0);
@@ -3259,7 +3603,7 @@ mod tests {
             let mut sequential = Aligned(init.0);
             let mut tiled = Aligned(init.0);
             for index in added.iter() {
-                ft.add_weights(&mut sequential.0, index);
+                ft.unpacked_for_tests().add_weights(&mut sequential.0, index);
             }
             ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
             assert_eq!(sequential.0, tiled.0);
@@ -3292,10 +3636,10 @@ mod tests {
         let mut tiled = Aligned(sequential.0);
 
         for index in removed.iter() {
-            ft.sub_weights(&mut sequential.0, index);
+            ft.unpacked_for_tests().sub_weights(&mut sequential.0, index);
         }
         for index in added.iter() {
-            ft.add_weights(&mut sequential.0, index);
+            ft.unpacked_for_tests().add_weights(&mut sequential.0, index);
         }
         ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
 
@@ -3348,8 +3692,13 @@ mod tests {
         let mut fast = source;
         let mut from_source = Aligned([123i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::Black, king_sq);
-        assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::Black, king_sq));
-        assert!(ft.try_apply_dirty_piece_fast_from_source(
+        assert!(ft.unpacked_for_tests().try_apply_dirty_piece_fast(
+            &mut fast.0,
+            &dirty_piece,
+            Color::Black,
+            king_sq
+        ));
+        assert!(ft.unpacked_for_tests().try_apply_dirty_piece_fast_from_source(
             &source.0,
             &mut from_source.0,
             &dirty_piece,
@@ -3427,8 +3776,13 @@ mod tests {
         let mut fast = source;
         let mut from_source = Aligned([-321i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::Black, king_sq);
-        assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::Black, king_sq));
-        assert!(ft.try_apply_dirty_piece_fast_from_source(
+        assert!(ft.unpacked_for_tests().try_apply_dirty_piece_fast(
+            &mut fast.0,
+            &dirty_piece,
+            Color::Black,
+            king_sq
+        ));
+        assert!(ft.unpacked_for_tests().try_apply_dirty_piece_fast_from_source(
             &source.0,
             &mut from_source.0,
             &dirty_piece,
@@ -3477,7 +3831,12 @@ mod tests {
         let mut generic = Aligned([5i16; TEST_L1]);
         let mut fast = Aligned([5i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::White, king_sq);
-        assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::White, king_sq));
+        assert!(ft.unpacked_for_tests().try_apply_dirty_piece_fast(
+            &mut fast.0,
+            &dirty_piece,
+            Color::White,
+            king_sq
+        ));
         assert_eq!(generic.0, fast.0);
     }
 
@@ -3541,7 +3900,12 @@ mod tests {
         let mut generic = Aligned([7i16; TEST_L1]);
         let mut fast = Aligned([7i16; TEST_L1]);
         apply_generic(&ft, &mut generic.0, &dirty_piece, Color::White, king_sq);
-        assert!(ft.try_apply_dirty_piece_fast(&mut fast.0, &dirty_piece, Color::White, king_sq));
+        assert!(ft.unpacked_for_tests().try_apply_dirty_piece_fast(
+            &mut fast.0,
+            &dirty_piece,
+            Color::White,
+            king_sq
+        ));
         assert_eq!(generic.0, fast.0);
     }
 
@@ -3558,7 +3922,7 @@ mod tests {
         };
 
         let mut accumulation = Aligned([0i16; TEST_L1]);
-        assert!(!ft.try_apply_dirty_piece_fast(
+        assert!(!ft.unpacked_for_tests().try_apply_dirty_piece_fast(
             &mut accumulation.0,
             &dirty_piece,
             Color::Black,
@@ -3864,7 +4228,12 @@ mod tests {
             ),
         };
         assert!(
-            !ft.try_apply_dirty_piece_fast(&mut acc.0, &dp_king_move, Color::Black, king_sq),
+            !ft.unpacked_for_tests().try_apply_dirty_piece_fast(
+                &mut acc.0,
+                &dp_king_move,
+                Color::Black,
+                king_sq
+            ),
             "HalfKp fast path must reject king BonaPiece move"
         );
 
@@ -3882,7 +4251,12 @@ mod tests {
             ),
         };
         assert!(
-            ft.try_apply_dirty_piece_fast(&mut acc.0, &dp_pawn, Color::Black, king_sq),
+            ft.unpacked_for_tests().try_apply_dirty_piece_fast(
+                &mut acc.0,
+                &dp_pawn,
+                Color::Black,
+                king_sq
+            ),
             "HalfKp fast path must accept non-king BonaPiece move"
         );
     }

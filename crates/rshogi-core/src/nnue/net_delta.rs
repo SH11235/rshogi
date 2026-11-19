@@ -290,6 +290,16 @@ pub mod test_utils {
     pub enum SyntheticFtValues {
         /// 1 byte signed LEB128 に収まる正値。
         SingleBytePositive,
+        /// 駒の重みはすべて 1 byte signed LEB128 に収まる偶数。
+        #[cfg(any(
+            feature = "nnue-runtime-dimensions",
+            all(
+                feature = "prepacked-nnue",
+                feature = "nnue-psqt",
+                feature = "nnue-threat"
+            )
+        ))]
+        SingleByteEven,
         /// 負数、多 byte 値、`i16` 境界値を含む。
         SignedBoundaries,
     }
@@ -406,6 +416,21 @@ pub mod test_utils {
         let mut ft_value = |index: usize, bias: bool| match ft.values {
             SyntheticFtValues::SingleBytePositive if bias => rng.range(8, 15) as i16,
             SyntheticFtValues::SingleBytePositive => rng.range(1, 2) as i16,
+            #[cfg(any(
+                feature = "nnue-runtime-dimensions",
+                all(
+                    feature = "prepacked-nnue",
+                    feature = "nnue-psqt",
+                    feature = "nnue-threat"
+                )
+            ))]
+            SyntheticFtValues::SingleByteEven => {
+                if bias {
+                    41
+                } else {
+                    2 * (rng.range(0, 30) as i16 - 15)
+                }
+            }
             SyntheticFtValues::SignedBoundaries => {
                 signed_boundaries[index % signed_boundaries.len()]
             }

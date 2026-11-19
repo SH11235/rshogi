@@ -650,9 +650,11 @@ mod tests {
             assert_eq!(original.fv_scale, packed.fv_scale);
             assert_eq!(original.num_buckets, packed.num_buckets);
             assert_eq!(original.feature_transformer.biases.0, packed.feature_transformer.biases.0);
-            assert_eq!(
-                &*original.feature_transformer.weights,
-                &*packed.feature_transformer.weights
+            assert!(
+                original
+                    .feature_transformer
+                    .piece_weights()
+                    .eq(packed.feature_transformer.piece_weights())
             );
             for (a, b) in original.layer_stacks.buckets.iter().zip(&packed.layer_stacks.buckets) {
                 assert_eq!(a.l1().biases, b.l1().biases);
@@ -902,20 +904,47 @@ mod tests {
 #[cfg(all(test, feature = "nnue-psqt", feature = "nnue-threat"))]
 mod extension_tests {
     use super::*;
-    use crate::nnue::constants::HALFKP_DIMENSIONS;
-    use crate::nnue::ls_feature_spec::HalfKpSpec;
-    use crate::nnue::net_delta::test_utils::{SyntheticFtEncoding, build_synthetic_layer_stacks};
+    use crate::nnue::ls_feature_spec::{HalfKaHmMergedSpec, LsFeatureSpec};
+    use crate::nnue::net_delta::test_utils::{
+        SyntheticFtConfig, SyntheticFtEncoding, SyntheticFtValues,
+        build_synthetic_layer_stacks_with_ft_values,
+    };
     use crate::nnue::network_layer_stacks::NetworkLayerStacks;
+    use crate::nnue::threat_width;
+
     #[test]
-    fn packed_psqt_and_threat_match_standard_loader() {
-        type Net = NetworkLayerStacks<32, 8, 14, 32, HalfKpSpec>;
+    fn prepacked_preserves_piece_ft_psqt_and_threat() {
+        const L1: usize = if cfg!(feature = "threat-width-512") {
+            768
+        } else {
+            32
+        };
+        let width = threat_width::width(L1);
+        type Net = NetworkLayerStacks<L1, 8, 14, 32, HalfKaHmMergedSpec>;
         let fixture = super::tests::Fixture::new(SyntheticFtEncoding::Leb128Combined);
-        let base = build_synthetic_layer_stacks("HalfKP", HALFKP_DIMENSIONS, 32, 8, 32, 2).bytes;
+        let dimensions = HalfKaHmMergedSpec::DIMENSIONS;
+        let base = build_synthetic_layer_stacks_with_ft_values(
+            "HalfKaHmMerged",
+            dimensions,
+            L1,
+            8,
+            32,
+            2,
+            SyntheticFtConfig {
+                encoding: SyntheticFtEncoding::Leb128Combined,
+                values: SyntheticFtValues::SingleByteEven,
+            },
+        )
+        .bytes;
         let layout = LayerStacksBinLayout::from_bytes(&base).unwrap();
         let threat_dims = crate::nnue::threat_features::THREAT_DIMENSIONS;
         let profile = crate::nnue::threat_exclusion::THREAT_PROFILE_ID;
-        let arch =
+        let mut arch =
             format!("{},PSQT=2,Threat={threat_dims},ThreatProfile={profile}", layout.architecture);
+        if width != L1 {
+            use std::fmt::Write;
+            write!(arch, ",ThreatWidth={width}").unwrap();
+        }
         let old_header_end = 12 + layout.architecture.len();
         let mut bytes = base[..8].to_vec();
         bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
@@ -924,17 +953,36 @@ mod extension_tests {
         for value in [-1234i32, 5678] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        for index in 0..HALFKP_DIMENSIONS * 2 {
+        for index in 0..dimensions * 2 {
             bytes.extend_from_slice(&((index as i32 % 257) - 128).to_le_bytes());
         }
         bytes.extend_from_slice(&profile.to_le_bytes());
-        bytes.extend((0..threat_dims * 32).map(|index| ((index % 255) as i16 - 127) as u8));
+        bytes.extend((0..threat_dims * width).map(|index| ((index % 255) as i16 - 127) as u8));
         bytes.extend_from_slice(&base[layout.feature_transformer.weights.end..]);
-        std::fs::write(&fixture.source, &bytes).unwrap();
+        drop(base);
+        std::fs::write(&fixture.source, bytes).unwrap();
         std::fs::remove_file(&fixture.packed).unwrap();
         pack_layer_stacks_with_layout(&fixture.source, &fixture.packed, FcLayout::Native).unwrap();
         let original = Net::load(&fixture.source).unwrap();
         let packed = Net::load(&fixture.packed).unwrap();
+        let expected_storage = if cfg!(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        )) {
+            "int8 x 2"
+        } else {
+            "i16"
+        };
+        for net in [&original, &packed] {
+            assert_eq!(net.feature_transformer.piece_ft_storage(), expected_storage);
+        }
+        assert!(
+            original
+                .feature_transformer
+                .piece_weights()
+                .eq(packed.feature_transformer.piece_weights())
+        );
         assert_eq!(
             original.feature_transformer.psqt_biases(),
             packed.feature_transformer.psqt_biases()

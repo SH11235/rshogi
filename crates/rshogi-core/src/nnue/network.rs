@@ -1080,6 +1080,17 @@ impl NNUENetwork {
         }
     }
 
+    /// LayerStacks ネットの駒 FT の格納形式を返す。
+    pub fn layer_stack_piece_ft_storage(&self) -> Option<&'static str> {
+        match self {
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            Self::DynamicLayerStacks(network) => Some(network.piece_ft_storage()),
+            #[cfg(feature = "layerstack-arch")]
+            Self::LayerStacks(network) => Some(network.piece_ft_storage()),
+            _ => None,
+        }
+    }
+
     /// LayerStacks ネットに記録された bucket spec を返す。
     pub fn layer_stack_bucket_spec(&self) -> Option<super::BucketSpec> {
         match self {
