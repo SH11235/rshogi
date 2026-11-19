@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use rshogi_core::nnue::{
-    BucketSpec, LayerStackBucketMode, LayerStackRoutingError,
+    LayerStackBucketMode, LayerStackBucketSpec, LayerStackRoutingError,
     compute_layer_stack_kingrank9_bucket_index, compute_progresskpabs_q16_sum,
     compute_progresskpabs_sum, configure_layer_stack_routing, get_layer_stack_bucket_mode,
     get_layer_stack_progress_kpabs_q16_weights, get_layer_stack_progress_kpabs_weights,
@@ -163,7 +163,7 @@ impl NativeRouting {
 /// 係数は生成時に一度だけ取得し、評価ループ中は global を読まない。
 pub enum LayerStackBucketer {
     /// ネットに記録された spec に従う。
-    Spec(BucketSpec),
+    Spec(LayerStackBucketSpec),
     /// 進行度方式の routing bucket 数 1。係数を参照せず常に bucket 0。
     Single,
     KingRank9 {

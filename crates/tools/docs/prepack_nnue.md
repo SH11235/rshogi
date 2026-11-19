@@ -1,5 +1,7 @@
 # prepack_nnue
 
+LayerStacks ネットは最大 64 bucket（PSQT 付きは最大 32）に対応します。
+
 LayerStacks `.bin` の FT を事前展開し、FT / PSQT / Threat / FC の重みを64バイト整列した
 読み取り専用配列として保存する。元の `.bin` は変更しない。
 

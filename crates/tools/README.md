@@ -72,7 +72,7 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 
 [`eval_sfens`](docs/eval_sfens.md)、[`nnue_saturation`](docs/nnue_saturation.md)、
 [`bench_nnue_eval`](docs/bench_nnue_eval.md) は、ネットに `ls_bucket=` がある場合に
-その routing を自動選択します。
+その routing を自動選択します。LayerStacks は最大 64 bucket（PSQT 付きは最大 32）、`ls_bucket=` は最大 3 軸です。
 
 ## クイックスタート
 

@@ -16,8 +16,13 @@ fn prepared() -> SearchEvaluator {
     feature = "nnue-runtime-dimensions",
     all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
-        feature = "ft-halfka_hm_merged",
+        any(
+            all(
+                feature = "layerstacks-1536x16x32",
+                any(feature = "ft-halfka_hm_merged", feature = "ft-halfka_hm_split")
+            ),
+            all(feature = "layerstacks-1024x16x32", feature = "ft-halfka_hm_merged")
+        ),
         not(feature = "nnue-effect-bucket")
     )
 ))]
@@ -26,18 +31,27 @@ fn spec_buckets_match_full_refresh_after_each_move_and_undo() {
     const HEAD_STEP: i32 = 1 << 20;
     let l1 = if cfg!(feature = "nnue-runtime-dimensions") {
         32
-    } else {
+    } else if cfg!(feature = "layerstacks-1536x16x32") {
         1536
+    } else {
+        1024
     };
+    let (feature_name, dimensions) =
+        if cfg!(any(feature = "nnue-runtime-dimensions", feature = "ft-halfka_hm_merged")) {
+            ("HalfKaHmMerged", nnue::HALFKA_HM_DIMENSIONS)
+        } else {
+            ("HalfKaHmSplit", nnue::HALFKA_HM_SPLIT_DIMENSIONS)
+        };
     for (spec_text, buckets, max_visited, psqt) in [
         ("ownking:2/3/7+oppking:2/3/7", 16, 13, false),
         ("handmajor4+ownking:2/3/4/5/6/7/8", 32, 31, false),
+        ("handmajor4+ownking:2/3/7+oppking:2/3/7", 64, 60, false),
         #[cfg(feature = "nnue-psqt")]
         ("handmajor4+ownking:2/3/4/5/6/7/8", 32, 31, true),
     ] {
         let mut model = nnue::net_delta::test_utils::build_synthetic_layer_stacks(
-            "HalfKaHmMerged",
-            nnue::HALFKA_HM_DIMENSIONS,
+            feature_name,
+            dimensions,
             l1,
             16,
             32,
@@ -56,12 +70,12 @@ fn spec_buckets_match_full_refresh_after_each_move_and_undo() {
             (arch.len() as u32).to_le_bytes().into_iter().chain(arch.bytes()),
         );
         let bytes = if psqt {
-            with_auxiliary_weights(model.bytes, nnue::HALFKA_HM_DIMENSIONS, buckets, false)
+            with_auxiliary_weights(model.bytes, dimensions, buckets, false)
         } else {
             model.bytes
         };
         let net = NNUENetwork::from_bytes(&bytes).unwrap();
-        let spec = spec_text.parse::<nnue::BucketSpec>().unwrap();
+        let spec = spec_text.parse::<nnue::LayerStackBucketSpec>().unwrap();
         assert_eq!(net.layer_stack_bucket_spec(), Some(spec));
         let mut incremental = SearchEvaluator::from_network(&net);
         #[cfg(feature = "nnue-runtime-dimensions")]

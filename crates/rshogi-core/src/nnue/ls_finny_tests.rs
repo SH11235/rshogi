@@ -35,7 +35,7 @@ fn check_refresh<const L1: usize, FT: LsFeatureSpec>(
                 perspective,
                 &mut actual.0,
                 #[cfg(feature = "nnue-psqt")]
-                &mut [0; MAX_LAYER_STACK_BUCKETS],
+                &mut [0; MAX_LAYER_STACK_PSQT_BUCKETS],
                 cache,
             );
             assert_eq!(actual.0, expected, "{perspective:?}");

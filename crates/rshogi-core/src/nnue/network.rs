@@ -51,8 +51,6 @@ use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Value};
-#[cfg(feature = "nnue-progress-diff")]
-use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::mem::size_of;
@@ -192,45 +190,20 @@ pub fn load_progress_coeff_kpabs_from_bytes(bytes: &[u8]) -> Result<Box<[f32]>, 
     Ok(weights.into_boxed_slice())
 }
 
-/// `sigmoid(x) * N = k` となる x の閾値 (k = 1..N-1) を N ごとに保持するテーブル。
-///
-/// `OnceLock` で N 値ごとに lazy 初期化し、`ln(k / (N-k))` を pre-compute する。
-/// ホットパス (`progress_sum_to_bucket`) では slice を取って `partition_point`
-/// で `floor(sigmoid(sum) * N).clamp(0, N-1)` を求める。`t_k = ln(k / (N-k))` は `sigmoid(t_k) = k/N`
-/// を満たすので、`sum >= t_k` となる k の個数がちょうど `floor(sigmoid(sum) * N)` になる
-/// (`sum = t_k` の境界ではどちらも k、`sum = +∞` ではどちらも N-1)。
-/// この式は、学習側の bucket の式 `floor(p * N).clamp(0, N-1)` と一致させる必要がある。
-///
-/// 配列添字 N (`1..=MAX_LAYER_STACK_BUCKETS`) ごとに `OnceLock<Box<[f32]>>`。
-/// 添字 0 は使われない placeholder。
+// ターゲットの f32::ln の丸めを保つため、routing 設定時に閾値を計算する。
 static PROGRESS_BUCKET_THRESHOLDS: [OnceLock<Box<[f32]>>; MAX_LAYER_STACK_BUCKETS + 1] =
     [const { OnceLock::new() }; MAX_LAYER_STACK_BUCKETS + 1];
 
-/// N bucket 用の閾値 slice を取得 (必要なら初期化)。
-fn layer_stack_progress_thresholds(num_buckets: usize) -> &'static [f32] {
-    debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
-    PROGRESS_BUCKET_THRESHOLDS[num_buckets]
-        .get_or_init(|| {
-            // N - 1 個の閾値 (N = 1 なら空配列)
-            let mut v = Vec::with_capacity(num_buckets.saturating_sub(1));
-            let n_f = num_buckets as f32;
-            for k in 1..num_buckets {
-                // t_k = ln(k / (N - k)), sigmoid(t_k) = k / N
-                v.push(((k as f32) / (n_f - k as f32)).ln());
-            }
-            v.into_boxed_slice()
-        })
-        .as_ref()
+fn progress_thresholds(num_buckets: usize) -> impl Iterator<Item = f32> {
+    let n = num_buckets as f32;
+    (1..num_buckets).map(move |k| ((k as f32) / (n - k as f32)).ln())
 }
 
-// progresskpabs の差分計算済み bucket index キャッシュ（スレッドローカル）
-//
-// `update_and_evaluate_layer_stacks` で差分計算した結果を格納し、
-// `compute_layer_stack_progresskpabs_bucket_index` 内で消費する。
-// 一度消費されると None にリセットされる（1回限り）。
-#[cfg(feature = "nnue-progress-diff")]
-thread_local! {
-    static CACHED_PROGRESS_BUCKET: Cell<Option<usize>> = const { Cell::new(None) };
+#[cold]
+fn unconfigured_progress_sum_to_bucket(sum: f32, num_buckets: usize) -> usize {
+    progress_thresholds(num_buckets)
+        .take_while(|&threshold| sum >= threshold)
+        .count()
 }
 
 /// LayerStacks bucket mode のグローバル設定
@@ -294,7 +267,7 @@ pub(crate) fn set_layer_stack_bucket_mode(mode: LayerStackBucketMode) {
 
 /// LayerStacks progresskpabs の推論 bucket 数を取得する。
 pub fn get_layer_stack_progress_buckets() -> Option<usize> {
-    let configured = LAYER_STACK_PROGRESS_BUCKETS.load(Ordering::Relaxed);
+    let configured = LAYER_STACK_PROGRESS_BUCKETS.load(Ordering::Acquire);
     (configured != 0).then_some(configured)
 }
 
@@ -309,7 +282,11 @@ pub fn configure_layer_stack_routing(
 ) -> Result<(), String> {
     validate_layer_stack_routing_configuration(mode, stored_bucket_count, progress_bucket_count)?;
     let configured_progress_buckets = progress_bucket_count.unwrap_or(0);
-    LAYER_STACK_PROGRESS_BUCKETS.store(configured_progress_buckets, Ordering::Relaxed);
+    if mode == LayerStackBucketMode::ProgressKPAbs {
+        PROGRESS_BUCKET_THRESHOLDS[configured_progress_buckets]
+            .get_or_init(|| progress_thresholds(configured_progress_buckets).collect());
+    }
+    LAYER_STACK_PROGRESS_BUCKETS.store(configured_progress_buckets, Ordering::Release);
     set_layer_stack_bucket_mode(mode);
     Ok(())
 }
@@ -1092,10 +1069,10 @@ impl NNUENetwork {
     }
 
     /// LayerStacks ネットに記録された bucket spec を返す。
-    pub fn layer_stack_bucket_spec(&self) -> Option<super::BucketSpec> {
+    pub fn layer_stack_bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
         match self {
             #[cfg(feature = "nnue-runtime-dimensions")]
-            Self::DynamicLayerStacks(network) => network.bucket_spec,
+            Self::DynamicLayerStacks(network) => network.bucket_spec(),
             #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(network) => network.bucket_spec(),
             _ => None,
@@ -1459,21 +1436,13 @@ pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode
 
 /// progresskpabs 重みに基づいて LayerStacks bucket index `[0, num_buckets)` を計算
 ///
-/// `CACHED_PROGRESS_BUCKET` にキャッシュされた値がある場合はそちらを消費する。
 /// `num_buckets` は学習時と一致する、明示設定済みの routing bucket 数を渡す。
-/// キャッシュは active net 1 つの不変条件のもとで作成・消費される。
 pub fn compute_layer_stack_progresskpabs_bucket_index(
     pos: &Position,
     _side_to_move: Color,
     weights: &[f32],
     num_buckets: usize,
 ) -> usize {
-    // 差分計算済みキャッシュがあれば消費して返す
-    #[cfg(feature = "nnue-progress-diff")]
-    if let Some(bucket) = CACHED_PROGRESS_BUCKET.with(|c| c.replace(None)) {
-        return bucket;
-    }
-    // フォールバック: 全駒スキャン
     let sum = compute_progresskpabs_sum(pos, weights);
     progress_sum_to_bucket(sum, num_buckets)
 }
@@ -1605,12 +1574,14 @@ pub fn update_progresskpabs_sum_diff(
 ///
 /// 戻り値は `[0, num_buckets)`。
 /// `floor(sigmoid(sum) × num_buckets).clamp(0, num_buckets - 1)` と等価。
-/// 閾値テーブルは N ごとに `OnceLock` で lazy 構築される
-/// (等価性の根拠は `layer_stack_progress_thresholds` の doc)。
+/// `sum` 以下の閾値 `ln(k / (N - k))` を数える。routing 設定時に閾値を用意する。
 #[inline]
 pub fn progress_sum_to_bucket(sum: f32, num_buckets: usize) -> usize {
-    let thresholds = layer_stack_progress_thresholds(num_buckets);
-    thresholds.partition_point(|&t| sum >= t)
+    debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
+    match PROGRESS_BUCKET_THRESHOLDS[num_buckets].get() {
+        Some(thresholds) => thresholds.partition_point(|&threshold| sum >= threshold),
+        None => unconfigured_progress_sum_to_bucket(sum, num_buckets),
+    }
 }
 
 /// NNUEを初期化（バージョン自動判別）
@@ -1903,7 +1874,7 @@ pub fn get_network() -> Option<Arc<NNUENetwork>> {
 /// AccumulatorCaches（Finny Tables）を使用して refresh を高速化する。
 ///
 /// `nnue-progress-diff` feature 有効時は progresskpabs モードで差分更新を試み、
-/// 結果を `CACHED_PROGRESS_BUCKET` に格納して bucket 選択時の全駒スキャンを回避する。
+/// 得られた bucket をそのまま評価に渡す。
 /// Threat なし環境では +3〜4% NPS、Threat あり環境では cache 圧迫で退行するため
 /// 運用モデルに応じて明示指定する。
 #[cfg(feature = "layerstack-arch")]
@@ -1916,56 +1887,8 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 ) -> Value {
     // アキュムレータの更新
     net.update_accumulator(pos, stack, acc_cache);
-    if let Some(spec) = net.bucket_spec() {
-        return net.evaluate_with_bucket(pos, stack, spec.bucket(pos));
-    }
-
-    // progresskpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
-    #[cfg(feature = "nnue-progress-diff")]
-    if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::ProgressKPAbs) {
-        let num_buckets = get_layer_stack_progress_buckets()
-            .expect("LayerStacks progress routing is not configured");
-        assert!(
-            num_buckets <= net.num_buckets(),
-            "LayerStacks progress routing uses {num_buckets} buckets, but the network stores only {}",
-            net.num_buckets()
-        );
-        let bucket = match stack {
-            #[cfg(feature = "layerstacks-1536x16x32")]
-            LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-1536x32x32")]
-            LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-768x16x32")]
-            LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-768x8x32")]
-            LayerStacksAccStack::L768x8x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-512x16x32")]
-            LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-1024x16x32")]
-            LayerStacksAccStack::L1024x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-3072x16x32")]
-            LayerStacksAccStack::L3072x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-2304x16x64")]
-            LayerStacksAccStack::L2304x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-3072x16x64")]
-            LayerStacksAccStack::L3072x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "layerstacks-1536x16x64")]
-            LayerStacksAccStack::L1536x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64"
-            )))]
-            _ => unreachable!("no LayerStacks variant enabled"),
-        };
-        CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
+    if let Some(bucket) = net.bucket_routing().bucket(pos) {
+        return net.evaluate_with_bucket(pos, stack, bucket);
     }
 
     let bucket = match get_layer_stack_bucket_mode() {
@@ -1980,17 +1903,55 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
             stack.ensure_progress_q16_bucket(pos, net.num_buckets())
         }
         LayerStackBucketMode::ProgressKPAbs => {
-            let routing_buckets = get_layer_stack_progress_buckets()
+            let num_buckets = get_layer_stack_progress_buckets()
                 .expect("LayerStacks progress routing is not configured");
+            let stored_buckets = net.num_buckets();
             assert!(
-                routing_buckets <= net.num_buckets(),
-                "progress routing exceeds stored buckets"
+                num_buckets <= stored_buckets,
+                "LayerStacks progress routing uses {num_buckets} buckets, but the network stores only {stored_buckets}"
             );
+            #[cfg(feature = "nnue-progress-diff")]
+            match stack {
+                #[cfg(feature = "layerstacks-1536x16x32")]
+                LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-1536x32x32")]
+                LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-768x16x32")]
+                LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-768x8x32")]
+                LayerStacksAccStack::L768x8x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-512x16x32")]
+                LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-1024x16x32")]
+                LayerStacksAccStack::L1024x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-3072x16x32")]
+                LayerStacksAccStack::L3072x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-2304x16x64")]
+                LayerStacksAccStack::L2304x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-3072x16x64")]
+                LayerStacksAccStack::L3072x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(feature = "layerstacks-1536x16x64")]
+                LayerStacksAccStack::L1536x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(not(any(
+                    feature = "layerstacks-1536x16x32",
+                    feature = "layerstacks-1536x32x32",
+                    feature = "layerstacks-768x16x32",
+                    feature = "layerstacks-768x8x32",
+                    feature = "layerstacks-512x16x32",
+                    feature = "layerstacks-1024x16x32",
+                    feature = "layerstacks-3072x16x32",
+                    feature = "layerstacks-2304x16x64",
+                    feature = "layerstacks-3072x16x64",
+                    feature = "layerstacks-1536x16x64"
+                )))]
+                _ => unreachable!("no LayerStacks variant enabled"),
+            }
+            #[cfg(not(feature = "nnue-progress-diff"))]
             compute_layer_stack_progresskpabs_bucket_index(
                 pos,
                 pos.side_to_move(),
                 stack.progress_kpabs_weights(),
-                routing_buckets,
+                num_buckets,
             )
         }
     };
@@ -3443,7 +3404,19 @@ mod tests {
             10.0,
             f32::INFINITY,
         ];
-        for &n in &[1usize, 2, 3, 4, 5, 8, 9, 12, MAX_LAYER_STACK_BUCKETS] {
+        for &n in &[
+            1usize,
+            2,
+            3,
+            4,
+            5,
+            8,
+            9,
+            12,
+            16,
+            32,
+            MAX_LAYER_STACK_BUCKETS,
+        ] {
             for &sum in &sums {
                 let want = sigmoid_bucket(sum, n);
                 let got = progress_sum_to_bucket(sum, n);
@@ -3465,6 +3438,20 @@ mod tests {
     }
 
     #[test]
+    fn progresskpabs_routing_prepares_wide_thresholds() {
+        let _guard = layer_stack_routing_test_guard();
+        for (n, thresholds) in PROGRESS_BUCKET_THRESHOLDS.iter().enumerate().skip(33) {
+            configure_layer_stack_routing(LayerStackBucketMode::ProgressKPAbs, n, Some(n)).unwrap();
+            let thresholds = thresholds.get().unwrap();
+            assert_eq!(thresholds.len(), n - 1);
+            for (k, &threshold) in thresholds.iter().enumerate() {
+                assert_eq!(progress_sum_to_bucket(threshold, n), k + 1);
+            }
+        }
+        reset_layer_stack_progress_buckets();
+    }
+
+    #[test]
     fn test_progress_sum_to_bucket_extremes() {
         for n in 1..=MAX_LAYER_STACK_BUCKETS {
             assert_eq!(progress_sum_to_bucket(f32::NEG_INFINITY, n), 0);
@@ -3481,27 +3468,84 @@ mod tests {
     /// `num_buckets` 検証や override 分岐の reject 経路を unit test するために、
     /// FT/PSQT/LayerStack block を含まないヘッダだけの buffer を返す。
     /// load 側は header 検証で reject する想定なので、それ以降の block は不要。
-    #[cfg(feature = "layerstack-arch")]
-    fn build_num_buckets_header(num_buckets: u32) -> Vec<u8> {
+    #[cfg(any(feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
+    fn build_num_buckets_header_with_arch_suffix(num_buckets: u32, suffix: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
-        let (l1, l3) = if cfg!(feature = "layerstacks-2304x16x64") {
-            (2304, 64)
-        } else if cfg!(feature = "layerstacks-3072x16x64") {
-            (3072, 64)
-        } else if cfg!(feature = "layerstacks-1536x16x64") {
-            (1536, 64)
-        } else {
-            (1536, 32)
-        };
+        let (l1, l2, l3) = [
+            (cfg!(feature = "layerstacks-1536x16x32"), (1536, 16, 32)),
+            (cfg!(feature = "layerstacks-1536x32x32"), (1536, 32, 32)),
+            (cfg!(feature = "layerstacks-768x16x32"), (768, 16, 32)),
+            (cfg!(feature = "layerstacks-768x8x32"), (768, 8, 32)),
+            (cfg!(feature = "layerstacks-512x16x32"), (512, 16, 32)),
+            (cfg!(feature = "layerstacks-1024x16x32"), (1024, 16, 32)),
+            (cfg!(feature = "layerstacks-3072x16x32"), (3072, 16, 32)),
+            (cfg!(feature = "layerstacks-2304x16x64"), (2304, 16, 64)),
+            (cfg!(feature = "layerstacks-3072x16x64"), (3072, 16, 64)),
+            (cfg!(feature = "layerstacks-1536x16x64"), (1536, 16, 64)),
+        ]
+        .into_iter()
+        .find_map(|(enabled, dims)| enabled.then_some(dims))
+        .unwrap_or((1536, 16, 32));
+        let (ft, input) = [
+            (cfg!(feature = "ft-halfka_hm_merged"), ("HalfKaHmMerged", 73305)),
+            (cfg!(feature = "ft-halfka_hm_split"), ("HalfKaHmSplit", 76950)),
+            (cfg!(feature = "ft-halfka_merged"), ("HalfKaMerged", 131949)),
+            (cfg!(feature = "ft-halfka_split"), ("HalfKaSplit", 138510)),
+            (cfg!(feature = "ft-halfkp"), ("HalfKP", 125388)),
+        ]
+        .into_iter()
+        .find_map(|(enabled, ft)| enabled.then_some(ft))
+        .unwrap_or(("HalfKaHmMerged", 73305));
         let arch = format!(
-            "Features=HalfKaHmMerged(Friend)[73305->{l1}x2],LayerStacks,l2=16,l3={l3},FV_SCALE=28"
+            "Features={ft}(Friend)[{input}->{l1}x2],LayerStacks,l2={l2},l3={l3},FV_SCALE=28{suffix}"
         );
         bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
         bytes.extend_from_slice(arch.as_bytes());
         bytes.extend_from_slice(&num_buckets.to_le_bytes());
         bytes
+    }
+
+    #[cfg(any(feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
+    fn build_num_buckets_header(num_buckets: u32) -> Vec<u8> {
+        build_num_buckets_header_with_arch_suffix(num_buckets, "")
+    }
+
+    #[cfg(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "layerstack-arch", not(feature = "nnue-effect-bucket"))
+    ))]
+    #[test]
+    fn layer_stacks_rejects_psqt_above_32_buckets() {
+        for n in [33, 64] {
+            let bytes = build_num_buckets_header_with_arch_suffix(n, &format!(",PSQT={n}"));
+            let message = "LayerStacks nets with PSQT support at most 32 buckets";
+            let Err(err) = NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes),
+                NNUEArchitectureOverride::Auto,
+            ) else {
+                panic!("PSQT with {n} buckets must be rejected");
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(err.to_string(), message);
+            assert_eq!(
+                super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&bytes)
+                    .unwrap_err()
+                    .to_string(),
+                message
+            );
+
+            let bytes = build_num_buckets_header(n);
+            let Err(err) = NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes),
+                NNUEArchitectureOverride::LayerStacksPSQT,
+            ) else {
+                panic!("forced PSQT with {n} buckets must be rejected");
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(err.to_string(), message);
+        }
     }
 
     #[cfg(feature = "nnue-runtime-dimensions")]

@@ -384,6 +384,14 @@ fn validated_bucket<'a>(
         .ok_or_else(|| invalid_binary("validated bucket is missing from layout"))
 }
 
+pub(super) fn validate_psqt_bucket_count(num_buckets: usize) -> io::Result<()> {
+    let max = super::constants::MAX_LAYER_STACK_PSQT_BUCKETS;
+    if num_buckets > max {
+        return Err(invalid(format!("LayerStacks nets with PSQT support at most {max} buckets")));
+    }
+    Ok(())
+}
+
 impl LayerStacksBinLayout {
     /// byte slice を走査し、LayerStacks の各 byte 範囲を返す。
     ///
@@ -437,7 +445,11 @@ impl LayerStacksBinLayout {
             )));
         }
 
-        super::BucketSpec::from_arch(&architecture, num_buckets)?;
+        let has_psqt = architecture.contains("PSQT=");
+        if has_psqt {
+            validate_psqt_bucket_count(num_buckets)?;
+        }
+        super::LayerStackBucketSpec::from_arch(&architecture, num_buckets)?;
         let (l1, l2, l3) = parse_arch_dimensions(&architecture);
         validate_layer_stacks_dimensions(l1, l2, l3).map_err(invalid)?;
         let threat_dimensions = validate_layer_stacks_architecture_header(&architecture)
@@ -448,7 +460,7 @@ impl LayerStacksBinLayout {
         let ft_hash = cursor.take(4, "FT hash")?;
         let (feature_transformer, ft_biases) = parse_leb128_ft(&mut cursor, ft_hash, l1)?;
 
-        let psqt = if architecture.contains("PSQT=") {
+        let psqt = if has_psqt {
             Some(TensorBinLayout {
                 biases: cursor.take_count(num_buckets, 4, "PSQT biases")?,
                 weights: cursor.take_count(
