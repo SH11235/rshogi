@@ -272,3 +272,21 @@ fn terminal_readings_distinguish_mate_no_legal_declaration_and_empty_read() {
         assert_eq!(trace.reason, reason);
     }
 }
+
+#[test]
+fn direct_game_move_at_the_level_cap_reports_cap() {
+    let (_dir, args, keys) = completed(10);
+    let report = Report::load(&args).unwrap();
+    let mv = report.readings[&keys[4]].lines()[0].mv.clone();
+    let next = child(&keys[4], &mv).unwrap();
+    let (_, trace) = report
+        .trace_game_move(
+            &report.propagation().unwrap(),
+            &keys[4],
+            &mv,
+            &next,
+            &BTreeSet::from([keys[4].clone()]),
+        )
+        .unwrap();
+    assert_eq!((trace.reason, trace.key, trace.level), (Reason::Cap, keys[4].clone(), Some(4)));
+}

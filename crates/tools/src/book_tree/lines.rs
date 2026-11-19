@@ -425,6 +425,8 @@ impl Report {
                 Some(source_level),
                 Some(black(key, cp)),
             )
+        } else if source_level >= self.limits.cap {
+            (raw_value, Reason::Cap, key, Some(source_level), raw_value)
         } else {
             let reason = if reading.is_some() {
                 Reason::Unexpanded
