@@ -50,6 +50,9 @@ struct Status {
     draw_white: Option<i32>,
 }
 
+/// 実戦手の追跡の使い回しで覚えておく件数の上限。
+const TRACE_CACHE_LIMIT: usize = 4096;
+
 struct Limits {
     depth: usize,
     cap: usize,
@@ -408,7 +411,12 @@ impl Report<'_> {
             return Ok(result.clone());
         }
         let result = self.trace_game_move_uncached(propagation, key, mv, next, path)?;
-        self.traces.borrow_mut().insert(cache_key, result.clone());
+        let mut traces = self.traces.borrow_mut();
+        // 鍵は祖先の手順を丸ごと持つので、実戦の手順が多い入力でメモリが増え続けないよう上限で捨てる。
+        if traces.len() >= TRACE_CACHE_LIMIT {
+            traces.clear();
+        }
+        traces.insert(cache_key, result.clone());
         Ok(result)
     }
 
