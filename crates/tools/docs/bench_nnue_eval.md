@@ -1,5 +1,7 @@
 # bench_nnue_eval
 
+LayerStacks ネットは最大 64 bucket（PSQT 付きは最大 32）に対応します。`ls_bucket=` は最大 3 軸です。
+
 LayerStacks の bucket mode（`progresskpabsq16` を含む）と progress 係数の保持・再読込みは [routing 対応表](nnue-routing.md) を参照してください。
 
 NNUE の推論処理を ns/op で計測します。探索 NPS や棋力の測定ではありません。

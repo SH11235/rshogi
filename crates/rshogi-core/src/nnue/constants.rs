@@ -159,7 +159,10 @@ pub const NNUE_PYTORCH_L3: usize = 32;
 pub const DEFAULT_NUM_BUCKETS: usize = 9;
 
 /// tatara の出力形式に合わせた LayerStack bucket 数の上限。
-pub const MAX_LAYER_STACK_BUCKETS: usize = 32;
+pub const MAX_LAYER_STACK_BUCKETS: usize = 64;
+
+/// PSQT の固定長アキュムレータに格納できる LayerStacks bucket 数。
+pub const MAX_LAYER_STACK_PSQT_BUCKETS: usize = 32;
 
 /// LayerStacks 16x32 バリアントの L1層出力次元数（main 15 + skip 1 = 16）
 pub const LAYER_STACK_16X32_L1_OUT: usize = LAYER_STACK_16X32_MAIN_DIM + 1; // 16

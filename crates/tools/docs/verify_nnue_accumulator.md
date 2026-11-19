@@ -1,5 +1,7 @@
 # verify_nnue_accumulator
 
+LayerStacks ネットは最大 64 bucket（PSQT 付きは最大 32）に対応します。
+
 LayerStacks の accumulator 更新を refresh と照合します。
 使用可能な引数は `verify_nnue_accumulator --help` を参照してください。
 

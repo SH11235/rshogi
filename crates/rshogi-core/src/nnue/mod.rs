@@ -104,7 +104,7 @@ pub use bona_piece_halfka_hm_merged::{
     BonaPieceHalfKaHmMerged, E_KING, F_KING, FE_HAND_END, FE_OLD_END, PIECE_INPUTS, halfka_index,
     is_hm_mirror, king_bucket, pack_bonapiece,
 };
-pub use bucket_spec::BucketSpec;
+pub use bucket_spec::{BucketSpec, BucketSpec3, LayerStackBucketSpec};
 pub use constants::*;
 pub use diff::get_changed_features;
 pub use effect_bucket_features::{

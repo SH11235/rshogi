@@ -379,8 +379,7 @@ impl<
 
 /// LayerStacks: 可変長 `num_buckets` 個の bucket を持つ構造
 ///
-/// `buckets` は load 時に 1 回だけ `Vec::with_capacity` + push で構築され、
-/// 以後 **read-only**。ホットパスでは indexing のみで再 alloc は発生しない。
+/// `buckets` の長さは load 時に確定する。
 #[derive(Clone)]
 pub struct LayerStacks<
     const L1: usize,
@@ -390,7 +389,7 @@ pub struct LayerStacks<
     const LS_L2_OUT: usize = NNUE_PYTORCH_L3,
 > {
     /// `num_buckets` 個の bucket。長さは net file の `num_buckets` で決まる。
-    pub buckets: Vec<LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>>,
+    pub buckets: Box<[LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>]>,
 }
 
 impl<
@@ -416,7 +415,9 @@ impl<
         for _ in 0..num_buckets {
             buckets.push(LayerStackBucket::new());
         }
-        Self { buckets }
+        Self {
+            buckets: buckets.into_boxed_slice(),
+        }
     }
 
     /// 現在の bucket 数
@@ -446,7 +447,9 @@ impl<
             buckets.push(LayerStackBucket::read(reader)?);
         }
 
-        Ok(Self { buckets })
+        Ok(Self {
+            buckets: buckets.into_boxed_slice(),
+        })
     }
 
     #[cfg(feature = "prepacked-nnue")]
@@ -465,7 +468,9 @@ impl<
                 AffineTransform::read_packed(reader, packed)?,
             ));
         }
-        Ok(Self { buckets })
+        Ok(Self {
+            buckets: buckets.into_boxed_slice(),
+        })
     }
 
     /// 生スコアを計算（スケーリング前）

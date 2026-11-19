@@ -1,5 +1,7 @@
 # tools の LayerStacks routing 対応
 
+LayerStacks ネットは最大 64 bucket（PSQT 付きは最大 32）に対応します。`ls_bucket=` は最大 3 軸です。
+
 native 評価経路で選べる mode は `progresskpabs`（tatara の f32）、`progresskpabsq16`
 （Q16 係数を使う整数進行度）、`kingrank9` です。
 

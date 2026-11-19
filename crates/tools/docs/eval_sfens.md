@@ -1,5 +1,7 @@
 # eval_sfens
 
+LayerStacks ネットは最大 64 bucket（PSQT 付きは最大 32）に対応します。`ls_bucket=` は最大 3 軸です。
+
 SFEN テキスト（1 行 1 局面）を LayerStacks NNUE で静的評価し、TSV を標準出力へ出す。
 
 progress 係数の保持・再読込みの契約は [routing 対応表](nnue-routing.md) を参照してください。

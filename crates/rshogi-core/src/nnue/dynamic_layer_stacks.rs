@@ -7,6 +7,7 @@ use super::accumulator::{
 };
 use super::bona_piece::{BonaPiece, FE_END};
 use super::bona_piece_effect_bucket::EffectBucketConfig;
+use super::bucket_spec::BucketRouting;
 use super::constants::{
     DEFAULT_NUM_BUCKETS, FV_SCALE_HALFKA, MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS,
     NNUE_VERSION_HALFKA, NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
@@ -192,18 +193,22 @@ pub struct DynamicLayerStacksNetwork {
     spec: ArchitectureSpec,
     feature: RuntimeLsFeature,
     num_buckets: usize,
-    pub(crate) bucket_spec: Option<super::BucketSpec>,
+    bucket_routing: BucketRouting,
     ft_biases: AlignedBox<i16>,
     ft_weights: PieceWeights,
     psqt_biases: AlignedBox<i32>,
     psqt_weights: WeightBox<i32>,
     threat_dimensions: usize,
     threat_weights: WeightBox<i8>,
-    buckets: Vec<DynamicLsBucket>,
+    buckets: Box<[DynamicLsBucket]>,
     fv_scale: i32,
 }
 
 impl DynamicLayerStacksNetwork {
+    pub(super) fn bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
+        self.bucket_routing.spec()
+    }
+
     pub(super) fn read_with_source<R: Read + Seek>(
         reader: &mut R,
         psqt_override: Option<bool>,
@@ -239,7 +244,12 @@ impl DynamicLayerStacksNetwork {
             )));
         }
 
-        let bucket_spec = super::BucketSpec::from_arch(arch, num_buckets)?;
+        let psqt_in_header = arch.contains("PSQT=");
+        let has_psqt = psqt_override.unwrap_or(psqt_in_header);
+        if psqt_in_header || has_psqt {
+            super::net_bin_layout::validate_psqt_bucket_count(num_buckets)?;
+        }
+        let bucket_routing = BucketRouting::from_arch(arch, num_buckets)?;
         let (l1, l2, l3) = parse_arch_dimensions(arch);
         validate_layer_stacks_dimensions(l1, l2, l3).map_err(invalid)?;
         let threat_dimensions =
@@ -311,7 +321,6 @@ impl DynamicLayerStacksNetwork {
         )?
         .into();
 
-        let has_psqt = psqt_override.unwrap_or_else(|| arch.contains("PSQT="));
         let mut psqt_biases = AlignedBox::try_new_zeroed(if has_psqt { num_buckets } else { 0 })?;
         let psqt_count = if has_psqt {
             input_dimensions
@@ -421,14 +430,14 @@ impl DynamicLayerStacksNetwork {
             spec: ArchitectureSpec::new(FeatureSet::LayerStacks, l1, l2, l3, Activation::CReLU),
             feature,
             num_buckets,
-            bucket_spec,
+            bucket_routing,
             ft_biases,
             ft_weights,
             psqt_biases,
             psqt_weights,
             threat_dimensions,
             threat_weights,
-            buckets,
+            buckets: buckets.into_boxed_slice(),
             fv_scale: parse_fv_scale_from_arch(arch).unwrap_or(FV_SCALE_HALFKA),
         })
     }
@@ -1019,8 +1028,8 @@ impl DynamicLayerStacksNetwork {
                 &mut stack.transformed[..l1],
             );
         }
-        let bucket_index = if let Some(spec) = self.bucket_spec {
-            spec.bucket(pos)
+        let bucket_index = if let Some(bucket) = self.bucket_routing.bucket(pos) {
+            bucket
         } else {
             match get_layer_stack_bucket_mode() {
                 LayerStackBucketMode::KingRank9 => compute_layer_stack_kingrank9_bucket_index(
@@ -1531,15 +1540,27 @@ mod tests {
     use crate::position::SFEN_HIRATE;
     use crate::types::Move;
 
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     #[test]
-    fn loads_and_evaluates_a_net_with_32_spec_buckets() {
+    fn dynamic_network_size() {
+        // AVX-512 の PieceWeights は i8 × 2 と i16 の切替に 8 バイトを使う。
+        let expected = if cfg!(all(target_feature = "avx512f", target_feature = "avx512bw")) {
+            328
+        } else {
+            320
+        };
+        assert_eq!(std::mem::size_of::<DynamicLayerStacksNetwork>(), expected);
+    }
+
+    #[test]
+    fn loads_and_evaluates_a_net_with_64_spec_buckets() {
         let mut model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
             "HalfKaHmMerged",
             73_305,
             2,
             3,
             5,
-            32,
+            64,
         );
         let layout =
             super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
@@ -1566,16 +1587,18 @@ mod tests {
                 None,
             )
         };
-        let network = load(",fv_scale=14,ls_bucket=handmajor4+ownking:2/3/4/5/6/7/8").unwrap();
-        assert_eq!(network.bucket_spec.unwrap().num_buckets(), 32);
+        let network =
+            load(",fv_scale=14,ls_bucket=handmajor4+ownking:2/3/7+oppking:2/3/7").unwrap();
+        assert_eq!(network.bucket_spec().unwrap().num_buckets(), 64);
         let mut pos = Position::new();
         pos.set_sfen("4K4/9/9/9/9/9/9/9/4k4 b Rb 1").unwrap();
         let mut stack = network.new_stack();
         network.refresh(&pos, &mut stack);
-        assert_eq!(network.evaluate(&pos, &mut stack).raw(), 31);
+        assert_eq!(network.evaluate(&pos, &mut stack).raw(), 63);
 
         for (token, message) in [
-            (",ls_bucket=ownking:2", "the network stores 32"),
+            (",PSQT=64", "LayerStacks nets with PSQT support at most 32 buckets"),
+            (",ls_bucket=ownking:2", "the network stores 64"),
             (",ls_bucket=ownking:0", "invalid ls_bucket"),
             (",ls_bucket=ownking:2,ls_bucket=oppking:2", "duplicate ls_bucket"),
         ] {
@@ -1859,7 +1882,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            packed.bucket_spec = Some("handmajor3".parse().unwrap());
+            packed.bucket_routing = BucketRouting::from_spec(Some("handmajor3".parse().unwrap()));
             assert_eq!(packed.piece_ft_storage(), "int8 x 2");
             let mut reference = packed.clone();
             let layout =
@@ -2160,14 +2183,14 @@ mod tests {
             spec: ArchitectureSpec::new(FeatureSet::LayerStacks, l1, l2, l3, Activation::CReLU),
             feature,
             num_buckets,
-            bucket_spec: None,
+            bucket_routing: BucketRouting::NONE,
             ft_biases: AlignedBox::new_zeroed(l1),
             ft_weights: AlignedBox::new_zeroed(0).into(),
             psqt_biases: AlignedBox::new_zeroed(usize::from(has_psqt)),
             psqt_weights: AlignedBox::new_zeroed(usize::from(has_psqt)).into(),
             threat_dimensions,
             threat_weights: AlignedBox::new_zeroed(0).into(),
-            buckets: Vec::new(),
+            buckets: Box::default(),
             fv_scale: FV_SCALE_HALFKA,
         }
     }

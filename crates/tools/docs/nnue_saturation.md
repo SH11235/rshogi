@@ -1,5 +1,7 @@
 # nnue_saturation
 
+LayerStacks ネットは最大 64 bucket（PSQT 付きは最大 32）に対応します。`ls_bucket=` は最大 3 軸です。
+
 progress 係数の保持・再読込みの契約は [routing 対応表](nnue-routing.md) を参照してください。
 
 LayerStacks NNUE の**活性飽和率**を実局面で計測する診断ツールです。ClippedReLU /

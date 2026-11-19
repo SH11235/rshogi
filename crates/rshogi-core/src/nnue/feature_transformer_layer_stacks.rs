@@ -12,7 +12,7 @@ use super::accumulator_layer_stacks::{
 };
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "nnue-psqt")]
-use super::constants::MAX_LAYER_STACK_BUCKETS;
+use super::constants::MAX_LAYER_STACK_PSQT_BUCKETS;
 #[cfg(not(feature = "nnue-effect-bucket"))]
 use super::features::Feature;
 use super::features::FeatureSet;
@@ -162,11 +162,11 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 
     /// PSQT バイアス（先頭 `num_buckets` 個のみ有効、それ以降はゼロ）
     ///
-    /// 配列のサイズは hot-path 固定 (`MAX_LAYER_STACK_BUCKETS`) だが、有効範囲は
+    /// 配列のサイズは hot-path 固定 (`MAX_LAYER_STACK_PSQT_BUCKETS`) だが、有効範囲は
     /// `num_buckets` で動的に決まる。未使用エリアは load 時に 0 で初期化され、
     /// `psqt_add_or_sub` が `n` 引数で範囲を絞るため副作用無し。
     #[cfg(feature = "nnue-psqt")]
-    pub(crate) psqt_biases: [i32; MAX_LAYER_STACK_BUCKETS],
+    pub(crate) psqt_biases: [i32; MAX_LAYER_STACK_PSQT_BUCKETS],
 
     /// PSQT 重み (長さ = `FT::DIMENSIONS × num_buckets`、layout
     /// `psqt_weights[feature_idx * num_buckets + bucket]`)
@@ -196,7 +196,7 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
     _ft: PhantomData<FT>,
 }
 
-/// PSQT アキュムレータ (`[i32; MAX_LAYER_STACK_BUCKETS]`) の先頭 `n` 要素に
+/// PSQT アキュムレータ (`[i32; MAX_LAYER_STACK_PSQT_BUCKETS]`) の先頭 `n` 要素に
 /// `weights[0..n]` を加算 (`ADD = true`) または減算する。
 ///
 /// `n` はネットに格納された bucket 数。`[n..MAX]` は更新しない。
@@ -204,11 +204,11 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 #[cfg(feature = "nnue-psqt")]
 #[inline(always)]
 fn psqt_add_or_sub<const ADD: bool>(
-    psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
+    psqt_acc: &mut [i32; MAX_LAYER_STACK_PSQT_BUCKETS],
     weights: *const i32,
     n: usize,
 ) {
-    debug_assert!(n <= MAX_LAYER_STACK_BUCKETS);
+    debug_assert!(n <= MAX_LAYER_STACK_PSQT_BUCKETS);
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
     {
@@ -289,7 +289,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             biases: Aligned([0; L1]),
             weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
@@ -310,7 +310,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             biases: Aligned([0; L1]),
             weights: AlignedBox::new_zeroed(FT::DIMENSIONS * L1).into(),
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 1,
             #[cfg(feature = "nnue-psqt")]
@@ -437,7 +437,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             biases: Aligned(biases),
             weights: piece_weights::select(weights.into(), L1)?,
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
@@ -493,7 +493,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             biases: Aligned(biases),
             weights: piece_weights::select(weights, L1)?,
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
@@ -511,12 +511,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// PSQT 重み/バイアスをファイルから読み込み
     ///
     /// `num_buckets` は net file の `num_buckets` field (legacy `.bin` は
-    /// `DEFAULT_NUM_BUCKETS = 9`)。`MAX_LAYER_STACK_BUCKETS` を超える値は
-    /// 呼び出し元で reject されている前提だが、debug_assert で再確認する。
+    /// `DEFAULT_NUM_BUCKETS = 9`)。有効範囲外の値には `InvalidData` を返す。
     ///
     /// ## 不変条件: `psqt_biases[num_buckets..MAX]` は常にゼロ
     ///
-    /// `psqt_biases` は固定長 `[i32; MAX_LAYER_STACK_BUCKETS]` だが、有効範囲は
+    /// `psqt_biases` は固定長 `[i32; MAX_LAYER_STACK_PSQT_BUCKETS]` だが、有効範囲は
     /// 先頭 `num_buckets` 要素のみ。本関数は冒頭で `[0; MAX]` で zero 化してから
     /// 先頭 N 要素を file から読む。`[N..MAX]` 領域は不変条件としてゼロを保つ:
     ///
@@ -545,12 +544,18 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         num_buckets: usize,
         #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<()> {
-        debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
+        super::net_bin_layout::validate_psqt_bucket_count(num_buckets)?;
+        if num_buckets == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PSQT requires at least one bucket",
+            ));
+        }
         let mut buf4 = [0u8; 4];
 
         // Biases: i32 × num_buckets (固定長配列の先頭 num_buckets 要素にのみ書き、
         // それ以降はゼロのまま残す)。
-        self.psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
+        self.psqt_biases = [0i32; MAX_LAYER_STACK_PSQT_BUCKETS];
         for bias in self.psqt_biases[..num_buckets].iter_mut() {
             reader.read_exact(&mut buf4)?;
             *bias = i32::from_le_bytes(buf4);
@@ -589,7 +594,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
     /// PSQT バイアスを参照（外部の解析ツール向け、固定長配列の先頭 `psqt_num_buckets` 要素のみ有効）。
     #[cfg(feature = "nnue-psqt")]
-    pub fn psqt_biases(&self) -> &[i32; MAX_LAYER_STACK_BUCKETS] {
+    pub fn psqt_biases(&self) -> &[i32; MAX_LAYER_STACK_PSQT_BUCKETS] {
         &self.psqt_biases
     }
 
@@ -1091,7 +1096,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     fn refresh_psqt(
         &self,
         active_indices: &IndexList<MAX_ACTIVE_FEATURES>,
-        psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
+        psqt_acc: &mut [i32; MAX_LAYER_STACK_PSQT_BUCKETS],
     ) {
         *psqt_acc = self.psqt_biases;
         for index in active_indices.iter() {
@@ -1106,7 +1111,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// 触らない (load 時に 0 のまま)。
     #[cfg(feature = "nnue-psqt")]
     #[inline]
-    fn add_psqt_weights(&self, psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS], index: usize) {
+    fn add_psqt_weights(&self, psqt_acc: &mut [i32; MAX_LAYER_STACK_PSQT_BUCKETS], index: usize) {
         let n = self.psqt_num_buckets;
         let offset = index * n;
         debug_assert!(
@@ -1124,7 +1129,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// PSQT 重みを減算
     #[cfg(feature = "nnue-psqt")]
     #[inline]
-    fn sub_psqt_weights(&self, psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS], index: usize) {
+    fn sub_psqt_weights(&self, psqt_acc: &mut [i32; MAX_LAYER_STACK_PSQT_BUCKETS], index: usize) {
         let n = self.psqt_num_buckets;
         let offset = index * n;
         debug_assert!(
@@ -1613,7 +1618,7 @@ impl<'a, const L1: usize, FT: LsFeatureSpec, W: PieceWeight> PieceTransformer<'a
         pos: &Position,
         perspective: Color,
         accumulation: &mut [i16; L1],
-        #[cfg(feature = "nnue-psqt")] psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
+        #[cfg(feature = "nnue-psqt")] psqt_acc: &mut [i32; MAX_LAYER_STACK_PSQT_BUCKETS],
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         if cfg!(feature = "nnue-effect-bucket") {
@@ -2937,6 +2942,22 @@ mod tests {
     type TestSpec = HalfKaHmMergedSpec;
     type TestFt = FeatureTransformerLayerStacks<TEST_L1, TestSpec>;
 
+    #[cfg(feature = "nnue-psqt")]
+    #[test]
+    fn read_psqt_rejects_out_of_range_bucket_counts() {
+        let mut ft = make_test_transformer();
+        for n in [0, 33, 64] {
+            let err = ft.read_psqt(&mut io::empty(), n).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            if n > 0 {
+                assert_eq!(
+                    err.to_string(),
+                    "LayerStacks nets with PSQT support at most 32 buckets"
+                );
+            }
+        }
+    }
+
     #[test]
     fn fixed_width_loaders_handle_width_48_for_compiled_simd() {
         const WIDTH: usize = 48;
@@ -2972,7 +2993,7 @@ mod tests {
             biases: Aligned([0; TEST_L1]),
             weights: AlignedBox::new_zeroed(TestSpec::DIMENSIONS * TEST_L1).into(),
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
@@ -3062,11 +3083,11 @@ mod tests {
         #[cfg(feature = "nnue-psqt")]
         {
             ft.has_psqt = true;
-            ft.psqt_num_buckets = MAX_LAYER_STACK_BUCKETS;
+            ft.psqt_num_buckets = MAX_LAYER_STACK_PSQT_BUCKETS;
             ft.psqt_weights =
-                AlignedBox::new_zeroed(TestSpec::DIMENSIONS * MAX_LAYER_STACK_BUCKETS).into();
+                AlignedBox::new_zeroed(TestSpec::DIMENSIONS * MAX_LAYER_STACK_PSQT_BUCKETS).into();
             for (i, w) in ft.psqt_weights.make_mut().iter_mut().enumerate() {
-                *w = ((i * 37 + i / MAX_LAYER_STACK_BUCKETS * 13) % 1023) as i32 - 511;
+                *w = ((i * 37 + i / MAX_LAYER_STACK_PSQT_BUCKETS * 13) % 1023) as i32 - 511;
             }
             for (bucket, bias) in ft.psqt_biases.iter_mut().enumerate() {
                 *bias = bucket as i32 * 101 - 353;
@@ -3946,7 +3967,7 @@ mod tests {
             }
         }
 
-        let mut psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
+        let mut psqt_biases = [0i32; MAX_LAYER_STACK_PSQT_BUCKETS];
         for (i, b) in psqt_biases[..n].iter_mut().enumerate() {
             *b = (i as i32 + 1) * 10; // [10, 20, ..., 90]
         }
@@ -3969,14 +3990,14 @@ mod tests {
     #[cfg(feature = "nnue-psqt")]
     #[test]
     fn psqt_updates_wide_buckets_and_preserves_unused_lanes() {
-        let weights: [i32; MAX_LAYER_STACK_BUCKETS] = std::array::from_fn(|i| i as i32 + 1);
+        let weights: [i32; MAX_LAYER_STACK_PSQT_BUCKETS] = std::array::from_fn(|i| i as i32 + 1);
         for n in [0, 1, 8, 9, 16, 17, 24, 31, 32] {
-            let mut accum = [100; MAX_LAYER_STACK_BUCKETS];
+            let mut accum = [100; MAX_LAYER_STACK_PSQT_BUCKETS];
             let input = weights[..n].to_vec().into_boxed_slice();
             psqt_add_or_sub::<true>(&mut accum, input.as_ptr(), n);
             assert_eq!(accum, std::array::from_fn(|i| 100 + if i < n { weights[i] } else { 0 }));
             psqt_add_or_sub::<false>(&mut accum, input.as_ptr(), n);
-            assert_eq!(accum, [100; MAX_LAYER_STACK_BUCKETS]);
+            assert_eq!(accum, [100; MAX_LAYER_STACK_PSQT_BUCKETS]);
         }
     }
 
@@ -3993,7 +4014,7 @@ mod tests {
         let _ = active_initial.push(300);
 
         // フル計算
-        let mut full_acc = [0i32; MAX_LAYER_STACK_BUCKETS];
+        let mut full_acc = [0i32; MAX_LAYER_STACK_PSQT_BUCKETS];
         ft.refresh_psqt(&active_initial, &mut full_acc);
 
         // 差分: 200 を削除、400 を追加 → [100, 300, 400]
@@ -4006,7 +4027,7 @@ mod tests {
         let _ = active_updated.push(100);
         let _ = active_updated.push(300);
         let _ = active_updated.push(400);
-        let mut full_updated = [0i32; MAX_LAYER_STACK_BUCKETS];
+        let mut full_updated = [0i32; MAX_LAYER_STACK_PSQT_BUCKETS];
         ft.refresh_psqt(&active_updated, &mut full_updated);
 
         assert_eq!(incr_acc, full_updated, "差分更新とフル計算の結果が不一致");
@@ -4022,7 +4043,7 @@ mod tests {
         let _ = active.push(0);
         let _ = active.push(1);
 
-        let mut acc = [0i32; MAX_LAYER_STACK_BUCKETS];
+        let mut acc = [0i32; MAX_LAYER_STACK_PSQT_BUCKETS];
         ft.refresh_psqt(&active, &mut acc);
 
         // feat=0: (0*7 + b*3) % 1000 - 500 = b*3 - 500
@@ -4060,7 +4081,7 @@ mod tests {
             biases: Aligned([7; TEST_L1]),
             weights: weights.into(),
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
@@ -4141,7 +4162,7 @@ mod tests {
             biases,
             weights: weights.clone().into(),
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
@@ -4197,7 +4218,7 @@ mod tests {
             biases: Aligned([0; TEST_L1]),
             weights: weights.into(),
             #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_PSQT_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]

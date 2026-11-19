@@ -23,6 +23,7 @@
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
+use super::bucket_spec::BucketRouting;
 #[cfg(feature = "nnue-effect-bucket")]
 use super::constants::HALFKA_EFFECT_BUCKET_DIMENSIONS;
 use super::constants::NNUE_PYTORCH_L3;
@@ -225,7 +226,7 @@ pub struct NetworkLayerStacks<
     pub fv_scale: i32,
     /// bucket 数 (= net file の `num_buckets` field、legacy `.bin` は 9)
     pub num_buckets: usize,
-    bucket_spec: Option<super::BucketSpec>,
+    bucket_routing: BucketRouting,
     _ft: PhantomData<FT>,
 }
 
@@ -345,7 +346,12 @@ impl<
         } else {
             DEFAULT_NUM_BUCKETS
         };
-        let bucket_spec = super::BucketSpec::from_arch(&arch_str, num_buckets)?;
+        let psqt_in_header = arch_str.contains("PSQT=");
+        let has_psqt = psqt_override.unwrap_or(psqt_in_header);
+        if psqt_in_header || has_psqt {
+            super::net_bin_layout::validate_psqt_bucket_count(num_buckets)?;
+        }
+        let bucket_routing = BucketRouting::from_arch(&arch_str, num_buckets)?;
 
         #[cfg(feature = "nnue-effect-bucket")]
         {
@@ -449,7 +455,6 @@ impl<
         // - psqt_override == None: arch_str から自動検出
         #[cfg(feature = "nnue-psqt")]
         {
-            let has_psqt = psqt_override.unwrap_or_else(|| arch_str.contains("PSQT="));
             if has_psqt {
                 feature_transformer.read_psqt_with_source(
                     reader,
@@ -460,7 +465,7 @@ impl<
             }
         }
         #[cfg(not(feature = "nnue-psqt"))]
-        if psqt_override.unwrap_or_else(|| arch_str.contains("PSQT=")) {
+        if has_psqt {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "PSQT model requires nnue-psqt feature",
@@ -583,7 +588,7 @@ impl<
             layer_stacks,
             fv_scale,
             num_buckets,
-            bucket_spec,
+            bucket_routing,
             _ft: PhantomData,
         })
     }
@@ -691,15 +696,14 @@ impl<
     }
 
     /// ネットに記録された bucket spec を返す。
-    pub fn bucket_spec(&self) -> Option<super::BucketSpec> {
-        self.bucket_spec
+    pub fn bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
+        self.bucket_routing.spec()
     }
 
     fn bucket_index(&self, pos: &Position) -> usize {
-        self.bucket_spec.map_or_else(
-            || compute_layer_stacks_bucket_index(pos, pos.side_to_move(), self.num_buckets),
-            |spec| spec.bucket(pos),
-        )
+        self.bucket_routing.bucket(pos).unwrap_or_else(|| {
+            compute_layer_stacks_bucket_index(pos, pos.side_to_move(), self.num_buckets)
+        })
     }
 
     /// 評価値を計算。
@@ -922,7 +926,7 @@ impl<
 
         // バケットインデックスを計算（通常パスと同じ共通関数を使用）
         let bucket_index = self.bucket_index(pos);
-        let mode = if self.bucket_spec.is_some() {
+        let mode = if self.bucket_spec().is_some() {
             "spec"
         } else {
             get_layer_stack_bucket_mode().as_str()
@@ -1343,8 +1347,14 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     }
 
     /// ネットに記録された bucket spec を返す。
-    pub fn bucket_spec(&self) -> Option<super::BucketSpec> {
+    pub fn bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
         ls_match_size!(self, net => net.bucket_spec())
+    }
+
+    #[cfg(feature = "layerstack-arch")]
+    #[inline(always)]
+    fn bucket_routing(&self) -> &BucketRouting {
+        ls_match_size!(self, net => &net.bucket_routing)
     }
 
     #[cfg(feature = "layerstack-arch")]
@@ -1550,8 +1560,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
-        let bucket = if let Some(spec) = self.bucket_spec() {
-            Some(spec.bucket(pos))
+        let bucket = if let Some(bucket) = self.bucket_routing().bucket(pos) {
+            Some(bucket)
         } else if get_layer_stack_bucket_mode() == LayerStackBucketMode::ProgressKPAbs {
             let routing_buckets = get_layer_stack_progress_buckets()
                 .expect("LayerStacks progress routing is not configured");
@@ -2583,8 +2593,14 @@ impl LayerStacksNetwork {
     }
 
     /// ネットに記録された bucket spec を返す。
-    pub fn bucket_spec(&self) -> Option<super::BucketSpec> {
+    pub fn bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
         ls_match_ft!(self, by_ft => by_ft.bucket_spec())
+    }
+
+    #[cfg(feature = "layerstack-arch")]
+    #[inline(always)]
+    pub(super) fn bucket_routing(&self) -> &BucketRouting {
+        ls_match_ft!(self, by_ft => by_ft.bucket_routing())
     }
 
     #[cfg(feature = "layerstack-arch")]
@@ -2938,6 +2954,40 @@ mod tests {
     ))]
     use crate::position::{Position, SFEN_HIRATE};
 
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    #[test]
+    fn fixed_network_sizes() {
+        use super::NetworkLayerStacks;
+        use crate::nnue::ls_feature_spec::{HalfKaHmMergedSpec, HalfKaHmSplitSpec};
+
+        // x86_64 Linux の net が占めるキャッシュライン数を、3 軸対応で増やさない。
+        let overhead = match (cfg!(feature = "nnue-psqt"), cfg!(feature = "nnue-threat")) {
+            (false, false) => 128,
+            (false, true) => 192,
+            (true, false) => 320,
+            (true, true) => 384,
+        };
+        macro_rules! check_size {
+            ($l1:literal, $l2:literal, $l2in:literal, $padded:literal, $l3:literal, $ft:ty) => {
+                assert_eq!(
+                    std::mem::size_of::<NetworkLayerStacks<$l1, $l2, $l2in, $padded, $ft, $l3>>(),
+                    2 * $l1 + overhead,
+                )
+            };
+        }
+        check_size!(512, 16, 30, 32, 32, HalfKaHmMergedSpec);
+        check_size!(768, 8, 14, 32, 32, HalfKaHmMergedSpec);
+        check_size!(768, 16, 30, 32, 32, HalfKaHmMergedSpec);
+        check_size!(1024, 16, 30, 32, 32, HalfKaHmMergedSpec);
+        check_size!(1536, 16, 30, 32, 32, HalfKaHmMergedSpec);
+        check_size!(1536, 16, 30, 32, 32, HalfKaHmSplitSpec);
+        check_size!(1536, 32, 62, 64, 32, HalfKaHmMergedSpec);
+        check_size!(1536, 16, 30, 32, 64, HalfKaHmMergedSpec);
+        check_size!(2304, 16, 30, 32, 64, HalfKaHmMergedSpec);
+        check_size!(3072, 16, 30, 32, 32, HalfKaHmMergedSpec);
+        check_size!(3072, 16, 30, 32, 64, HalfKaHmMergedSpec);
+    }
+
     #[cfg(feature = "layerstack-arch")]
     #[test]
     fn test_bucket_routing_only_calls_q16_for_q16_mode() {
@@ -3164,7 +3214,7 @@ mod tests {
             layer_stacks: LayerStacks::with_num_buckets(1),
             fv_scale: 1,
             num_buckets: 1,
-            bucket_spec: None,
+            bucket_routing: BucketRouting::NONE,
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
@@ -3291,7 +3341,7 @@ mod tests {
             layer_stacks: LayerStacks::with_num_buckets(1),
             fv_scale: 16,
             num_buckets: 1,
-            bucket_spec: None,
+            bucket_routing: BucketRouting::NONE,
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
@@ -3387,7 +3437,7 @@ mod tests {
             layer_stacks,
             fv_scale: 16,
             num_buckets: 1,
-            bucket_spec: None,
+            bucket_routing: BucketRouting::NONE,
             _ft: PhantomData,
         };
 
@@ -3521,7 +3571,7 @@ mod tests {
             layer_stacks: LayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
             fv_scale: 16,
             num_buckets: DEFAULT_NUM_BUCKETS,
-            bucket_spec: None,
+            bucket_routing: BucketRouting::NONE,
             _ft: PhantomData,
         };
         #[cfg(feature = "nnue-threat")]

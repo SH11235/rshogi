@@ -116,7 +116,7 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | `NetworkDelay2` | Additional delay for uncertain situations | 0 |
 | `EvalFile` | NNUE model path | `eval/nn.bin` |
 | `LS_BUCKET_MODE` | LayerStacks の外部 routing 設定。`progresskpabs`、`progresskpabsq16`、`kingrank9` | 未設定 |
-| `LS_PROGRESS_BUCKETS` | 進行度 routing の bucket 数。1〜32、0 は未設定 | 0 |
+| `LS_PROGRESS_BUCKETS` | 進行度 routing の bucket 数。1〜64、0 は未設定 | 0 |
 | `LS_PROGRESS_COEFF` | 進行度係数のファイルパス | 未設定 |
 | `SPSAParamsFile` | 探索・net の SPSA の値のファイル (`.params`)。`<auto>` なら実行ファイルと同じフォルダの `spsa.params` を読む。build に焼き込んだ値 ([ビルドガイド](../../docs/build.md#spsa-の値を焼き込む)) より優先する | `<auto>` |
 | `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
@@ -143,6 +143,9 @@ AVX-512F/BW ビルドでは、駒 FT 幅が 32 の倍数で、駒 FT の重み�
 
 tatara の `--bucket-mode spec --bucket-spec <axes>` で出力した LayerStacks ネットは、
 `EvalFile` に指定するとネットの `ls_bucket=` に従って bucket を選びます。
+軸は `+` 区切りで 1〜3 個、左端が最上位桁です。各軸の bucket 数の積は
+最大 64（PSQT 付きは最大 32）で、ネットに格納された出力 bucket 数と一致する必要があります。
+たとえば `ls_bucket=handmajor4+ownking:2/3/7+oppking:2/3/7` では 64 個になります。
 `LS_BUCKET_MODE`、`LS_PROGRESS_BUCKETS`、`LS_PROGRESS_COEFF` は未設定にしてください。
 いずれかに値が設定されている場合は `isready` がエラーになります。
 `ls_bucket=` を持たない LayerStacks ネットでは、学習時の routing を USI オプションで指定します。
