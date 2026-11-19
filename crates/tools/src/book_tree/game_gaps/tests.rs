@@ -27,6 +27,7 @@ fn args(dir: &Path) -> GameGapsArgs {
         enqueue_out: Some(dir.join("queue.jsonl")),
         tag: Some("test".into()),
         priority: Some(20),
+        game_priority: None,
         depth: 3,
         opp_n: 3,
         stop: 300,
@@ -301,16 +302,133 @@ fn cli_requires_queue_priority_and_tag() {
             "--tag",
             "test",
             "--priority",
-            "2"
+            "2",
+            "--game-priority",
+            "priorities.tsv",
         ]))
         .is_ok()
     );
 }
 
 #[test]
+fn game_priority_requires_enqueue_out() {
+    let error = Cli::try_parse_from([
+        "test",
+        "--master",
+        "m",
+        "--games",
+        "g",
+        "--player",
+        "p",
+        "--table",
+        "t",
+        "--game-priority",
+        "priorities.tsv",
+    ])
+    .err()
+    .unwrap();
+    assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(error.to_string().contains("--enqueue-out"));
+}
+
+#[test]
+fn game_priority_uses_table_names_and_merges_with_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let priorities = dir.path().join("priorities.tsv");
+    let one = moves();
+    let two = moves_for(&[
+        "2g2f", "3c3d", "7g7f", "8c8d", "2f2e", "8d8e", "6i7h", "4a3b", "5g5f", "5c5d",
+    ]);
+    let listed = dir.path().join("listed-game-long-name.jsonl");
+    client(&listed, &one);
+    let unlisted = dir.path().join("games.jsonl");
+    client(&unlisted, &two);
+    master(&dir.path().join("moves.tsv"), &[], &[], &[]);
+    for (line, listed_priority) in [(true, 5), (true, 30), (false, 5), (false, 30)] {
+        let mut a = args(dir.path());
+        a.line = line;
+        a.depth = 2;
+        a.games.push(listed.clone());
+        a.game_priority = Some(priorities.clone());
+        std::fs::write(&priorities, format!("listed-game-long-name\t{listed_priority}\n")).unwrap();
+        run(a).unwrap();
+
+        let table = pave_table(dir.path());
+        for (name, priority) in [("listed-game-long-name", listed_priority), ("games", 20)] {
+            let rows: Vec<_> = table.iter().filter(|row| row["game"] == name).collect();
+            assert!(!rows.is_empty());
+            assert!(rows.iter().all(|row| row["priority"] == priority.to_string()));
+        }
+        let q = queue(&dir.path().join("queue.jsonl"));
+        let shared: Vec<_> = q.iter().filter(|row| row.game.len() == 2).collect();
+        assert_eq!(shared.len(), if line { 2 } else { 1 });
+        assert!(shared.iter().all(|row| row.priority == listed_priority.min(20)));
+        let rejoined_root = format!("sfen {}", one[4]["sfen_before"].as_str().unwrap());
+        let rejoined: Vec<_> = q.iter().filter(|row| row.root == rejoined_root).collect();
+        assert_eq!(rejoined.len(), if line { 2 } else { 1 });
+        assert!(
+            rejoined
+                .iter()
+                .all(|row| row.game.len() == 1 && row.priority == listed_priority.min(20))
+        );
+        for (game, priority) in [(&one, listed_priority), (&two, 20)] {
+            let root = format!("sfen {}", game[2]["sfen_before"].as_str().unwrap());
+            let rows: Vec<_> = q.iter().filter(|row| row.root == root).collect();
+            assert_eq!(rows.len(), if line { 2 } else { 1 });
+            assert!(rows.iter().all(|row| row.priority == priority));
+        }
+    }
+}
+
+#[test]
+fn game_priority_rejects_unknown_names_without_replacing_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = args(dir.path());
+    master(&a.master, &[], &[], &[]);
+    client(&a.games[0], &moves());
+    let path = dir.path().join("priorities.tsv");
+    std::fs::write(&path, "unknown-b\t4\ngames\t8\nunknown-a\t3\n").unwrap();
+    a.game_priority = Some(path);
+    let table = a.table.clone();
+    let queue = a.enqueue_out.clone().unwrap();
+    std::fs::write(&table, "keep table").unwrap();
+    std::fs::write(&queue, "keep queue").unwrap();
+    let error = run(a).unwrap_err().to_string();
+    assert!(error.contains("未知の局名"));
+    assert!(error.contains("\"unknown-a\", \"unknown-b\""));
+    assert_eq!(std::fs::read_to_string(table).unwrap(), "keep table");
+    assert_eq!(std::fs::read_to_string(queue).unwrap(), "keep queue");
+}
+
+#[test]
+fn game_priority_rejects_duplicates_and_out_of_range_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("priorities.tsv");
+    std::fs::write(&path, "games\t10\ngames\t10\n").unwrap();
+    assert!(
+        read_game_priorities(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("重複しています: \"games\"")
+    );
+    std::fs::write(&path, format!("games\t{}\n", MAX_PRIORITY + 1)).unwrap();
+    assert!(
+        read_game_priorities(&path)
+            .unwrap_err()
+            .to_string()
+            .contains(&MAX_PRIORITY.to_string())
+    );
+    std::fs::write(&path, format!("games\t{MAX_PRIORITY}\n")).unwrap();
+    assert!(read_game_priorities(&path).is_ok());
+}
+
+#[test]
 fn legacy_pair_without_metadata_reuses_seeds_pairing() {
     let dir = tempfile::tempdir().unwrap();
-    let a = args(dir.path());
+    let mut a = args(dir.path());
+    let priorities = dir.path().join("priorities.tsv");
+    std::fs::write(&priorities, "games_1\t10\n").unwrap();
+    a.game_priority = Some(priorities);
     master(&a.master, &[], &[], &[]);
     let mut rows = Vec::new();
     for id in 0..2 {
@@ -326,6 +444,7 @@ fn legacy_pair_without_metadata_reuses_seeds_pairing() {
     assert_eq!(table.lines().count(), 21);
     assert!(table.contains("games_0\t"));
     assert!(table.contains("games_1\t"));
+    assert!(queue(&dir.path().join("queue.jsonl")).iter().all(|row| row.priority == 10));
 }
 
 #[test]
@@ -1338,7 +1457,7 @@ fn line_csa_terminal_winner_and_inline_scores() {
 }
 
 #[test]
-fn line_spacing_caps_at_eight_plies_and_table_only_matches() {
+fn line_spacing_caps_at_eight_plies_and_table_only_omits_priority_values() {
     let dir = tempfile::tempdir().unwrap();
     let path: Vec<_> = ["5i5h", "5a5b", "5h5i", "5b5a"].into_iter().cycle().take(40).collect();
     client(&dir.path().join("games.jsonl"), &moves_for(&path));
@@ -1347,11 +1466,12 @@ fn line_spacing_caps_at_eight_plies_and_table_only_matches() {
     a.games = vec![dir.path().join("games.jsonl")];
     a.depth = 20;
     run(a).unwrap();
-    let table = std::fs::read(dir.path().join("table.tsv")).unwrap();
+    let table = pave_table(dir.path());
     assert_eq!(
-        pave_table(dir.path()).iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
+        table.iter().map(|r| r["ply"].as_str()).collect::<Vec<_>>(),
         ["1", "1", "9", "9", "17", "17", "25", "25", "33", "33"]
     );
+    assert!(table.iter().all(|row| row["priority"] == "20"));
     let mut a = line_args(dir.path());
     a.games = vec![dir.path().join("games.jsonl")];
     a.depth = 20;
@@ -1359,7 +1479,12 @@ fn line_spacing_caps_at_eight_plies_and_table_only_matches() {
     a.tag = None;
     a.priority = None;
     run(a).unwrap();
-    assert_eq!(std::fs::read(dir.path().join("table.tsv")).unwrap(), table);
+    let mut table_only = pave_table(dir.path());
+    assert!(table_only.iter().all(|row| row["priority"].is_empty()));
+    for row in &mut table_only {
+        row.insert("priority".into(), "20".into());
+    }
+    assert_eq!(table_only, table);
 }
 
 #[test]

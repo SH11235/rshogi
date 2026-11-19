@@ -48,8 +48,14 @@ fn identity(game: &Game, path: &Path) -> String {
 }
 
 impl Report<'_> {
-    pub(super) fn line_game(&mut self, game: &Game, path: &Path) -> Result<()> {
+    pub(super) fn line_game(
+        &mut self,
+        game: &Game,
+        path: &Path,
+        priority: Option<u32>,
+    ) -> Result<()> {
         let args = self.args;
+        let table_priority = priority.map_or_else(String::new, |p| p.to_string());
         let winner = match game.outcome.as_str() {
             "black_win" => Some("b"),
             "white_win" => Some("w"),
@@ -107,7 +113,7 @@ impl Report<'_> {
                 let root = parse_root(&format!("sfen {}", m.sfen_before))?;
                 writeln!(
                     self.table,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{table_priority}",
                     game.name,
                     m.ply,
                     m.side_to_move,
@@ -135,7 +141,7 @@ impl Report<'_> {
                     roots: vec![],
                     own: own.into(),
                     depth: args.depth,
-                    priority: args.priority.context("--priority が必要です")?,
+                    priority: priority.context("--priority が必要です")?,
                     hold: false,
                     game: vec![game_moves],
                     opts: args.opts(),
