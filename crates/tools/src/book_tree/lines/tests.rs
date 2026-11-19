@@ -71,7 +71,7 @@ fn game_reports_moves_past_depth_with_known_single_reads() {
 fn stops_at_shallower_merge_with_its_propagated_value() {
     let (_dir, args, keys) = completed(10);
     let mut report = Report::load(&args).unwrap();
-    report.levels.insert(keys[2].clone(), 1);
+    report.levels.to_mut().insert(keys[2].clone(), 1);
     let trace = report
         .trace(
             &report.propagation().unwrap(),
@@ -257,9 +257,9 @@ fn terminal_readings_distinguish_mate_no_legal_declaration_and_empty_read() {
         reading.key = key.to_owned();
         reading.bestmove = bestmove.into();
         reading.multipv.clear();
-        report.levels.insert(key.to_owned(), 1);
-        report.readings.insert(key.to_owned(), reading);
-        report.expanded.remove(key);
+        report.levels.to_mut().insert(key.to_owned(), 1);
+        report.readings.to_mut().insert(key.to_owned(), reading);
+        report.expanded.to_mut().remove(key);
         let trace = report
             .trace(
                 &report.propagation().unwrap(),
@@ -289,4 +289,22 @@ fn direct_game_move_at_the_level_cap_reports_cap() {
         )
         .unwrap();
     assert_eq!((trace.reason, trace.key, trace.level), (Reason::Cap, keys[4].clone(), Some(4)));
+}
+
+#[test]
+fn settled_output_has_no_unexpanded_lines() {
+    let (dir, args, _) = completed(10);
+    let (mut tree, mut cache, keys) = crate::book_tree::model::prefetch_tests::settle_fixture(3);
+    let next = child(&keys[1], "5a6a").unwrap();
+    let mut read = cache[&keys[2]].clone();
+    read.key = next.clone();
+    read.multipv[0].cp = -300;
+    cache.insert(next, read);
+    tree.def.out = dir.path().to_owned();
+    assert!(tree.advance(&cache).unwrap().is_empty());
+    assert!(tree.write_outputs().unwrap());
+    let report = Report::load(&args).unwrap();
+    let (_, game, counts) = report.tables(&dir.path().join("paths.record.tsv")).unwrap();
+    assert_eq!(counts.reasons.get("unexpanded"), None);
+    assert!(game.lines().skip(1).all(|row| row.contains("\tstop\t")));
 }

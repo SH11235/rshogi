@@ -235,6 +235,11 @@ cargo run -p tools --release --bin book_mine -- run \
 
 通常の展開は `depth` 段までです。`extend` (既定 0) を指定すると、`depth` 段から `depth + extend` 段の手前までは、手番によらず読みの1位だけを伸ばします。根以外では1位の値の絶対値が `stop` 以上になった局面で止まり、遅くとも `depth + extend` 段で止まります。延長区間でも、伸ばしていない手の生の値が伸ばした手の伝播後の値を上回ると、両手番で FORCE による伸ばし直しを行います。通常区間の伸ばし直しは `rounds` 回、延長区間は `extend_rounds` 回 (0〜10、既定 1) までです。同じ回に両区間の未解決手が出たら両方を伸ばし、それぞれの上限を超える区間には FORCE を足しません。延長 E 段で1回の伸ばし直しは最悪およそ (MultiPV−1)×E²/2 局面を読みます。回の数は通常区間と共有するので、通常区間の後の回の伸ばし直しで新しくできた延長区間の線は、`extend_rounds` を使い切っていれば伸ばし直されません。`extend` が 0 の木では `extend_rounds` は既定の 1 として扱います。追加した手の先も延長区間の1位・STOP・段数上限の規則で辿ります。`game`・`extra` は延長区間では使いません。回数を使い切った未解決手は `registration_status.json` の `unresolved` に残しますが、延長は補助的な読みなので、延長区間だけに残っている場合は NOT_READY にしません。通常区間に未解決手が残れば従来どおり NOT_READY です。`depth = 0` でも延長でき、根では STOP を無視して1位だけを伸ばします。
 
+`settle_rounds` (0〜50、既定 0) を指定すると、通常の展開・伸ばし直しが終わってから、根の伝播後の最善手、根の比較候補 (`extra` を含む)、木に局面がある実戦の各手から伝播後の最善手順を辿ります。祖先への循環は木と同じ千日手の値で評価します。STOP・詰み・合法手なし・宣言勝ち・循環・`depth + extend` の上限に達さず、未展開の手で止まった線だけを FORCE で伸ばし、その子から読みの1位を STOP・上限・合流まで辿ります。STOP を無視するのは根だけです。追加後に再び伝播して辿り、未展開の終端がなくなるか指定回数で終了します。`rounds`・`extend_rounds` は消費しません。
+
+延長区間の不足なら、各 settle 回の追加は最大「辿る線数 × extend」局面です。通常区間内の不足も対象にする場合は、線ごとに最大 `depth + extend − 終端の段` 局面で、残りの通常段数も加わります。合流と台帳の既存の読みは再利用します。serve は追加局面も通常の work item として並列に読み、再起動時は受付済み定義と台帳から同じ回を再構築します。回数が正の場合だけ `registration_status.json` に `settle_rounds_used` と `unsettled` (開始局面・開始手・終端局面・未展開手・理由) を記録します。`unsettled` 自体や settle で新しく生じた不足は NOT_READY の理由にせず、通常の伸ばし直しで残った登録条件は維持します。0 のときは従来の出力・状態のままです。
+
+
 木ごとの LEVEL は最短の段を回をまたいで保持し、浅い再発見は既存の辺の子孫にも伝えます。EDGE・RULE・FORCE は累積です。手数は根の手数に経路の長さを足した最小値を使います。台帳に他の木の読みがあっても、自分で要求した局面だけを評価します。negamax は各局面を空の祖先手順から評価し、その手順内の循環だけ `draw` にします。循環に入らない局面の値は手順に依らないので 1 度だけ計算します。大きな循環が重なる木で、循環の中を手順ごとに数える呼び出しが 1 回の評価で 200 万回を超えたら、以後は循環の中の局面も最初に求めた値を使い回します (別の手順から来たときの千日手の判定を引き継がない近似)。循環に入る手を指す側が先手なら `draw_black`、後手なら `draw_white` を (指定があれば) 使います (どちらもその手を指す側から見た値)。エンジンの `DrawValueBlack` / `DrawValueWhite` は、読む側 (根の手番) から見た千日手の値で、探索の中では相手側にはその符号を返した値になります。木をエンジンに合わせるなら、自分 (`own`) が先手の木は `draw_black = DrawValueBlack`・`draw_white = −DrawValueBlack`、後手の木は `draw_white = DrawValueWhite`・`draw_black = −DrawValueWhite` にします (−70 / 70 の組はどちらの条件も満たす)。`draw` 1 つだけでは、自分の側を正しくすると相手の側が逆向きになります。評価集合内の子に向かう MultiPV ∪ EDGE の手をつなぎます。同値は MultiPV の順、次に手の文字列順で選びます。
 
 ### 常駐
@@ -250,7 +255,7 @@ book_mine tree serve --state /path/to/state --out-root /path/to/trees \
 
 `EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads=1` と `USI_Hash=--hash` は起動ごとに指定します。MultiPV と nodes は木ごとの `opts` を使い、省略時は `--multipv` / `--nodes` を使います。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。値の順序は詰め直しません。受理する読みの中で手が重複した場合は検査エラーにします。mate は符号付き `30000 - |n|` です。
 
-`--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--extend` (0、0〜200)・`--extend-rounds` (1、0〜10)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件は state に固定しません。エンジン・モデル・SPSA パラメータ・nodes・MultiPV・千日手の値・Hash を変えても、同じ state と台帳で再開できます。保存済みの読みは、それぞれ読んだときの条件を保持します。
+`--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--extend` (0、0〜200)・`--extend-rounds` (1、0〜10)・`--settle-rounds` (0、0〜50)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件は state に固定しません。エンジン・モデル・SPSA パラメータ・nodes・MultiPV・千日手の値・Hash を変えても、同じ state と台帳で再開できます。保存済みの読みは、それぞれ読んだときの条件を保持します。
 
 木は実行中、各局面で最初に使った読みを保持します。後からその木自身の条件の読みが届いても差し替えず、再構築した木では優先条件を選び直します。同じ局面を異なる条件で読む要求は順に処理します。`require_condition` のない木が先に読みを要求し、後の `require_condition` のある木が自身の条件で読み直すことがあります。
 
@@ -279,7 +284,7 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 | `priority` | 0〜1000000、小さいほど先。目安: 0 = 急ぎ、100 = 既定、1000 = 空きを埋めるだけ |
 | `hold` | 真なら読まない (読みかけは読み終えて台帳に入れる)。解除で再開 |
 | `game` | 根からの実戦の手順 (USI の配列の配列)。各手順の最初の `depth+1` 手を局面別に合わせる |
-| `opts` | `opp_n` (1〜8)・`stop` (1〜30000)・`rounds` (0〜10)・`extend` (0〜200、段の上限の先を一本道で延ばす手数)・`extend_rounds` (0〜10、既定 1、延長区間の伸ばし直し回数)・`draw`・`draw_black`・`draw_white` (−30000〜30000)・`extra` (根で合法な手、8 手まで。こちらの手番の根では MultiPV 内の手だけを伸ばす)・`multipv` / `nodes` (正数)・`require_condition` (真偽値、既定 false) |
+| `opts` | `opp_n` (1〜8)・`stop` (1〜30000)・`rounds` (0〜10)・`extend` (0〜200、段の上限の先を一本道で延ばす手数)・`extend_rounds` (0〜10、既定 1、延長区間の伸ばし直し回数)・`settle_rounds` (0〜50、既定 0、伝播後の線の追加読み回数)・`draw`・`draw_black`・`draw_white` (−30000〜30000)・`extra` (根で合法な手、8 手まで。こちらの手番の根では MultiPV 内の手だけを伸ばす)・`multipv` / `nodes` (正数)・`require_condition` (真偽値、既定 false) |
 | `memo` | 自由 (道具は読まない) |
 | `group` | 一緒に読み切りたい木のまとまりの名前 (制御文字を含まない 1〜128 バイト)。serve は使わず、`tree queue-review` の再採点と `--group-table` が読む。この欄を知らない古い serve は行を拒否する |
 
@@ -448,7 +453,7 @@ book_mine tree status --state state-a --state state-b --json --stale-hours 2
 
 表では伸びを見込む残り局面数を整数に丸め、時間は小数第1位まで表示します。JSON の数値の精度は変えません。
 
-DONE の実績は `depth` と `extend` の組ごとに分けます。受付記録が使えない場合の延長は、キューの `opts.extend` (省略時 0) からの近似です。
+DONE の実績は `depth`・`extend`・`settle_rounds` の組ごとに分けます。受付記録が使えない場合の延長は、キューの `opts.extend` と `opts.settle_rounds` (省略時はともに 0) からの近似です。
 
 小さい木が先に完了するため、DONEに基づく増加推定は低めに偏ります。p80も終了時刻を80%の確率で保証する値ではありません。
 読み取りはserveとロックを共有しないため、各ファイルの更新の間には短いずれがあり得ます。
@@ -461,7 +466,7 @@ DONE の実績は `depth` と `extend` の組ごとに分けます。受付記�
 JSONLのキーは全行共通です。`kind` は `state` / `total`、`state` は指定パス (合計は `null`)、`status` は `ok` / `stale` / `unreadable` / `empty` (合計のみ)、`reason` はエラー理由または深さの近似値を使った通知 (通常は `null`) です。
 数値は `workers_busy`, `workers_total`, `trees_running`, `trees_waiting`, `trees_done`, `not_ready`, `trees_held`, `positions_read`, `positions_required`, `remaining_visible`, `remaining_mean`, `remaining_p80`, `positions_per_hour`, `nps_per_engine`, `nps_total`, `hours_until_idle_mean`, `hours_until_idle_p80`。
 `nps_per_engine`・`nps_total` は nodes/秒の数値で、不明なら `null` です。
-`depth_histogram` はdepth文字列 (延長ありは `depth+extend`、不明は `不明`) をキー、木数を値にしたオブジェクトです。`unreadable` の個数欄は0で、合計には使いません。
+`depth_histogram` はdepth文字列 (延長ありは `depth+extend`、settle ありは `depth+extend/settle=N`、不明は `不明`) をキー、木数を値にしたオブジェクトです。`unreadable` の個数欄は0で、合計には使いません。
 
 ### `tree queue-review`: 台ごとの残りと未着手の木を点検する
 
@@ -964,6 +969,7 @@ opp_n = 2
 stop = 300
 extend = 0 # depth の先を1位だけで延ばす手数
 extend_rounds = 1 # 延長区間の伸ばし直し回数 (0〜10)
+settle_rounds = 0 # 伝播後の線の追加読み回数 (0〜50)
 own = "w"
 rounds = 3
 extra = ["6b5a"]
@@ -1019,7 +1025,7 @@ BOOK_TREE_SIM_INPUT=/path/to/input.tsv cargo test -p tools --lib \
 予測は、依存の推移閉包が読み済みで循環を含まない局面から行います。
 `level` に無い MultiPV の手は読みの値のまま比較します。浅い再発見、伸ばし直し、
 回の途中で別の枝から `level` に入る合流によって、予測が外れることがあります。
-影は元の定義から作り、本体の force と予測を合わせ、rounds と extend_rounds を 0 にして台帳で進めます。
+影は元の定義から作り、本体の force と予測を合わせ、rounds・extend_rounds・settle_rounds を 0 にして台帳で進めます。
 本体が読みを取り込んだときと影の不足に読みが来たときに作り直します。
 構築・依存解析・展開の処理単位を数え、1 回 500,000 単位で打ち切った影は捨てます。
 1 周回の作り直しは、単位の合計が `--prefetch-work` に収まる分 (通常 1 本、最大 4 本) とし、残りは更新が必要な印を保持して次の周回の最初から処理します。

@@ -72,6 +72,8 @@ pub(super) struct Definition {
     pub extend: usize,
     #[serde(default = "super::targets::default_extend_rounds")]
     pub extend_rounds: usize,
+    #[serde(default)]
+    pub settle_rounds: usize,
     pub opp_n: usize,
     pub stop: i32,
     pub own: String,
@@ -100,6 +102,7 @@ impl Definition {
             depth: self.depth,
             extend: self.extend,
             extend_rounds: self.extend_rounds,
+            settle_rounds: self.settle_rounds,
             opp_n: self.opp_n,
             stop: self.stop,
             own: self.own.clone(),
@@ -137,6 +140,7 @@ pub(super) struct TreeParams {
     pub depth: usize,
     pub extend: usize,
     pub extend_rounds: usize,
+    pub settle_rounds: usize,
     pub opp_n: usize,
     pub stop: i32,
     pub own: String,
@@ -190,6 +194,10 @@ pub(super) struct Tree {
     pub candidates: BTreeMap<String, Vec<String>>,
     pub compare: BTreeMap<String, Option<String>>,
     pub round: usize,
+    pub settle_rounds_used: usize,
+    // 補助読みで生じた不足を、通常区間の登録条件に追加しない。
+    pub normal_unresolved: Option<Edges>,
+    pub game_lines: Vec<GameLine>,
     pub round_reports: Vec<(usize, usize)>,
     pub finished: bool,
     pub ready: bool,
@@ -266,10 +274,17 @@ impl Tree {
         if def.extend_rounds > 10 {
             bail!("extend_rounds は 0〜10 が必要です");
         }
+        if def.settle_rounds > 50 {
+            bail!("settle_rounds は 0〜50 が必要です");
+        }
+        let mut game_lines = Vec::new();
         let mut roots = BTreeMap::new();
         let mut root_order = Vec::new();
         let mut game: Edges = BTreeMap::new();
         for (root, ply, moves) in lines {
+            if def.settle_rounds > 0 {
+                game_lines.push((root.to_owned(), ply, moves.to_vec()));
+            }
             work.tick()?;
             if ply == 0 {
                 bail!("ply は正数が必要です");
@@ -309,6 +324,9 @@ impl Tree {
             candidates: BTreeMap::new(),
             compare: BTreeMap::new(),
             round: 0,
+            settle_rounds_used: 0,
+            normal_unresolved: None,
+            game_lines,
             round_reports: Vec::new(),
             finished: false,
             ready: false,
@@ -367,7 +385,7 @@ impl Tree {
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         let mp = self.nodes[key].lines();
         let level = self.level[key];
-        if level >= self.def.depth {
+        if level >= self.def.depth || self.settle_rounds_used > 0 {
             let pick = mp
                 .first()
                 .filter(|pv| {
@@ -483,8 +501,9 @@ impl Tree {
                 self.waiting.clone_from(&missing);
                 return Ok(missing);
             }
-            if self.round < self.def.rounds
-                || (self.def.extend > 0 && self.round < self.def.extend_rounds)
+            if self.settle_rounds_used == 0
+                && (self.round < self.def.rounds
+                    || (self.def.extend > 0 && self.round < self.def.extend_rounds))
             {
                 let values = self.negamax(&self.reach(&self.edge))?;
                 let pending = self.unresolved(&values);
@@ -511,6 +530,28 @@ impl Tree {
                     continue;
                 }
             }
+            if self.settle_rounds_used < self.def.settle_rounds {
+                let pending = super::lines::unsettled(self)?;
+                if !pending.is_empty() {
+                    if self.normal_unresolved.is_none() {
+                        let values = self.negamax(&self.reach(&self.edge))?;
+                        self.normal_unresolved = Some(
+                            self.unresolved(&values)
+                                .into_iter()
+                                .map(|(key, rows)| {
+                                    (key, rows.into_iter().map(|(_, mv)| mv).collect())
+                                })
+                                .collect(),
+                        );
+                    }
+                    for line in pending {
+                        self.force.entry(line.end_key.clone()).or_default().insert(line.end_move);
+                        self.expanded.remove(&line.end_key);
+                    }
+                    self.settle_rounds_used += 1;
+                    continue;
+                }
+            }
             self.finished = true;
             return Ok(Vec::new());
         }
@@ -521,6 +562,8 @@ impl Tree {
         self.roots.clear();
         self.root_order.clear();
         self.game.clear();
+        self.game_lines.clear();
+        self.normal_unresolved = None;
         self.nodes.clear();
         self.level.clear();
         self.ply.clear();
@@ -966,6 +1009,7 @@ impl Tree {
         let mut def = self.def.clone();
         def.rounds = 0;
         def.extend_rounds = 0;
+        def.settle_rounds = 0;
         let mut shadow = Self::build_borrowed(def, lines, work)?;
         for (key, moves) in self.force.iter().chain(predicted.iter()) {
             work.tick()?;
@@ -1269,6 +1313,7 @@ pub(super) mod prefetch_tests {
             rounds: 1,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             extra: vec![],
             draw: 17,
             draw_black: None,
@@ -1297,6 +1342,143 @@ pub(super) mod prefetch_tests {
         ]);
         let lines = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])];
         (Tree::build(def, &lines).unwrap(), cache, keys)
+    }
+
+    pub(in crate::book_tree) fn settle_fixture(
+        rounds: usize,
+    ) -> (Tree, BTreeMap<String, Reading>, Vec<String>) {
+        let (base, mut cache, keys) = extended_fixture(10);
+        for key in &keys[2..] {
+            cache.get_mut(key).unwrap().multipv.truncate(1);
+        }
+        cache.get_mut(&keys[1]).unwrap().multipv.truncate(2);
+        let mut def = base.def;
+        def.rounds = 0;
+        def.extend_rounds = 0;
+        def.settle_rounds = rounds;
+        let tree =
+            Tree::build(def, &[(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])]).unwrap();
+        (tree, cache, keys)
+    }
+
+    #[test]
+    fn settle_expands_propagated_second_and_resumes_from_cached_reads() {
+        for stop in [true, false] {
+            let (mut tree, mut cache, keys) = settle_fixture(3);
+            let next = child(&keys[1], "5a6a").unwrap();
+            assert_eq!(tree.advance(&cache).unwrap(), vec![(next.clone(), 2)]);
+            assert_eq!(tree.settle_rounds_used, 1);
+            assert_eq!(tree.round, 0);
+            assert_eq!(tree.advance(&cache).unwrap(), vec![(next.clone(), 2)]);
+            cache.insert(next.clone(), reading(&next, &[("4i3i", if stop { -300 } else { -10 })]));
+            if !stop {
+                let last = child(&next, "4i3i").unwrap();
+                assert_eq!(tree.advance(&cache).unwrap(), vec![(last.clone(), 3)]);
+                cache.insert(last.clone(), reading(&last, &[("6a7a", 10)]));
+                let cap = child(&last, "6a7a").unwrap();
+                assert_eq!(tree.advance(&cache).unwrap(), vec![(cap.clone(), 4)]);
+                cache.insert(cap.clone(), reading(&cap, &[("3i2i", -10)]));
+            }
+            assert!(tree.advance(&cache).unwrap().is_empty());
+            assert!(tree.finished);
+            assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
+            let mut resumed = Tree::build(tree.def.clone(), &tree.game_lines).unwrap();
+            assert!(resumed.advance(&cache).unwrap().is_empty());
+            assert_eq!(resumed.edge, tree.edge);
+            assert_eq!(resumed.level, tree.level);
+            assert_eq!(resumed.settle_rounds_used, tree.settle_rounds_used);
+            assert_eq!(resumed.round_reports, tree.round_reports);
+        }
+    }
+
+    #[test]
+    fn settle_root_candidates_extra_and_stop_exemption() {
+        let mut def = params();
+        def.depth = 0;
+        def.extend = 1;
+        def.rounds = 0;
+        def.extend_rounds = 0;
+        def.settle_rounds = 2;
+        def.extra = vec!["5i6i".into()];
+        let mut tree = Tree::build(def, &[(ROOT.into(), 1, vec![])]).unwrap();
+        let mut cache = BTreeMap::from([(
+            ROOT.into(),
+            reading(ROOT, &[("5i4i", 350), ("5i5h", 340), ("5i6i", 330)]),
+        )]);
+        for mv in ["5i4i", "5i5h", "5i6i"] {
+            let key = child(ROOT, mv).unwrap();
+            cache.insert(key.clone(), reading(&key, &[("5a4a", 0)]));
+        }
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.edge[ROOT].len(), 3);
+        assert_eq!(tree.settle_rounds_used, 1);
+        assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settle_exhaustion_records_auxiliary_unsettled() {
+        let (mut tree, mut cache, keys) = settle_fixture(1);
+        cache.get_mut(&keys[1]).unwrap().multipv.push(super::super::journal::Pv {
+            mv: "5a5b".into(),
+            cp: -1,
+            depth: 1,
+        });
+        let next = child(&keys[1], "5a6a").unwrap();
+        cache.insert(next.clone(), reading(&next, &[("4i3i", 300)]));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        let pending = super::super::lines::unsettled(&tree).unwrap();
+        assert!(pending.iter().any(|p| p.end_key == keys[1] && p.end_move == "5a5b"));
+        let dir = tempfile::tempdir().unwrap();
+        tree.def.out = dir.path().into();
+        assert!(tree.write_outputs().unwrap());
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["settle_rounds_used"], 1);
+        assert_eq!(status["unsettled"], serde_json::to_value(pending).unwrap());
+    }
+
+    #[test]
+    fn settle_game_below_depth_does_not_add_registration_blockers() {
+        let (mut tree, mut cache, keys) = settle_fixture(1);
+        tree.def.depth = 2;
+        tree.def.extend = 2;
+        cache.get_mut(&keys[1]).unwrap().multipv[0].cp = 300;
+        let next = child(&keys[1], "5a6a").unwrap();
+        cache.insert(next.clone(), reading(&next, &[("4i3i", 300)]));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.settle_rounds_used, 1);
+        assert_eq!(tree.edge[&keys[1]], BTreeSet::from(["5a6a".into()]));
+        let dir = tempfile::tempdir().unwrap();
+        tree.def.out = dir.path().into();
+        assert!(tree.write_outputs().unwrap());
+    }
+
+    #[test]
+    fn settle_traces_game_moves_beyond_normal_depth_and_cycles() {
+        let (base, mut cache, keys) = settle_fixture(3);
+        let mut def = base.def;
+        def.draw_black = Some(-30);
+        def.draw_white = Some(70);
+        let back = child(&keys[2], "4i5i").unwrap();
+        cache.insert(keys[2].clone(), reading(&keys[2], &[("4i5i", 10)]));
+        cache.insert(keys[1].clone(), reading(&keys[1], &[("5a4a", 10)]));
+        cache.insert(back.clone(), reading(&back, &[("4a5a", 10), ("4a3a", 40)]));
+        let moves = ["5i4i", "5a4a", "4i5i", "4a5a"].map(str::to_owned).to_vec();
+        let mut tree = Tree::build(def.clone(), &[(ROOT.into(), 1, moves.clone())]).unwrap();
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.settle_rounds_used, 0);
+        assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
+        let mut moves = moves;
+        moves[3] = "4a3a".into();
+        let mut tree = Tree::build(def, &[(ROOT.into(), 1, moves)]).unwrap();
+        let next = child(&back, "4a3a").unwrap();
+        assert_eq!(tree.advance(&cache).unwrap(), vec![(next.clone(), 4)]);
+        assert_eq!(tree.settle_rounds_used, 1);
+        cache.insert(next.clone(), reading(&next, &[("5i6i", 10)]));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
     }
 
     #[test]
