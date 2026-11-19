@@ -17,6 +17,7 @@ mod hold_early;
 mod inventory;
 mod journal;
 mod line_db;
+mod lines;
 mod live_import;
 mod main_line;
 mod master_index;
@@ -84,6 +85,8 @@ enum TreeCommand {
     Register(register::RegisterArgs),
     /// 読み終わった木のうち、登録していない出力先を一覧にする
     Inventory(inventory::InventoryArgs),
+    /// 完了した木の延長線と実戦手の伝播が止まった理由を表示する
+    Lines(lines::LinesArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -277,6 +280,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::QueueReview(args) => queue_review::run(*args),
         TreeCommand::Register(args) => register::run(args),
         TreeCommand::Inventory(args) => inventory::run(args),
+        TreeCommand::Lines(args) => lines::run(args),
         TreeCommand::ImportJournal(args) => transfer::run(args),
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;

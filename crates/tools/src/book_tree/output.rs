@@ -9,6 +9,8 @@ use std::fmt::Write;
 
 /// 登録の材料。own_nodes.tsv と同じく ready の木だけに残す。
 pub(super) const NODE_MOVES: &str = "node_moves.tsv";
+pub(super) const NODE_MOVES_HEADER: &str =
+    "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank";
 
 fn fm(v: Option<i32>) -> String {
     v.map_or_else(|| "-".into(), |v| format!("{v:+}"))
@@ -28,7 +30,15 @@ impl Tree {
         let pending = self.unresolved(&replace);
         // 延長は補助的な読みなので、延長区間だけの未解決手では登録を止めない。
         let ready = pending.keys().all(|key| self.level[key] >= self.def.depth);
-        let mut status = json!({"ready": ready, "unresolved": pending});
+        let mut status = json!({
+            "ready": ready,
+            "unresolved": pending,
+            "depth": self.def.depth,
+            "extend": self.def.extend,
+            "stop": self.def.stop,
+            "draw_black": self.def.draw_black.unwrap_or(self.def.draw),
+            "draw_white": self.def.draw_white.unwrap_or(self.def.draw),
+        });
         if self.reading_conditions.len() == 1
             && let Some(Some(fingerprint)) = self.reading_conditions.first()
             && super::schema::valid_fingerprint(fingerprint)
@@ -258,8 +268,7 @@ impl Tree {
 
     /// 両方の手番の局面の手ごとの伝播後の値。行き先が木の局面でない手は 1 回の読みの値のまま並べる。
     fn node_moves(&self, replace: &Values) -> Result<String> {
-        let mut text =
-            "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n".to_owned();
+        let mut text = format!("{NODE_MOVES_HEADER}\n");
         for key in self.reach(&self.edge) {
             let reading = &self.nodes[&key];
             if reading.lines().is_empty() {

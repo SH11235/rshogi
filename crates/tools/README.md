@@ -18,6 +18,7 @@
 | 外部の定跡の木を借りて自分の読みで値を付ける (main は元データ全体で伝播し直した値で選び、nodes も合流後の最善手に揃える。未完了局面へ戻る出口の読みも登録を保留) | [book_mine borrow](docs/book_mine.md#borrow-大きい定跡の木を借りる) |
 | 木の読みを台帳と照合し、合流を含む値の由来を付けて元データに登録する (serve の稼働中も可、読みの条件が混ざる木は `cond` を手ごとに書く、局面を除外する `--skip-keys <FILE>`、反転キーの合流で止まる木ごとに独立に除く局面を探し (`--auto-skip-flip-jobs <N>`、既定 4)、残った問題 (木の組み合わせで止まる分) は全部の木の局面から並列に絞り (通らないときだけ木の組と局面の ddmin)、足す `--auto-skip-flip <OUT>`、curated の局面の main も替える `--replace-curated`、木の中で先を読んだ手 (`--bench-expanded`)、1 回の読みの手と先を確かめられない手 (`--bench-single`) を差が `--alt-gap` 以上でも bench で残す指定、成れる角・飛・歩の不成は main・alt から record にし木の手からも外す、`--single-enqueue-out` の行に `--walk-table` の辿りの重み・下限 `--single-min-weight`・重みの帯ごとの priority `--single-priority-band`) | [book_mine tree register](docs/book_mine.md#定跡の元データへの登録) |
 | 読み終わった木の出力先を根の下から集め、登録済み・未完了・id の接頭辞・段 0 だけ・外した読みそのもの (key・nodes・sec が全部一致) を含む木・登録済みの木や先の候補と内容が同じ写しを判定つきの表に出し、残りを `tree register` に渡す一覧にする | [book_mine tree inventory](docs/book_mine.md#tree-inventory-登録していない読み終わった木の一覧) |
+| 完了した木の延長線と伝播後の最善手の違い、実戦手からの最善手順を調べる | [book_mine tree lines](docs/book_mine.md#tree-lines-延長線と実戦手の打ち切り理由) |
 | 複数のserveの進み・1 engine と全 worker の NPS・NOT_READYの終了件数・世代別の深さ・先後別に重複を除いたDONE実績による残り・idleまでの時間を表示する | [book_mine tree status](docs/book_mine.md#tree-status-複数の台の進みと-idle-までの時間) |
 | 定跡の 13 列の元データ・読み条件・値の由来・schema の語彙・合法手と、main・alt に成れる角・飛・歩の不成が無いことを検査する | [book_mine master validate](docs/book_mine.md#master-validate-元データの全件検査) |
 | 元データに行を追加・置換する（curated の全列置換も対象） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
