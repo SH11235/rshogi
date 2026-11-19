@@ -403,16 +403,27 @@ impl Report {
             let trace =
                 self.trace(propagation, next.to_owned(), ancestors, Follow::Propagated, merges)?;
             return Ok((value.or(raw_value), trace));
-        } else if let Some(first) = reading
-            .and_then(|r| r.lines().first())
-            .filter(|pv| source_level > 0 && pv.cp.unsigned_abs() >= self.limits.stop)
+        } else if let Some(cp) = (source_level > 0)
+            .then(|| {
+                // 1 位が STOP 以上でも実戦手の値は決まらないので、決着と言えるのは実戦手自身が
+                // STOP 以上か、1 位が -STOP 以下 (どの手も負け) のときだけ。
+                raw.map(|pv| pv.cp).filter(|cp| cp.unsigned_abs() >= self.limits.stop).or_else(
+                    || {
+                        reading
+                            .and_then(|r| r.lines().first())
+                            .map(|pv| pv.cp)
+                            .filter(|&cp| cp <= -(self.limits.stop as i32))
+                    },
+                )
+            })
+            .flatten()
         {
             (
                 raw_value,
-                read_end(first.cp, true, false),
+                read_end(cp, true, false),
                 key,
                 Some(source_level),
-                Some(black(key, first.cp)),
+                Some(black(key, cp)),
             )
         } else {
             let reason = if reading.is_some() {

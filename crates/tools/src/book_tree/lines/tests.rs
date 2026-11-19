@@ -90,11 +90,12 @@ fn stops_at_shallower_merge_with_its_propagated_value() {
 }
 
 #[test]
-fn direct_game_move_at_stop_uses_the_stopping_read() {
-    for (cp, reason) in [
-        (300, Reason::Stop),
-        (-300, Reason::Stop),
-        (29900, Reason::Mate),
+fn direct_game_move_settles_only_when_every_move_is_lost() {
+    for (cp, reason, end) in [
+        (300, Reason::Unexpanded, 25),
+        (29900, Reason::Unexpanded, 25),
+        (-300, Reason::Stop, -300),
+        (-29900, Reason::Mate, -29900),
     ] {
         let (_dir, args, keys) = completed(cp);
         let report = Report::load(&args).unwrap();
@@ -109,10 +110,7 @@ fn direct_game_move_at_stop_uses_the_stopping_read() {
             )
             .unwrap();
         assert_eq!(value, Some(25));
-        assert_eq!(
-            (trace.reason, trace.key, trace.level, trace.value),
-            (reason, keys[2].clone(), Some(2), Some(cp))
-        );
+        assert_eq!((trace.reason, trace.value), (reason, Some(end)));
     }
 }
 
