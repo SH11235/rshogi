@@ -1175,7 +1175,7 @@ fn cyclic_nodes(children: &BTreeMap<String, Vec<(String, String)>>) -> BTreeSet<
 }
 
 #[cfg(test)]
-mod prefetch_tests {
+pub(super) mod prefetch_tests {
     use super::super::journal::Pv;
     use super::*;
     const ROOT: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
@@ -1222,7 +1222,9 @@ mod prefetch_tests {
             draw_white: None,
         }
     }
-    fn extended_fixture(stop_value: i32) -> (Tree, BTreeMap<String, Reading>, Vec<String>) {
+    pub(in crate::book_tree) fn extended_fixture(
+        stop_value: i32,
+    ) -> (Tree, BTreeMap<String, Reading>, Vec<String>) {
         let mut def = params();
         def.depth = 1;
         def.extend = 3;

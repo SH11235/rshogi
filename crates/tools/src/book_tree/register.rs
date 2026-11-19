@@ -845,7 +845,7 @@ pub(super) fn parse_node_moves(
 ) -> Result<BTreeMap<String, Node>> {
     let mut lines = text.lines();
     ensure!(
-        lines.next() == Some("key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank"),
+        lines.next() == Some(super::output::NODE_MOVES_HEADER),
         "{NODE_MOVES} の見出しが違います"
     );
     let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
