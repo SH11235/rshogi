@@ -79,6 +79,7 @@ fn definition(dir: &Path, rounds: usize) -> Definition {
         rounds,
         extend: 0,
         extend_rounds: 1,
+        settle_rounds: 0,
         extra: vec!["5i6i".into()],
         fingerprint: None,
         draw: 17,
@@ -970,6 +971,7 @@ pub(super) fn serve_args(
         rounds: 3,
         extend: 0,
         extend_rounds: 1,
+        settle_rounds: 0,
         draw: 0,
         trace_dir: None,
         pending_secs: None,
@@ -1163,6 +1165,7 @@ fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
         rounds: 3,
         extend: 0,
         extend_rounds: 1,
+        settle_rounds: 0,
         draw: 0,
         multipv: 3,
         nodes: 100,
@@ -2404,4 +2407,42 @@ fn toml_extend_rounds_defaults_and_range() {
         assert_eq!(Tree::build(def.params(), &[(ROOT.into(), 1, vec![])]).is_ok(), rounds <= 10);
     }
     assert!(toml::from_str::<Definition>(&format!("{text}extend_rounds=-1\n")).is_err());
+}
+
+#[test]
+fn settle_zero_preserves_outputs_and_toml_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "paths='paths.tsv'\nout='out'\ndepth=1\nextend=3\nextend_rounds=0\nopp_n=1\nstop=300\nown='b'\nrounds=0\n";
+    let (_, cache, keys) = super::model::prefetch_tests::extended_fixture(10);
+    let mut outputs = Vec::new();
+    for suffix in ["", "settle_rounds=0\n"] {
+        let definition: Definition = toml::from_str(&format!("{text}{suffix}")).unwrap();
+        assert_eq!(definition.settle_rounds, 0);
+        let mut tree =
+            Tree::build(definition.params(), &[(keys[0].clone(), 1, vec!["5i4i".into()])]).unwrap();
+        tree.def.out = dir.path().join(outputs.len().to_string());
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(tree.write_outputs().unwrap());
+        let files: BTreeMap<_, _> = std::fs::read_dir(&tree.def.out)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect();
+        assert!(
+            !String::from_utf8_lossy(&files[std::ffi::OsStr::new("registration_status.json")])
+                .contains("settle")
+        );
+        outputs.push(files);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    for rounds in [1, 50, 51] {
+        let definition: Definition =
+            toml::from_str(&format!("{text}settle_rounds={rounds}\n")).unwrap();
+        assert_eq!(
+            Tree::build(definition.params(), &[(keys[0].clone(), 1, vec![])]).is_ok(),
+            rounds <= 50
+        );
+    }
 }

@@ -29,7 +29,13 @@ impl Tree {
         let rule = self.negamax(&rule_set)?;
         let pending = self.unresolved(&replace);
         // 延長は補助的な読みなので、延長区間だけの未解決手では登録を止めない。
-        let ready = pending.keys().all(|key| self.level[key] >= self.def.depth);
+        let ready = pending.iter().all(|(key, rows)| {
+            self.level[key] >= self.def.depth
+                || self.normal_unresolved.as_ref().is_some_and(|original| {
+                    rows.iter()
+                        .all(|(_, mv)| !original.get(key).is_some_and(|moves| moves.contains(mv)))
+                })
+        });
         let mut status = json!({
             "ready": ready,
             "unresolved": pending,
@@ -39,6 +45,10 @@ impl Tree {
             "draw_black": self.def.draw_black.unwrap_or(self.def.draw),
             "draw_white": self.def.draw_white.unwrap_or(self.def.draw),
         });
+        if self.def.settle_rounds > 0 {
+            status["settle_rounds_used"] = json!(self.settle_rounds_used);
+            status["unsettled"] = json!(super::lines::unsettled(self)?);
+        }
         if self.reading_conditions.len() == 1
             && let Some(Some(fingerprint)) = self.reading_conditions.first()
             && super::schema::valid_fingerprint(fingerprint)

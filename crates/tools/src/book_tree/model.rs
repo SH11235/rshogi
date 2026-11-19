@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// `Tree::negamax` が循環の中の局面を手順ごとに厳密に数える呼び出しの上限 (超えると近似に切り替える)。
-const NEGAMAX_EXACT_CALLS: usize = 2_000_000;
+pub(super) const NEGAMAX_EXACT_CALLS: usize = 2_000_000;
 
 pub(super) type Edges = BTreeMap<String, BTreeSet<String>>;
 pub(super) type Values = BTreeMap<String, BTreeMap<String, i32>>;
@@ -72,6 +72,8 @@ pub(super) struct Definition {
     pub extend: usize,
     #[serde(default = "super::targets::default_extend_rounds")]
     pub extend_rounds: usize,
+    #[serde(default)]
+    pub settle_rounds: usize,
     pub opp_n: usize,
     pub stop: i32,
     pub own: String,
@@ -100,6 +102,7 @@ impl Definition {
             depth: self.depth,
             extend: self.extend,
             extend_rounds: self.extend_rounds,
+            settle_rounds: self.settle_rounds,
             opp_n: self.opp_n,
             stop: self.stop,
             own: self.own.clone(),
@@ -137,6 +140,7 @@ pub(super) struct TreeParams {
     pub depth: usize,
     pub extend: usize,
     pub extend_rounds: usize,
+    pub settle_rounds: usize,
     pub opp_n: usize,
     pub stop: i32,
     pub own: String,
@@ -190,6 +194,10 @@ pub(super) struct Tree {
     pub candidates: BTreeMap<String, Vec<String>>,
     pub compare: BTreeMap<String, Option<String>>,
     pub round: usize,
+    pub settle_rounds_used: usize,
+    // 補助読みで生じた不足を、通常区間の登録条件に追加しない。
+    pub normal_unresolved: Option<Edges>,
+    pub game_lines: Vec<GameLine>,
     pub round_reports: Vec<(usize, usize)>,
     pub finished: bool,
     pub ready: bool,
@@ -266,10 +274,17 @@ impl Tree {
         if def.extend_rounds > 10 {
             bail!("extend_rounds は 0〜10 が必要です");
         }
+        if def.settle_rounds > 50 {
+            bail!("settle_rounds は 0〜50 が必要です");
+        }
+        let mut game_lines = Vec::new();
         let mut roots = BTreeMap::new();
         let mut root_order = Vec::new();
         let mut game: Edges = BTreeMap::new();
         for (root, ply, moves) in lines {
+            if def.settle_rounds > 0 {
+                game_lines.push((root.to_owned(), ply, moves.to_vec()));
+            }
             work.tick()?;
             if ply == 0 {
                 bail!("ply は正数が必要です");
@@ -283,10 +298,16 @@ impl Tree {
                 root_order.push(key.clone());
             }
             roots.entry(key.clone()).or_insert(ply);
-            for mv in moves.iter().take(def.depth.saturating_add(1)) {
+            for (index, mv) in moves.iter().enumerate() {
+                // depth+1 手より先は settle だけが辿るので、既定 0 では検査しない。
+                if index > def.depth && def.settle_rounds == 0 {
+                    break;
+                }
                 work.tick()?;
                 let next = child(&key, mv)?;
-                game.entry(key).or_default().insert(mv.to_owned());
+                if index <= def.depth {
+                    game.entry(key).or_default().insert(mv.to_owned());
+                }
                 key = next;
             }
         }
@@ -309,6 +330,9 @@ impl Tree {
             candidates: BTreeMap::new(),
             compare: BTreeMap::new(),
             round: 0,
+            settle_rounds_used: 0,
+            normal_unresolved: None,
+            game_lines,
             round_reports: Vec::new(),
             finished: false,
             ready: false,
@@ -367,7 +391,7 @@ impl Tree {
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         let mp = self.nodes[key].lines();
         let level = self.level[key];
-        if level >= self.def.depth {
+        if level >= self.def.depth || self.settle_rounds_used > 0 {
             let pick = mp
                 .first()
                 .filter(|pv| {
@@ -483,8 +507,9 @@ impl Tree {
                 self.waiting.clone_from(&missing);
                 return Ok(missing);
             }
-            if self.round < self.def.rounds
-                || (self.def.extend > 0 && self.round < self.def.extend_rounds)
+            if self.settle_rounds_used == 0
+                && (self.round < self.def.rounds
+                    || (self.def.extend > 0 && self.round < self.def.extend_rounds))
             {
                 let values = self.negamax(&self.reach(&self.edge))?;
                 let pending = self.unresolved(&values);
@@ -511,6 +536,29 @@ impl Tree {
                     continue;
                 }
             }
+            if self.settle_rounds_used < self.def.settle_rounds {
+                let pending = super::lines::unsettled(self)?;
+                if !pending.is_empty() {
+                    if self.normal_unresolved.is_none() {
+                        let values = self.negamax(&self.reach(&self.edge))?;
+                        self.normal_unresolved = Some(
+                            self.unresolved(&values)
+                                .into_iter()
+                                .filter(|(key, _)| self.level[key] < self.def.depth)
+                                .map(|(key, rows)| {
+                                    (key, rows.into_iter().map(|(_, mv)| mv).collect())
+                                })
+                                .collect(),
+                        );
+                    }
+                    for line in pending {
+                        self.force.entry(line.end_key.clone()).or_default().insert(line.end_move);
+                        self.expanded.remove(&line.end_key);
+                    }
+                    self.settle_rounds_used += 1;
+                    continue;
+                }
+            }
             self.finished = true;
             return Ok(Vec::new());
         }
@@ -521,6 +569,8 @@ impl Tree {
         self.roots.clear();
         self.root_order.clear();
         self.game.clear();
+        self.game_lines.clear();
+        self.normal_unresolved = None;
         self.nodes.clear();
         self.level.clear();
         self.ply.clear();
@@ -646,6 +696,7 @@ pub(super) struct Propagation<'a> {
     readings: &'a BTreeMap<String, Reading>,
     children: BTreeMap<String, Vec<(String, String)>>,
     cyclic: BTreeSet<String>,
+    reverse: BTreeMap<String, Vec<String>>,
     draw: [i32; 2],
 }
 
@@ -678,45 +729,75 @@ impl<'a> Propagation<'a> {
                 }
             }
         }
+        let mut reverse: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (key, list) in &children {
+            for (_, child) in list {
+                reverse.entry(child.clone()).or_default().push(key.clone());
+            }
+        }
         let cyclic = cyclic_nodes(&children);
         Ok(Self {
             readings,
             children,
             cyclic,
+            reverse,
             draw,
         })
     }
 
-    /// 祖先を含む手順上で、伝播後の値と次に辿る最善手を求める。
-    pub fn position(
-        &self,
-        key: &str,
-        ancestors: &mut BTreeSet<String>,
-    ) -> Option<PropagatedPosition> {
-        let reading = self.readings.get(key)?;
-        let (value, rows) = self.evaluator(NEGAMAX_EXACT_CALLS).evaluate(key, ancestors);
-        let best = rank_moves(reading, &rows, rows.keys().cloned()).into_iter().next();
-        Some(PropagatedPosition { value, best, rows })
-    }
-
-    fn evaluator(&self, exact_calls: usize) -> Evaluator<'_> {
+    pub(super) fn evaluator(&self, exact_calls: usize) -> Evaluator<'_> {
         Evaluator {
             propagation: self,
             memo: BTreeMap::new(),
+            call_memo: BTreeMap::new(),
+            ancestors: BTreeSet::new(),
+            ancestor_dependent: BTreeSet::new(),
             calls: 0,
             exact_calls,
         }
     }
 }
 
-struct Evaluator<'a> {
+pub(super) struct Evaluator<'a> {
     propagation: &'a Propagation<'a>,
     memo: BTreeMap<String, i32>,
+    call_memo: BTreeMap<String, i32>,
+    ancestors: BTreeSet<String>,
+    ancestor_dependent: BTreeSet<String>,
     calls: usize,
     exact_calls: usize,
 }
 
 impl Evaluator<'_> {
+    #[cfg(test)]
+    pub(super) fn calls(&self) -> usize {
+        self.calls
+    }
+
+    /// 祖先を含む手順上で、伝播後の値と次に辿る最善手を求める。
+    pub fn position(
+        &mut self,
+        key: &str,
+        ancestors: &mut BTreeSet<String>,
+    ) -> Option<PropagatedPosition> {
+        self.call_memo.clear();
+        let reading = self.propagation.readings.get(key)?;
+        // 祖先が増える間は逆到達集合も増えるだけなので、既知の辺を辿り直さない。
+        if !self.ancestors.is_subset(ancestors) {
+            self.ancestor_dependent.clear();
+        }
+        self.ancestors.clone_from(ancestors);
+        let mut pending: Vec<_> = ancestors.iter().collect();
+        while let Some(ancestor) = pending.pop() {
+            if self.ancestor_dependent.insert(ancestor.clone()) {
+                pending.extend(self.propagation.reverse.get(ancestor).into_iter().flatten());
+            }
+        }
+        let (value, rows) = self.evaluate(key, ancestors);
+        let best = rank_moves(reading, &rows, rows.keys().cloned()).into_iter().next();
+        Some(PropagatedPosition { value, best, rows })
+    }
+
     fn evaluate(&mut self, key: &str, path: &mut BTreeSet<String>) -> (i32, BTreeMap<String, i32>) {
         self.calls += 1;
         let reading = &self.propagation.readings[key];
@@ -725,7 +806,11 @@ impl Evaluator<'_> {
         for (mv, child) in self.propagation.children.get(key).into_iter().flatten() {
             let value = if path.contains(child) {
                 self.propagation.draw[usize::from(side(key) == "w")]
-            } else if let Some(&value) = self.memo.get(child) {
+            } else if let Some(&value) = if self.ancestor_dependent.contains(child) {
+                self.call_memo.get(child)
+            } else {
+                self.memo.get(child)
+            } {
                 -value
             } else {
                 -self.evaluate(child, path).0
@@ -737,10 +822,15 @@ impl Evaluator<'_> {
             .then(|| reading.multipv.first().map(|p| p.cp))
             .flatten();
         let value = rows.values().copied().max().or(declaration).unwrap_or(0);
-        // 循環外の局面は探索中に加えた祖先へ戻れない。循環内は手順ごとに評価するが、
-        // 呼び出し上限を超えたら探索量を抑えるために値を使い回す。
+        // 開始時の祖先へ戻る値は呼び出し間で共有できないが、非循環なら呼び出し内では一定。
+        // 循環内では上限後に近似へ切り替え、手順ごとの再評価を抑える。
         if !self.propagation.cyclic.contains(key) || self.calls > self.exact_calls {
-            self.memo.insert(key.to_owned(), value);
+            let memo = if self.ancestor_dependent.contains(key) {
+                &mut self.call_memo
+            } else {
+                &mut self.memo
+            };
+            memo.insert(key.to_owned(), value);
         }
         (value, rows)
     }
@@ -966,6 +1056,7 @@ impl Tree {
         let mut def = self.def.clone();
         def.rounds = 0;
         def.extend_rounds = 0;
+        def.settle_rounds = 0;
         let mut shadow = Self::build_borrowed(def, lines, work)?;
         for (key, moves) in self.force.iter().chain(predicted.iter()) {
             work.tick()?;
@@ -1018,7 +1109,7 @@ impl Tree {
         cache: &impl Readings,
         limit: usize,
     ) -> Vec<PrefetchCandidate> {
-        if self.finished || self.failed {
+        if self.finished || self.failed || self.settle_rounds_used > 0 {
             return Vec::new();
         }
         // 合流した局面を浅い段で辿り直せるよう、段の小さい順に処理する。
@@ -1102,7 +1193,8 @@ impl Tree {
         limit: usize,
     ) -> Result<PredictionReport> {
         let mut report = PredictionReport::default();
-        if hold
+        if self.settle_rounds_used > 0
+            || hold
             || self.finished
             || self.failed
             || self.def.depth == 0
@@ -1269,6 +1361,7 @@ pub(super) mod prefetch_tests {
             rounds: 1,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             extra: vec![],
             draw: 17,
             draw_black: None,
@@ -1297,6 +1390,186 @@ pub(super) mod prefetch_tests {
         ]);
         let lines = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])];
         (Tree::build(def, &lines).unwrap(), cache, keys)
+    }
+
+    pub(in crate::book_tree) fn settle_fixture(
+        rounds: usize,
+    ) -> (Tree, BTreeMap<String, Reading>, Vec<String>) {
+        let (base, mut cache, keys) = extended_fixture(10);
+        for key in &keys[2..] {
+            cache.get_mut(key).unwrap().multipv.truncate(1);
+        }
+        cache.get_mut(&keys[1]).unwrap().multipv.truncate(2);
+        let mut def = base.def;
+        def.rounds = 0;
+        def.extend_rounds = 0;
+        def.settle_rounds = rounds;
+        let tree =
+            Tree::build(def, &[(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])]).unwrap();
+        (tree, cache, keys)
+    }
+
+    #[test]
+    fn settle_expands_propagated_second_and_resumes_from_cached_reads() {
+        for stop in [true, false] {
+            let (mut tree, mut cache, keys) = settle_fixture(3);
+            let next = child(&keys[1], "5a6a").unwrap();
+            assert_eq!(tree.advance(&cache).unwrap(), vec![(next.clone(), 2)]);
+            assert_eq!(tree.settle_rounds_used, 1);
+            assert_eq!(tree.round, 0);
+            assert_eq!(tree.advance(&cache).unwrap(), vec![(next.clone(), 2)]);
+            cache.insert(next.clone(), reading(&next, &[("4i3i", if stop { -300 } else { -10 })]));
+            if !stop {
+                let last = child(&next, "4i3i").unwrap();
+                assert_eq!(tree.advance(&cache).unwrap(), vec![(last.clone(), 3)]);
+                cache.insert(last.clone(), reading(&last, &[("6a7a", 10)]));
+                let cap = child(&last, "6a7a").unwrap();
+                assert_eq!(tree.advance(&cache).unwrap(), vec![(cap.clone(), 4)]);
+                cache.insert(cap.clone(), reading(&cap, &[("3i2i", -10)]));
+            }
+            assert!(tree.advance(&cache).unwrap().is_empty());
+            assert!(tree.finished);
+            assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
+            let mut resumed = Tree::build(tree.def.clone(), &tree.game_lines).unwrap();
+            assert!(resumed.advance(&cache).unwrap().is_empty());
+            assert_eq!(resumed.edge, tree.edge);
+            assert_eq!(resumed.level, tree.level);
+            assert_eq!(resumed.settle_rounds_used, tree.settle_rounds_used);
+            assert_eq!(resumed.round_reports, tree.round_reports);
+        }
+    }
+
+    #[test]
+    fn settle_shallower_rediscovery_preserves_extension_classification() {
+        let (mut tree, mut cache, keys) = extended_fixture(10);
+        cache.get_mut(&keys[2]).unwrap().multipv[1].cp = 25;
+        tree.def.rounds = 0;
+        tree.def.extend_rounds = 0;
+        tree.def.settle_rounds = 1;
+        tree.advance(&cache).unwrap();
+        assert_eq!(tree.settle_rounds_used, 1);
+        assert!(!tree.normal_unresolved.as_ref().unwrap().contains_key(&keys[2]));
+        tree.level.insert(keys[2].clone(), 0);
+        let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
+        assert!(tree.unresolved(&values).contains_key(&keys[2]));
+        let dir = tempfile::tempdir().unwrap();
+        tree.def.out = dir.path().into();
+        assert!(tree.write_outputs().unwrap());
+    }
+
+    #[test]
+    fn settle_disables_prefetch_and_speculation() {
+        let (mut tree, cache, keys) = settle_fixture(3);
+        tree.advance(&cache).unwrap();
+        assert_eq!(tree.settle_rounds_used, 1);
+        tree.def.rounds = 10;
+        assert!(
+            tree.prefetch(&tree.game_lines, &cache, false, PREFETCH_WORK)
+                .unwrap()
+                .is_empty()
+        );
+        let next = child(&keys[1], "5a6a").unwrap();
+        let tops = BTreeMap::from([(next, (vec!["4i3i".into()], 0, 3))]);
+        assert!(tree.speculate(&tops, &cache, PREFETCH_WORK).is_empty());
+    }
+
+    #[test]
+    fn build_checks_game_tail_past_depth_only_when_settling() {
+        let lines = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into(), "invalid".into()])];
+        let (tree, _, _) = settle_fixture(1);
+        assert!(Tree::build(tree.def, &lines).is_err());
+        let (tree, _, _) = settle_fixture(0);
+        assert!(Tree::build(tree.def, &lines).is_ok());
+    }
+
+    #[test]
+    fn settle_root_candidates_extra_and_stop_exemption() {
+        let mut def = params();
+        def.depth = 0;
+        def.extend = 1;
+        def.rounds = 0;
+        def.extend_rounds = 0;
+        def.settle_rounds = 2;
+        def.extra = vec!["5i6i".into()];
+        let mut tree = Tree::build(def, &[(ROOT.into(), 1, vec![])]).unwrap();
+        let mut cache = BTreeMap::from([(
+            ROOT.into(),
+            reading(ROOT, &[("5i4i", 350), ("5i5h", 340), ("5i6i", 330)]),
+        )]);
+        for mv in ["5i4i", "5i5h", "5i6i"] {
+            let key = child(ROOT, mv).unwrap();
+            cache.insert(key.clone(), reading(&key, &[("5a4a", 0)]));
+        }
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.edge[ROOT].len(), 3);
+        assert_eq!(tree.settle_rounds_used, 1);
+        assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settle_exhaustion_records_auxiliary_unsettled() {
+        let (mut tree, mut cache, keys) = settle_fixture(1);
+        cache.get_mut(&keys[1]).unwrap().multipv.push(super::super::journal::Pv {
+            mv: "5a5b".into(),
+            cp: -1,
+            depth: 1,
+        });
+        let next = child(&keys[1], "5a6a").unwrap();
+        cache.insert(next.clone(), reading(&next, &[("4i3i", 300)]));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        let pending = super::super::lines::unsettled(&tree).unwrap();
+        assert!(pending.iter().any(|p| p.end_key == keys[1] && p.end_move == "5a5b"));
+        let dir = tempfile::tempdir().unwrap();
+        tree.def.out = dir.path().into();
+        assert!(tree.write_outputs().unwrap());
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("registration_status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["settle_rounds_used"], 1);
+        assert_eq!(status["unsettled"], serde_json::to_value(pending).unwrap());
+    }
+
+    #[test]
+    fn settle_game_below_depth_does_not_add_registration_blockers() {
+        let (mut tree, mut cache, keys) = settle_fixture(1);
+        tree.def.depth = 2;
+        tree.def.extend = 2;
+        cache.get_mut(&keys[1]).unwrap().multipv[0].cp = 300;
+        let next = child(&keys[1], "5a6a").unwrap();
+        cache.insert(next.clone(), reading(&next, &[("4i3i", 300)]));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.settle_rounds_used, 1);
+        assert_eq!(tree.edge[&keys[1]], BTreeSet::from(["5a6a".into()]));
+        let dir = tempfile::tempdir().unwrap();
+        tree.def.out = dir.path().into();
+        assert!(tree.write_outputs().unwrap());
+    }
+
+    #[test]
+    fn settle_traces_game_moves_beyond_normal_depth_and_cycles() {
+        let (base, mut cache, keys) = settle_fixture(3);
+        let mut def = base.def;
+        def.draw_black = Some(-30);
+        def.draw_white = Some(70);
+        let back = child(&keys[2], "4i5i").unwrap();
+        cache.insert(keys[2].clone(), reading(&keys[2], &[("4i5i", 10)]));
+        cache.insert(keys[1].clone(), reading(&keys[1], &[("5a4a", 10)]));
+        cache.insert(back.clone(), reading(&back, &[("4a5a", 10), ("4a3a", 40)]));
+        let moves = ["5i4i", "5a4a", "4i5i", "4a5a"].map(str::to_owned).to_vec();
+        let mut tree = Tree::build(def.clone(), &[(ROOT.into(), 1, moves.clone())]).unwrap();
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.settle_rounds_used, 0);
+        assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
+        let mut moves = moves;
+        moves[3] = "4a3a".into();
+        let mut tree = Tree::build(def, &[(ROOT.into(), 1, moves)]).unwrap();
+        let next = child(&back, "4a3a").unwrap();
+        assert_eq!(tree.advance(&cache).unwrap(), vec![(next.clone(), 4)]);
+        assert_eq!(tree.settle_rounds_used, 1);
+        cache.insert(next.clone(), reading(&next, &[("5i6i", 10)]));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(super::super::lines::unsettled(&tree).unwrap().is_empty());
     }
 
     #[test]
@@ -1546,6 +1819,142 @@ pub(super) mod prefetch_tests {
         tree.prediction_values_report(&mut unlimited(), &mut report).unwrap();
         assert!(report.cyclic.contains(ROOT));
         assert!(report.cyclic.contains(&parent));
+    }
+
+    pub(in crate::book_tree) fn external_ancestor_fixture()
+    -> (BTreeMap<String, Reading>, Vec<String>) {
+        let moves = ["5i4i", "5a4a", "4i4h", "4a4b", "4h5i", "4b5a"];
+        let mut keys = vec![ROOT.to_owned()];
+        for mv in moves {
+            keys.push(child(keys.last().unwrap(), mv).unwrap());
+        }
+        assert_eq!(keys[6], keys[0]);
+        keys.pop();
+        let mut readings: BTreeMap<_, _> = keys
+            .iter()
+            .zip(moves)
+            .map(|(key, mv)| (key.clone(), reading(key, &[(mv, 0)])))
+            .collect();
+        readings.insert(keys[1].clone(), reading(&keys[1], &[("5a6a", 100)]));
+        readings.insert(keys[5].clone(), reading(&keys[5], &[("4b5a", 0), ("4b3b", 40)]));
+        (readings, keys)
+    }
+
+    pub(in crate::book_tree) fn branching_cycle_fixture() -> BTreeMap<String, Reading> {
+        let black = [
+            "5i4i", "4i3i", "3i3h", "3h3g", "3g4g", "4g5g", "5g5h", "5h5i",
+        ];
+        let white = [
+            "5a4a", "4a3a", "3a3b", "3b3c", "3c4c", "4c5c", "5c5b", "5b5a",
+        ];
+        let mut readings = BTreeMap::new();
+        let mut pending = vec![(ROOT.to_owned(), 0, 0)];
+        while let Some((key, b, w)) = pending.pop() {
+            if readings.contains_key(&key) {
+                continue;
+            }
+            let (moves, index) = if side(&key) == "b" {
+                (&black, b)
+            } else {
+                (&white, w)
+            };
+            let forward = moves[index];
+            let previous = moves[(index + 7) % 8];
+            let backward = format!("{}{}", &previous[2..], &previous[..2]);
+            for (mv, next) in [
+                (forward, (index + 1) % 8),
+                (backward.as_str(), (index + 7) % 8),
+            ] {
+                let (b, w) = if side(&key) == "b" {
+                    (next, w)
+                } else {
+                    (b, next)
+                };
+                pending.push((child(&key, mv).unwrap(), b, w));
+            }
+            readings.insert(key.clone(), reading(&key, &[(forward, 0), (&backward, 0)]));
+        }
+        readings
+    }
+
+    #[test]
+    fn ancestor_dependent_dag_merges_are_evaluated_once_per_call() {
+        let keys: Vec<_> = (0..32).map(|i| format!("node{i} b -")).collect();
+        let readings = keys.iter().map(|key| (key.clone(), reading(key, &[]))).collect();
+        let children: BTreeMap<String, Vec<(String, String)>> = (0..31)
+            .map(|i| {
+                (
+                    keys[i].clone(),
+                    ((i + 1)..=(i + 2).min(31))
+                        .map(|j| (format!("edge{j}"), keys[j].clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut reverse: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (key, edges) in &children {
+            for (_, child) in edges {
+                reverse.entry(child.clone()).or_default().push(key.clone());
+            }
+        }
+        let graph = Propagation {
+            readings: &readings,
+            children,
+            reverse,
+            cyclic: BTreeSet::new(),
+            draw: [0, 0],
+        };
+        let mut evaluator = graph.evaluator(usize::MAX);
+        let mut path = BTreeSet::from([keys[31].clone()]);
+        evaluator.position(&keys[0], &mut path).unwrap();
+        assert_eq!(evaluator.calls(), 31);
+        assert!(evaluator.memo.is_empty());
+        evaluator.position(&keys[0], &mut path).unwrap();
+        assert_eq!(evaluator.calls(), 62);
+        assert_eq!(path, BTreeSet::from([keys[31].clone()]));
+    }
+
+    #[test]
+    fn shared_memo_respects_ancestors_outside_evaluation_edges() {
+        let (readings, keys) = external_ancestor_fixture();
+        let graph =
+            Propagation::new(&readings, &Edges::new(), &keys.iter().cloned().collect(), [-30, 70])
+                .unwrap();
+        assert!(graph.cyclic.is_empty());
+        for limit in [0, usize::MAX] {
+            let mut shared = graph.evaluator(limit);
+            for key in [&keys[0], &keys[2]] {
+                shared.position(key, &mut BTreeSet::new()).unwrap();
+            }
+            let ancestors: BTreeSet<_> = keys[..3].iter().cloned().collect();
+            let expected =
+                graph.evaluator(limit).position(&keys[3], &mut ancestors.clone()).unwrap();
+            assert_eq!(expected.value, 70);
+            let actual = shared.position(&keys[3], &mut ancestors.clone()).unwrap();
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.rows, expected.rows);
+            assert_eq!(actual.best, expected.best);
+            let empty = graph.evaluator(limit).position(&keys[3], &mut BTreeSet::new()).unwrap();
+            let actual = shared.position(&keys[3], &mut BTreeSet::new()).unwrap();
+            assert_eq!(actual.rows, empty.rows);
+            let mut fresh = graph.evaluator(limit);
+            fresh.position(&keys[3], &mut ancestors.clone()).unwrap();
+            assert_eq!(fresh.position(&keys[3], &mut BTreeSet::new()).unwrap().rows, empty.rows);
+            for indices in [
+                vec![0],
+                vec![0, 1],
+                vec![0, 1],
+                vec![0, 1, 2],
+                vec![2],
+                vec![],
+            ] {
+                let ancestors: BTreeSet<_> = indices.into_iter().map(|i| keys[i].clone()).collect();
+                let expected =
+                    graph.evaluator(limit).position(&keys[3], &mut ancestors.clone()).unwrap();
+                let actual = shared.position(&keys[3], &mut ancestors.clone()).unwrap();
+                assert_eq!(actual.rows, expected.rows);
+            }
+        }
     }
 
     #[test]

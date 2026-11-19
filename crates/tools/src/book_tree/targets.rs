@@ -56,6 +56,8 @@ pub(super) struct Opts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extend_rounds: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_rounds: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw: Option<i32>,
     /// 先手番の局面で循環に入る手の値 (先手から見た値)。省くと `draw`
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +86,9 @@ impl Opts {
         }
         if let Some(v) = o.extend {
             check_range("extend", v, 0, 200)?;
+        }
+        if let Some(v) = o.settle_rounds {
+            check_range("settle_rounds", v, 0, 50)?;
         }
         if let Some(v) = o.extend_rounds {
             check_range("extend_rounds", v, 0, 10)?;
@@ -205,6 +210,7 @@ pub(super) struct Defaults {
     pub rounds: usize,
     pub extend: usize,
     pub extend_rounds: usize,
+    pub settle_rounds: usize,
     pub draw: i32,
 }
 impl Defaults {
@@ -216,6 +222,7 @@ impl Defaults {
         check_range("rounds", self.rounds, 0, 10)?;
         check_range("extend", self.extend, 0, 200)?;
         check_range("extend_rounds", self.extend_rounds, 0, 10)?;
+        check_range("settle_rounds", self.settle_rounds, 0, 50)?;
         check_range("draw", self.draw, -30000, 30000)
     }
 }
@@ -292,6 +299,7 @@ impl Line {
             } else {
                 self.opts.extend_rounds.unwrap_or(defaults.extend_rounds)
             },
+            settle_rounds: self.opts.settle_rounds.unwrap_or(defaults.settle_rounds),
             draw: self.opts.draw.unwrap_or(defaults.draw),
             draw_black: self.opts.draw_black,
             draw_white: self.opts.draw_white,
@@ -324,6 +332,8 @@ pub(super) struct Resolved {
     pub extend: usize,
     #[serde(default = "default_extend_rounds", skip_serializing_if = "is_one")]
     pub extend_rounds: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub settle_rounds: usize,
     pub draw: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw_black: Option<i32>,
@@ -347,6 +357,7 @@ impl Resolved {
             rounds: self.rounds,
             extend: self.extend,
             extend_rounds: self.extend_rounds,
+            settle_rounds: self.settle_rounds,
             extra: self.extra.clone(),
             draw: self.draw,
             draw_black: self.draw_black,
@@ -705,6 +716,7 @@ mod condition_tests {
             rounds: 3,
             extend: 7,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
         };
         let mut line: Line =
@@ -742,6 +754,52 @@ mod condition_tests {
     }
 
     #[test]
+    fn settle_rounds_validation_and_zero_preserves_resolved_bytes() {
+        let defaults = Defaults {
+            multipv: 3,
+            nodes: 100,
+            opp_n: 2,
+            stop: 300,
+            rounds: 0,
+            extend: 3,
+            extend_rounds: 0,
+            settle_rounds: 0,
+            draw: 0,
+        };
+        let mut line: Line =
+            serde_json::from_str(r#"{"id":"settle","root":"startpos","own":"b","depth":1}"#)
+                .unwrap();
+        let root = line.check().unwrap();
+        let original = serde_json::to_vec(&line.resolve(&root, &defaults).unwrap()).unwrap();
+        assert!(!String::from_utf8_lossy(&original).contains("settle"));
+        line.opts.settle_rounds = Some(0);
+        assert_eq!(serde_json::to_vec(&line.resolve(&root, &defaults).unwrap()).unwrap(), original);
+        for rounds in [0, 1, 50, 51] {
+            line.opts.settle_rounds = Some(rounds);
+            assert_eq!(line.check().is_ok(), rounds <= 50);
+            assert_eq!(
+                Defaults {
+                    settle_rounds: rounds,
+                    ..defaults
+                }
+                .check()
+                .is_ok(),
+                rounds <= 50
+            );
+            if rounds <= 50 {
+                let resolved = line.resolve(&root, &defaults).unwrap();
+                assert_eq!(resolved.params("b", Path::new("out")).settle_rounds, rounds);
+                assert_eq!(
+                    serde_json::from_slice::<Resolved>(&serde_json::to_vec(&resolved).unwrap())
+                        .unwrap(),
+                    resolved
+                );
+            }
+        }
+        assert!(serde_json::from_str::<Opts>(r#"{"settle_rounds":-1}"#).is_err());
+    }
+
+    #[test]
     fn extend_rounds_range_defaults_and_roundtrip() {
         let defaults = Defaults {
             multipv: 3,
@@ -751,6 +809,7 @@ mod condition_tests {
             rounds: 3,
             extend: 20,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
         };
         let mut line: Line =
@@ -811,6 +870,7 @@ mod condition_tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
         };
         let mut line: Line = serde_json::from_str(

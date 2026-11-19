@@ -1289,6 +1289,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         rounds: args.rounds,
         extend: args.extend,
         extend_rounds: args.extend_rounds,
+        settle_rounds: args.settle_rounds,
         draw: args.draw,
         multipv: args.reading.multipv,
         nodes: args.reading.nodes,
@@ -2388,6 +2389,7 @@ mod tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2453,6 +2455,75 @@ mod tests {
     }
 
     #[test]
+    fn settle_requests_resume_from_checkpoint_and_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = super::super::tests::settings();
+        let (_, cache, keys) = super::super::model::prefetch_tests::settle_fixture(3);
+        let defaults = Defaults {
+            opp_n: 1,
+            stop: 300,
+            rounds: 0,
+            extend: 3,
+            extend_rounds: 0,
+            settle_rounds: 3,
+            draw: 0,
+            multipv: 3,
+            nodes: settings.nodes,
+        };
+        let row = format!(
+            "{}\n",
+            json!({"id":"settle", "root":format!("sfen {} 1", keys[0]),
+            "own":"b", "depth":1, "game":[["5i4i", "5a6a"]]})
+        );
+        let (checkpoint, built) = Checkpoint::new(
+            dir.path().join("trees"),
+            settings.fingerprint.clone(),
+        )
+        .apply(row.as_bytes(), &defaults, &Sha256::new(), &[]);
+        assert!(checkpoint.rejected.is_empty());
+        let path = dir.path().join("journal.jsonl");
+        let mut journal = Journal::open(&path, &settings.fingerprint).unwrap();
+        for read in cache.values() {
+            let mut read = read.clone();
+            read.nodes_limit = settings.nodes;
+            read.hash = settings.hash;
+            read.draw = settings.draw();
+            journal.append(read, &settings, "fixture".into()).unwrap();
+        }
+        let mut live = Live::new(built.into_iter().next().unwrap().1);
+        live.prepared = true;
+        let next = super::super::model::child(&keys[1], "5a6a").unwrap();
+        assert_eq!(live.tree.advance(&journal).unwrap(), vec![(next.clone(), 2)]);
+        let mut requests = BTreeMap::new();
+        live.refresh_requests(&checkpoint.targets[0], &journal, &BTreeMap::new(), &mut requests);
+        assert_eq!(requests.keys().collect::<Vec<_>>(), vec![&next]);
+        let saved = serde_json::to_vec(&checkpoint).unwrap();
+        drop(journal);
+        let restored: Checkpoint = serde_json::from_slice(&saved).unwrap();
+        let target = &restored.targets[0];
+        let mut resumed = Live::new(target.definition.build(&target.own, &target.out).unwrap());
+        resumed.prepared = true;
+        let mut journal = Journal::open(&path, &settings.fingerprint).unwrap();
+        assert_eq!(resumed.tree.advance(&journal).unwrap(), live.tree.waiting());
+        assert_eq!(resumed.tree.settle_rounds_used, 1);
+        journal
+            .append(
+                super::super::tests::reading(&next, &[("4i3i", -300)], &settings),
+                &settings,
+                "fixture".into(),
+            )
+            .unwrap();
+        assert!(resumed.tree.advance(&journal).unwrap().is_empty());
+        assert!(live.tree.advance(&journal).unwrap().is_empty());
+        assert_eq!(resumed.tree.edge, live.tree.edge);
+        assert_eq!(resumed.tree.settle_rounds_used, live.tree.settle_rounds_used);
+        resumed.requests_dirty = true;
+        resumed.refresh_requests(target, &journal, &BTreeMap::new(), &mut requests);
+        assert!(requests.is_empty());
+        assert!(super::super::lines::unsettled(&resumed.tree).unwrap().is_empty());
+    }
+
+    #[test]
     fn pending_lines_list_unread_requests_in_reading_order_as_enqueue_roots() {
         let dir = tempfile::tempdir().unwrap();
         let settings = super::super::tests::settings();
@@ -2468,6 +2539,7 @@ mod tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2577,6 +2649,7 @@ mod tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2777,6 +2850,7 @@ mod tests {
             rounds: 1,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2893,6 +2967,7 @@ mod tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             extra: vec![],
             draw: 0,
             draw_black: None,
@@ -2929,6 +3004,7 @@ mod tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
@@ -2960,6 +3036,7 @@ mod tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
             multipv: 3,
             nodes: 100,
@@ -3002,6 +3079,7 @@ mod tests {
             rounds: 0,
             extend: 0,
             extend_rounds: 1,
+            settle_rounds: 0,
             draw: 0,
             multipv: 1,
             nodes: 100,
