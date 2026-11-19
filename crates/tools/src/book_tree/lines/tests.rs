@@ -341,3 +341,58 @@ fn shared_game_prefix_has_unique_unsettled_rows() {
     tree.game_lines = (0..100).flat_map(|_| tree.game_lines.iter().cloned()).collect();
     assert_eq!(unsettled(&tree).unwrap(), expected);
 }
+
+#[test]
+fn game_tables_respect_ancestors_across_missing_evaluation_edges() {
+    let (readings, keys) = crate::book_tree::model::prefetch_tests::external_ancestor_fixture();
+    let report = Report {
+        traces: RefCell::default(),
+        limits: Limits {
+            depth: 0,
+            cap: 6,
+            stop: 300,
+            draw_black: Some(-30),
+            draw_white: Some(70),
+        },
+        levels: Cow::Owned(
+            keys.iter()
+                .enumerate()
+                .map(|(i, k)| (k.clone(), if i == 2 { 0 } else { i }))
+                .collect(),
+        ),
+        readings: Cow::Owned(readings),
+        expanded: Cow::Owned(Edges::new()),
+        start_values: BTreeMap::new(),
+        extend_unsaved: false,
+    };
+    let graph = report.propagation().unwrap();
+    let mut shared = graph.evaluator(NEGAMAX_EXACT_CALLS);
+    for key in [&keys[0], &keys[2]] {
+        shared.position(key, &mut BTreeSet::new()).unwrap();
+    }
+    let path = keys[..3].iter().cloned().collect();
+    let (expected, trace) = report
+        .trace_game_move_uncached(
+            &mut graph.evaluator(NEGAMAX_EXACT_CALLS),
+            &keys[2],
+            "4i4h",
+            &keys[3],
+            &path,
+        )
+        .unwrap();
+    assert_eq!(expected, Some(-70));
+    assert_eq!(trace.reason, Reason::Repetition);
+    let (actual, trace) = report
+        .trace_game_move_uncached(&mut shared, &keys[2], "4i4h", &keys[3], &path)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(trace.reason, Reason::Repetition);
+
+    let dir = tempfile::tempdir().unwrap();
+    let paths = dir.path().join("paths.tsv");
+    fs::write(&paths, format!("{}\t1\t5i4i 5a4a 4i4h 4a4b 4h5i 4b5a\ttest\n", keys[0])).unwrap();
+    let (_, game, _) = report.tables(&paths).unwrap();
+    let row = game.lines().find(|line| line.starts_with("1\t3\t")).unwrap();
+    assert!(row.starts_with("1\t3\t4i4h\t-70\t"), "{row}");
+    assert!(row.contains("\trepetition\t"), "{row}");
+}

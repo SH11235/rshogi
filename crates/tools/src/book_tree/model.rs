@@ -696,6 +696,7 @@ pub(super) struct Propagation<'a> {
     readings: &'a BTreeMap<String, Reading>,
     children: BTreeMap<String, Vec<(String, String)>>,
     cyclic: BTreeSet<String>,
+    reverse: BTreeMap<String, Vec<String>>,
     draw: [i32; 2],
 }
 
@@ -728,11 +729,18 @@ impl<'a> Propagation<'a> {
                 }
             }
         }
+        let mut reverse: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (key, list) in &children {
+            for (_, child) in list {
+                reverse.entry(child.clone()).or_default().push(key.clone());
+            }
+        }
         let cyclic = cyclic_nodes(&children);
         Ok(Self {
             readings,
             children,
             cyclic,
+            reverse,
             draw,
         })
     }
@@ -741,6 +749,7 @@ impl<'a> Propagation<'a> {
         Evaluator {
             propagation: self,
             memo: BTreeMap::new(),
+            ancestor_dependent: BTreeSet::new(),
             calls: 0,
             exact_calls,
         }
@@ -750,6 +759,7 @@ impl<'a> Propagation<'a> {
 pub(super) struct Evaluator<'a> {
     propagation: &'a Propagation<'a>,
     memo: BTreeMap<String, i32>,
+    ancestor_dependent: BTreeSet<String>,
     calls: usize,
     exact_calls: usize,
 }
@@ -767,6 +777,13 @@ impl Evaluator<'_> {
         ancestors: &mut BTreeSet<String>,
     ) -> Option<PropagatedPosition> {
         let reading = self.propagation.readings.get(key)?;
+        self.ancestor_dependent.clear();
+        let mut pending: Vec<_> = ancestors.iter().collect();
+        while let Some(ancestor) = pending.pop() {
+            if self.ancestor_dependent.insert(ancestor.clone()) {
+                pending.extend(self.propagation.reverse.get(ancestor).into_iter().flatten());
+            }
+        }
         let (value, rows) = self.evaluate(key, ancestors);
         let best = rank_moves(reading, &rows, rows.keys().cloned()).into_iter().next();
         Some(PropagatedPosition { value, best, rows })
@@ -780,7 +797,9 @@ impl Evaluator<'_> {
         for (mv, child) in self.propagation.children.get(key).into_iter().flatten() {
             let value = if path.contains(child) {
                 self.propagation.draw[usize::from(side(key) == "w")]
-            } else if let Some(&value) = self.memo.get(child) {
+            } else if !self.ancestor_dependent.contains(child)
+                && let Some(&value) = self.memo.get(child)
+            {
                 -value
             } else {
                 -self.evaluate(child, path).0
@@ -792,9 +811,11 @@ impl Evaluator<'_> {
             .then(|| reading.multipv.first().map(|p| p.cp))
             .flatten();
         let value = rows.values().copied().max().or(declaration).unwrap_or(0);
-        // 循環外の局面は探索中に加えた祖先へ戻れない。循環内は手順ごとに評価するが、
-        // 呼び出し上限を超えたら探索量を抑えるために値を使い回す。
-        if !self.propagation.cyclic.contains(key) || self.calls > self.exact_calls {
+        // 実戦の祖先へ戻る経路は評価グラフ上の循環とは限らず、値を手順間で共有できない。
+        // グラフ内の循環だけなら、呼び出し上限後は探索量を抑えるために値を使い回す。
+        if !self.ancestor_dependent.contains(key)
+            && (!self.propagation.cyclic.contains(key) || self.calls > self.exact_calls)
+        {
             self.memo.insert(key.to_owned(), value);
         }
         (value, rows)
@@ -1784,6 +1805,54 @@ pub(super) mod prefetch_tests {
         tree.prediction_values_report(&mut unlimited(), &mut report).unwrap();
         assert!(report.cyclic.contains(ROOT));
         assert!(report.cyclic.contains(&parent));
+    }
+
+    pub(in crate::book_tree) fn external_ancestor_fixture()
+    -> (BTreeMap<String, Reading>, Vec<String>) {
+        let moves = ["5i4i", "5a4a", "4i4h", "4a4b", "4h5i", "4b5a"];
+        let mut keys = vec![ROOT.to_owned()];
+        for mv in moves {
+            keys.push(child(keys.last().unwrap(), mv).unwrap());
+        }
+        assert_eq!(keys[6], keys[0]);
+        keys.pop();
+        let mut readings: BTreeMap<_, _> = keys
+            .iter()
+            .zip(moves)
+            .map(|(key, mv)| (key.clone(), reading(key, &[(mv, 0)])))
+            .collect();
+        readings.insert(keys[1].clone(), reading(&keys[1], &[("5a6a", 100)]));
+        readings.insert(keys[5].clone(), reading(&keys[5], &[("4b5a", 0), ("4b3b", 40)]));
+        (readings, keys)
+    }
+
+    #[test]
+    fn shared_memo_respects_ancestors_outside_evaluation_edges() {
+        let (readings, keys) = external_ancestor_fixture();
+        let graph =
+            Propagation::new(&readings, &Edges::new(), &keys.iter().cloned().collect(), [-30, 70])
+                .unwrap();
+        assert!(graph.cyclic.is_empty());
+        for limit in [0, usize::MAX] {
+            let mut shared = graph.evaluator(limit);
+            for key in [&keys[0], &keys[2]] {
+                shared.position(key, &mut BTreeSet::new()).unwrap();
+            }
+            let ancestors: BTreeSet<_> = keys[..3].iter().cloned().collect();
+            let expected =
+                graph.evaluator(limit).position(&keys[3], &mut ancestors.clone()).unwrap();
+            assert_eq!(expected.value, 70);
+            let actual = shared.position(&keys[3], &mut ancestors.clone()).unwrap();
+            assert_eq!(actual.value, expected.value);
+            assert_eq!(actual.rows, expected.rows);
+            assert_eq!(actual.best, expected.best);
+            let empty = graph.evaluator(limit).position(&keys[3], &mut BTreeSet::new()).unwrap();
+            let actual = shared.position(&keys[3], &mut BTreeSet::new()).unwrap();
+            assert_eq!(actual.rows, empty.rows);
+            let mut fresh = graph.evaluator(limit);
+            fresh.position(&keys[3], &mut ancestors.clone()).unwrap();
+            assert_eq!(fresh.position(&keys[3], &mut BTreeSet::new()).unwrap().rows, empty.rows);
+        }
     }
 
     #[test]
