@@ -491,14 +491,14 @@ class TrainerTest(unittest.TestCase):
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         self.assertEqual(inputs, [torch.bfloat16] * len(model.blocks))
 
-    def test_ffn_residual_fusion_requires_cuda_graph_width_128_and_packed_qkv(self) -> None:
+    def test_ffn_residual_fusion_requires_supported_width_and_packed_qkv(self) -> None:
         with self.assertRaisesRegex(ValueError, "cuda-graph-fused-norm"):
             replace(self.config, fuse_ffn_residual_norm=True)
         config = replace(
             self.config, device="cuda", precision="bf16", fused_optimizer=True,
             execution="cuda-graph-fused-norm", fuse_ffn_residual_norm=True,
         )
-        with self.assertRaisesRegex(TrainingError, "model width of 128"):
+        with self.assertRaisesRegex(TrainingError, "model width of 128 or 256"):
             self.run_training("wrong-model-width", config)
         with self.assertRaisesRegex(TrainingError, "packed QKV"):
             self.run_training("unpacked-qkv", config, model_config=replace(TEST_CONFIG, width=128))
@@ -609,19 +609,32 @@ class TrainerTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_width_256_ffn_residual_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", optimizer="batched-muon", fuse_norm_cast=True,
+            prefetch_input=True, fuse_ffn_residual_norm=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True),
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_ffn_residual_fusion_matches_native(self) -> None:
+        for width in (128, 256):
+            with self.subTest(width=width):
+                self.check_ffn_residual_fusion(width)
+
+    def check_ffn_residual_fusion(self, width: int) -> None:
         from rshogi_dl._ffn_residual_norm import ffn_residual_norm
 
         rng = torch.Generator(device="cuda").manual_seed(111)
-        shape = (7, 96, 128)
+        shape = (7, 96, width)
         residual = torch.randn(shape, device="cuda", generator=rng).requires_grad_()
         update = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng).requires_grad_()
         weight, bias = (
-            torch.randn(128, device="cuda", generator=rng).requires_grad_() for _ in range(2)
+            torch.randn(width, device="cuda", generator=rng).requires_grad_() for _ in range(2)
         )
         params = residual, update, weight, bias
         added = residual + update
-        reference = added, torch.nn.functional.layer_norm(added, (128,), weight, bias).bfloat16()
+        reference = added, torch.nn.functional.layer_norm(added, (width,), weight, bias).bfloat16()
         candidate = ffn_residual_norm(*params, 1e-5)
         for expected, actual in zip(reference, candidate, strict=True):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
