@@ -10,7 +10,7 @@ import os
 import stat
 import sys
 from array import array
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from io import BytesIO
 from pathlib import Path
 
@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from .contract import INPUT_FORMAT, MAX_LEGAL_LABELS, POLICY_FORMAT, TOKEN_COUNT, VALUE_FORMAT
-from .data import Batch, RecordError, iter_records
+from .data import Batch, Record, RecordError, iter_records, validate_record
 from .paths import ArtifactPathError, shogi_data_root
 
 FORMAT = "rshogi-dl-sharded-v1"
@@ -185,16 +185,74 @@ def convert_jsonl(
 
     失敗した directory は未完了のまま残す。再開・上書きはせず、新しい出力先を指定する。
     """
-    _positive_int(shard_records, "shard_records", MAX_SHARD_RECORDS)
-    teacher_kind = _text(teacher_kind, "teacher_kind")
-    split = _text(split, "split")
-    if training_status not in ("unknown", "validation-only"):
-        raise DatasetError("dataset training_status must be unknown or validation-only")
+    output = _conversion_output(destination, shard_records, teacher_kind, split, training_status)
     source = Path(source)
-    output = _dataset_path(destination, new=True)
     if not stat.S_ISREG(source.stat().st_mode):
         raise DatasetError("source must be an immutable regular file")
     source_signature = _signature(source)
+
+    def check_source() -> None:
+        try:
+            source_unchanged = _signature(source) == source_signature
+        except OSError as error:
+            raise DatasetError("source changed during conversion") from error
+        if not source_unchanged:
+            raise DatasetError("source changed during conversion")
+
+    return _convert_records(
+        iter_records(source), output, source.name, source_signature[2], shard_records,
+        teacher_kind, split, training_status, check_source,
+    )
+
+
+def convert_records(
+    records: Iterable[object],
+    destination: str | Path,
+    *,
+    source_name: str,
+    source_size: int,
+    shard_records: int = 4096,
+    teacher_kind: str = "unknown",
+    split: str = "unknown",
+    training_status: str = "unknown",
+) -> dict:
+    """JSONL と同じ形式の行を逐次検証し、shard へ変換する。
+
+    source_name と source_size は入力の由来を記録する。入力の安定性は呼び出し元が保証する。
+    """
+    output = _conversion_output(destination, shard_records, teacher_kind, split, training_status)
+    return _convert_records(
+        (validate_record(record) for record in records), output, _text(source_name, "source_name"),
+        _positive_int(source_size, "source_size"), shard_records, teacher_kind, split, training_status,
+    )
+
+
+def _conversion_output(
+    destination: str | Path,
+    shard_records: int,
+    teacher_kind: str,
+    split: str,
+    training_status: str,
+) -> Path:
+    _positive_int(shard_records, "shard_records", MAX_SHARD_RECORDS)
+    _text(teacher_kind, "teacher_kind")
+    _text(split, "split")
+    if training_status not in ("unknown", "validation-only"):
+        raise DatasetError("dataset training_status must be unknown or validation-only")
+    return _dataset_path(destination, new=True)
+
+
+def _convert_records(
+    records: Iterable[Record],
+    output: Path,
+    source_name: str,
+    source_size: int,
+    shard_records: int,
+    teacher_kind: str,
+    split: str,
+    training_status: str,
+    check_source: Callable[[], None] | None = None,
+) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.mkdir()
     parent = output.parent
@@ -216,7 +274,7 @@ def convert_jsonl(
     total = 0
     shards = 0
     count = 0
-    for record in iter_records(source):
+    for record in records:
         columns["tokens"][count] = record.tokens
         columns["values"][count] = record.value
         columns["policy_present"][count] = record.policy is not None
@@ -243,8 +301,8 @@ def convert_jsonl(
         raise DatasetError("cannot convert an empty dataset")
     manifest = {
         **_CONTRACT,
-        "source_name": source.name,
-        "source_size": source_signature[2],
+        "source_name": source_name,
+        "source_size": source_size,
         "dataset_content_sha256": content_digest.hexdigest(),
         "source_records": total,
         "shard_records": shard_records,
@@ -256,12 +314,8 @@ def convert_jsonl(
     temporary = output / "manifest.tmp"
     _write_json(temporary, manifest)
     _sync_directory(output)
-    try:
-        source_unchanged = _signature(source) == source_signature
-    except OSError as error:
-        raise DatasetError("source changed during conversion") from error
-    if not source_unchanged:
-        raise DatasetError("source changed during conversion")
+    if check_source is not None:
+        check_source()
     temporary.rename(output / "manifest.json")
     _sync_directory(output)
     return manifest

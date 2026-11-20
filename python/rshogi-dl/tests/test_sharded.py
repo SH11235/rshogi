@@ -41,6 +41,24 @@ class ShardedTest(unittest.TestCase):
         write_jsonl(self.source, records)
         return convert_jsonl(self.source, self.output, shard_records=shard_records)
 
+    def test_record_stream_matches_jsonl_and_validates_before_publication(self) -> None:
+        records = special_records()
+        expected = self.convert(records)
+        output = self.root / "streamed"
+        actual = sharded.convert_records(
+            iter(records), output, source_name=self.source.name,
+            source_size=self.source.stat().st_size, shard_records=3,
+        )
+        self.assertEqual(actual, expected)
+        self.assertEqual(verify_dataset(output), expected)
+        invalid = self.root / "invalid-stream"
+        with self.assertRaises(data.RecordError):
+            sharded.convert_records(
+                iter([*records[:3], {**records[3], "value": 2}]), invalid,
+                source_name="input", source_size=1, shard_records=3,
+            )
+        self.assertFalse((invalid / "manifest.json").exists())
+
     def test_jsonl_binary_batch_and_loss_parity_across_shards(self) -> None:
         manifest = self.convert(special_records())
         self.assertEqual(manifest["shard_count"], 4)
