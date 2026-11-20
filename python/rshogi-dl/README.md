@@ -227,7 +227,7 @@ python -m rshogi_dl.trainer \
 
 `--execution cuda-graph` は `--device cuda --precision bf16 --fused-optimizer` と併用します。全行に方策教師があり、設定batchサイズを満たし、合法手列が512以下のbatchを固定幅に揃え、準備4更新を経て学習更新全体を記録します。ほかのbatchは通常更新を使います。記録は実行開始・再開ごとに作り直します。reportの`cudagraphs_requested`は要求した設定を示し、`cuda_graph_replayed_steps`はこの実行区間でgraphを使用した更新数を示します。
 
-`--execution cuda-graph-fused-norm` は上記と同じ条件で、学習中の残差加算とLayerNormもInductorでまとめます。起動時にコンパイルがかかるため、学習時間全体で効果を確認してください。評価・ONNX出力には通常のモデル演算を使います。
+`--execution cuda-graph-fused-norm` は上記と同じ条件で、attention直後の残差加算とLayerNormもInductorでまとめます。起動時にコンパイルがかかるため、学習時間全体で効果を確認してください。評価・ONNX出力には通常のモデル演算を使います。
 
 最終`report.json`の学習時間・samples/sはデータ供給、転送、更新と途中の記録・checkpoint保存を含み、setupと最終held-out評価は別時間です。held-outのpolicy CEはpolicyがある行、value BCEとBrierは全行で重み付き集計します。全行policyなしなら`policy_ce=null`です。有限windowを使った値はその先頭windowの評価であり、全datasetの品質を代表するとは限りません。
 

@@ -1,4 +1,4 @@
-"""Training forward with compiled residual additions and LayerNorm."""
+"""Training forward with compiled attention residual addition and LayerNorm."""
 
 from collections.abc import Callable
 
@@ -20,19 +20,13 @@ def compiled_residual_forward(
 
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = model._embed(tokens)
-        normalized = model.blocks[0].attention_norm(residual)
-        for index, block in enumerate(model.blocks):
+        for block in model.blocks:
             norm = block.ffn_norm
             residual, ffn_input = add_normalize(
-                residual, block.attention(normalized), norm.weight, norm.bias, norm.eps,
+                residual, block.attention(block.attention_norm(residual)),
+                norm.weight, norm.bias, norm.eps,
             )
-            norm = (
-                model.blocks[index + 1].attention_norm
-                if index + 1 < len(model.blocks) else model.final_norm
-            )
-            residual, normalized = add_normalize(
-                residual, block.ffn(ffn_input), norm.weight, norm.bias, norm.eps,
-            )
-        return model._readout(normalized)
+            residual = residual + block.ffn(ffn_input)
+        return model._readout(model.final_norm(residual))
 
     return forward
