@@ -1066,21 +1066,23 @@ pub(crate) fn decode_board_threat_info_fb(
     Some((color, class, pt, sq))
 }
 
-/// Threat に必要な盤面だけを保持し、未評価の手を逆順に戻す。
+/// 現局面から未評価の手を逆順に戻し、触れた升の駒だけを上書きする。
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
-pub(crate) struct ThreatBoard {
+pub(crate) struct ThreatAncestor<'a> {
+    pos: &'a Position,
     pieces: [crate::types::Piece; 81],
+    touched: Bitboard,
     occupied: Bitboard,
     kings: [Square; 2],
 }
 
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
-impl ThreatBoard {
-    pub(crate) fn new(pos: &Position) -> Self {
+impl<'a> ThreatAncestor<'a> {
+    pub(crate) fn new(pos: &'a Position) -> Self {
         Self {
-            pieces: std::array::from_fn(|i| {
-                canonical_piece(pos.piece_on(Square::from_u8(i as u8).unwrap()))
-            }),
+            pos,
+            pieces: [crate::types::Piece::NONE; 81],
+            touched: Bitboard::EMPTY,
             occupied: pos.occupied(),
             kings: [pos.king_square(Color::Black), pos.king_square(Color::White)],
         }
@@ -1091,7 +1093,8 @@ impl ThreatBoard {
         for cp in &dirty.changed_piece[..dirty.dirty_num as usize] {
             if let Some(sq) = decode_board_square_fb(cp.new_piece.fb) {
                 self.pieces[sq.index()] = Piece::NONE;
-                self.occupied &= !Bitboard::from_square(sq);
+                self.touched.set(sq);
+                self.occupied.clear(sq);
             }
         }
         // 捕獲先は old/new で重複するため、消去と復元を分離する。
@@ -1110,63 +1113,74 @@ impl ThreatBoard {
                         Piece::new(color, PieceType::King)
                     };
                 self.pieces[sq.index()] = pc;
-                self.occupied |= Bitboard::from_square(sq);
+                self.touched.set(sq);
+                self.occupied.set(sq);
             }
         }
     }
 
-    pub(crate) fn same_mirror(&self, pos: &Position, perspective: Color) -> bool {
+    pub(crate) fn same_mirror(&self, perspective: Color) -> bool {
         is_hm_mirror(self.kings[perspective.index()], perspective)
-            == is_hm_mirror(pos.king_square(perspective), perspective)
+            == is_hm_mirror(self.pos.king_square(perspective), perspective)
+    }
+
+    fn changed_squares(&self) -> Bitboard {
+        let mut touched = self.touched;
+        let mut changed = Bitboard::EMPTY;
+        while !touched.is_empty() {
+            let sq = touched.pop();
+            if self.pieces[sq.index()] != canonical_piece(self.pos.piece_on(sq)) {
+                changed.set(sq);
+            }
+        }
+        changed
     }
 }
 
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
 fn canonical_piece(pc: crate::types::Piece) -> crate::types::Piece {
-    use crate::types::Piece;
     if pc.is_none() {
         return pc;
     }
-    let pt = match pc.piece_type() {
+    match pc.piece_type() {
         PieceType::ProPawn | PieceType::ProLance | PieceType::ProKnight | PieceType::ProSilver => {
-            PieceType::Gold
+            crate::types::Piece::new(pc.color(), PieceType::Gold)
         }
-        pt => pt,
-    };
-    Piece::new(pc.color(), pt)
+        _ => pc,
+    }
 }
 
 /// 祖先と現局面の物理差分を一度列挙し、両視点の index に変換する。
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
 pub(crate) fn append_threat_endpoint_diff(
-    before: &ThreatBoard,
-    pos: &Position,
+    before: &ThreatAncestor<'_>,
     removed: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
     added: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
 ) -> bool {
-    let after = ThreatBoard::new(pos);
-    let mut changed = Bitboard::EMPTY;
-    for i in 0..81 {
-        if before.pieces[i] != after.pieces[i] {
-            changed |= Bitboard::from_square(Square::from_u8(i as u8).unwrap());
-        }
-    }
+    let changed = before.changed_squares();
     if changed.is_empty() {
         return true;
     }
     count_threat_diff!();
+    let pos = before.pos;
+    let after_occ = pos.occupied();
+    let mirrors = [Color::Black, Color::White].map(|p| is_hm_mirror(pos.king_square(p), p));
     let mut sources = changed;
     let mut squares = changed;
     while !squares.is_empty() {
         let sq = squares.pop();
-        // 動いた駒は changed に含まれ、動いていない駒の種別は両端で同じ。
+        // changed 以外の升では、現局面の駒種別の利きが祖先でも使える。
         sources |= pos.attackers_to_occ(sq, before.occupied);
-        sources |= pos.attackers_to_occ(sq, after.occupied);
+        sources |= pos.attackers_to_occ(sq, after_occ);
     }
     while !sources.is_empty() {
         let from = sources.pop();
-        let old_pc = before.pieces[from.index()];
-        let new_pc = after.pieces[from.index()];
+        let new_pc = canonical_piece(pos.piece_on(from));
+        let old_pc = if changed.contains(from) {
+            before.pieces[from.index()]
+        } else {
+            new_pc
+        };
         let targets = |pc: crate::types::Piece, occupied| {
             if pc.is_none() || pc.piece_type() == PieceType::King {
                 Bitboard::EMPTY
@@ -1175,7 +1189,7 @@ pub(crate) fn append_threat_endpoint_diff(
             }
         };
         let old_targets = targets(old_pc, before.occupied);
-        let new_targets = targets(new_pc, after.occupied);
+        let new_targets = targets(new_pc, after_occ);
         let mut affected = if old_pc == new_pc {
             (old_targets ^ new_targets) | ((old_targets | new_targets) & changed)
         } else {
@@ -1183,14 +1197,19 @@ pub(crate) fn append_threat_endpoint_diff(
         };
         while !affected.is_empty() {
             let to = affected.pop();
-            for (board, pc, active, output) in [
-                (before, old_pc, old_targets.contains(to), &mut *removed),
-                (&after, new_pc, new_targets.contains(to), &mut *added),
+            for (is_before, pc, active, output) in [
+                (true, old_pc, old_targets.contains(to), &mut *removed),
+                (false, new_pc, new_targets.contains(to), &mut *added),
             ] {
                 if !active {
                     continue;
                 }
-                let target = board.pieces[to.index()];
+                // 対象駒は ThreatClass で金系をまとめるため、現局面の駒をそのまま使える。
+                let target = if is_before && changed.contains(to) {
+                    before.pieces[to.index()]
+                } else {
+                    pos.piece_on(to)
+                };
                 let Some(dc) = ThreatClass::from_piece_type(target.piece_type()) else {
                     continue;
                 };
@@ -1200,7 +1219,7 @@ pub(crate) fn append_threat_endpoint_diff(
                     continue;
                 }
                 for perspective in [Color::Black, Color::White] {
-                    let hm = is_hm_mirror(pos.king_square(perspective), perspective);
+                    let hm = mirrors[perspective.index()];
                     let Some(index) = threat_index(
                         usize::from(pc.color() != perspective),
                         ac,
@@ -2262,7 +2281,11 @@ mod tests {
         for sfen in sfens {
             let mut pos = Position::new();
             pos.set_sfen(sfen).unwrap();
-            let before = ThreatBoard::new(&pos);
+            let before = std::array::from_fn::<_, 81, _>(|i| {
+                canonical_piece(pos.piece_on(Square::from_u8(i as u8).unwrap()))
+            });
+            let before_occ = pos.occupied();
+            let before_kings = [pos.king_square(Color::Black), pos.king_square(Color::White)];
             let active: [Vec<usize>; 2] = std::array::from_fn(|p| {
                 let perspective = if p == 0 { Color::Black } else { Color::White };
                 let mut indices = Vec::new();
@@ -2278,16 +2301,23 @@ mod tests {
             generate_legal(&pos, &mut list);
             for &mv in &list {
                 let dirty = pos.do_move(mv, pos.gives_check(mv));
-                let mut restored = ThreatBoard::new(&pos);
+                let mut restored = ThreatAncestor::new(&pos);
                 restored.undo(&dirty);
-                assert_eq!(restored.pieces, before.pieces);
-                assert_eq!(restored.occupied, before.occupied);
-                assert_eq!(restored.kings, before.kings);
+                let changed = restored.changed_squares();
+                for (i, &pc) in before.iter().enumerate() {
+                    let sq = Square::from_u8(i as u8).unwrap();
+                    assert_eq!(changed.contains(sq), pc != canonical_piece(pos.piece_on(sq)));
+                    if changed.contains(sq) {
+                        assert_eq!(restored.pieces[i], pc);
+                    }
+                }
+                assert_eq!(restored.occupied, before_occ);
+                assert_eq!(restored.kings, before_kings);
                 let mut removed = std::array::from_fn(|_| IndexList::new());
                 let mut added = std::array::from_fn(|_| IndexList::new());
-                assert!(append_threat_endpoint_diff(&restored, &pos, &mut removed, &mut added));
+                assert!(append_threat_endpoint_diff(&restored, &mut removed, &mut added));
                 for perspective in [Color::Black, Color::White] {
-                    if !before.same_mirror(&pos, perspective) {
+                    if !restored.same_mirror(perspective) {
                         continue;
                     }
                     let p = perspective.index();
@@ -2318,7 +2348,6 @@ mod tests {
                     }
                     assert!(!append_threat_endpoint_diff(
                         &restored,
-                        &pos,
                         &mut full_removed,
                         &mut full_added
                     ));
@@ -2326,6 +2355,27 @@ mod tests {
                 pos.undo_move(mv);
             }
         }
+    }
+
+    #[test]
+    fn endpoint_diff_skips_squares_restored_by_later_moves() {
+        let mut pos = Position::new();
+        pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+        let dirty = ["5i5h", "5a5b", "5h5i", "5b5a"].map(|text| {
+            let mv = pos.to_move(Move::from_usi(text).unwrap()).unwrap();
+            assert!(pos.is_legal(mv));
+            pos.do_move(mv, pos.gives_check(mv))
+        });
+        let mut ancestor = ThreatAncestor::new(&pos);
+        for entry in dirty.iter().rev() {
+            ancestor.undo(entry);
+        }
+        assert!(!ancestor.touched.is_empty());
+        assert!(ancestor.changed_squares().is_empty());
+        let mut removed = std::array::from_fn(|_| IndexList::new());
+        let mut added = std::array::from_fn(|_| IndexList::new());
+        assert!(append_threat_endpoint_diff(&ancestor, &mut removed, &mut added));
+        assert!(removed.iter().chain(&added).all(IndexList::is_empty));
     }
 
     /// 駒打ち（手駒から打つ手）の差分更新テスト

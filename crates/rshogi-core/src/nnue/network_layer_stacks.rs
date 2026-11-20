@@ -3482,18 +3482,17 @@ mod tests {
                     #[cfg(feature = "nnue-threat")]
                     if use_threat {
                         use super::super::{accumulator::IndexList, threat_features};
-                        let mut board = threat_features::ThreatBoard::new(&pos);
+                        let mut ancestor = threat_features::ThreatAncestor::new(&pos);
                         for index in (1..=ply).rev() {
-                            board.undo(&packed.entry_at(index).dirty_piece);
+                            ancestor.undo(&packed.entry_at(index).dirty_piece);
                         }
                         assert!(
                             [Color::Black, Color::White]
                                 .into_iter()
-                                .all(|side| board.same_mirror(&pos, side))
+                                .all(|side| ancestor.same_mirror(side))
                         );
                         assert!(threat_features::append_threat_endpoint_diff(
-                            &board,
-                            &pos,
+                            &ancestor,
                             &mut std::array::from_fn(|_| IndexList::new()),
                             &mut std::array::from_fn(|_| IndexList::new()),
                         ));
