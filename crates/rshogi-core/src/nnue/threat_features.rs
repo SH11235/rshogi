@@ -74,8 +74,7 @@
 //!
 //! threat_index =
 //!     pair_base[attacker_side][attacker_class][attacked_side][attacked_class]
-//!   + from_offset[attack_pattern][from_sq_n]
-//!   + attack_order[attack_pattern][from_sq_n][to_sq_n]
+//!   + attack_offset[attack_pattern][from_sq_n][to_sq_n]
 //! ```
 //!
 //! ## 用語
@@ -126,15 +125,15 @@
 //! - profile による除外 pair は sentinel `EXCLUDED_PAIR_BASE` を持ち、
 //!   累積和計算時にスキップされる ([`super::threat_exclusion`] 参照)
 //!
-//! ## from_offset / attack_order テーブル
+//! ## attack_offset テーブル
 //!
-//! - `from_offset[attack_pattern][sq]` = sq=0 から sq-1 までの各マスの攻撃数の累積和
-//! - `attack_order[attack_pattern][from_sq][to_sq]` = 空盤面上で from_sq の駒が
-//!   攻撃できる全マスを **Square raw 値の昇順** で 0-indexed 番号付けした時の to_sq の番号
+//! 各 attack pattern について、空盤面上の利きを攻撃元・攻撃先の Square raw 値の昇順で
+//! 並べたときの 0-indexed 番号を格納する。攻撃元より前のマスの攻撃数と、その攻撃元での
+//! 攻撃先の順位を加えた値になる。空盤面で利きがない組は `u16::MAX` で表す。
 //!
 //! **重要 — 静的テーブルと実盤面の使い分け**:
 //!
-//! - **index テーブル生成 (`from_offset`, `attack_order`) は空盤面上の利き** を使う。
+//! - **index テーブル生成 (`attack_offset`) は空盤面上の利き** を使う。
 //!   実盤面の occupied は無視し、静的テーブルとして事前計算可能にする
 //! - **active な threat pair の列挙** には実盤面の occupied を使う。
 //!   `attackers_to_occ(sq, occupied)` で実際に発生している threat を取り出す
@@ -432,7 +431,7 @@ fn pair_base(
 }
 
 // =============================================================================
-// from_offset テーブル + attack_order（色別 LUT）
+// attack_offset テーブル（色別 LUT）
 // =============================================================================
 
 /// 方向性駒かどうか
@@ -479,6 +478,7 @@ fn attacks_count(class: ThreatClass, sq: Square) -> usize {
 }
 
 /// from_offset[class][sq] = sq=0..sq-1 の攻撃数累積和
+#[cfg(test)]
 fn compute_from_offset_colored(class: ThreatClass, color: Color) -> [usize; 81] {
     let mut offsets = [0usize; 81];
     let mut cumulative = 0usize;
@@ -497,6 +497,7 @@ fn compute_from_offset_colored(class: ThreatClass, color: Color) -> [usize; 81] 
 const NUM_ATTACK_PATTERNS: usize = 14;
 
 /// FromOffsetTable の LazyLock キャッシュ
+#[cfg(all(test, feature = "nnue-threat"))]
 static FROM_OFFSET_TABLE: LazyLock<FromOffsetTable> = LazyLock::new(FromOffsetTable::new);
 
 fn attack_pattern_id(class: ThreatClass, oriented_color: Color) -> usize {
@@ -508,10 +509,12 @@ fn attack_pattern_id(class: ThreatClass, oriented_color: Color) -> usize {
 }
 
 /// 全 attack pattern の from_offset テーブル
+#[cfg(all(test, feature = "nnue-threat"))]
 struct FromOffsetTable {
     data: [[usize; 81]; NUM_ATTACK_PATTERNS],
 }
 
+#[cfg(all(test, feature = "nnue-threat"))]
 impl FromOffsetTable {
     fn new() -> Self {
         let mut data = [[0usize; 81]; NUM_ATTACK_PATTERNS];
@@ -535,7 +538,7 @@ impl FromOffsetTable {
 
 /// attack_order: from_sq の攻撃先を raw 昇順で列挙したときの to_sq の順位（色別）
 ///
-/// テスト用。ホットパスでは `AttackOrderTable` の LUT を使用する。
+/// テスト用。
 #[cfg(test)]
 fn compute_attack_order_colored(
     class: ThreatClass,
@@ -563,18 +566,15 @@ fn compute_attack_order_colored(
     );
 }
 
-/// attack_order の事前計算 LUT
+/// 空盤面の利きに対する pattern 内のオフセット。利きがない組は `INVALID`。
 ///
-/// `data[attack_pattern][from_sq][to_sq]` = 空盤面上で from_sq の駒が to_sq を攻撃する際の
-/// 0-indexed 順位。攻撃しない (from, to) ペアは `INVALID` (u8::MAX)。
-///
-/// サイズ: 14 × 81 × 81 = 91,854 bytes ≈ 90 KiB
-struct AttackOrderTable {
-    data: [[[u8; 81]; 81]; NUM_ATTACK_PATTERNS],
+/// サイズ: 14 × 81 × 81 × 2 = 183,708 bytes ≈ 179 KiB
+struct AttackOffsetTable {
+    data: [[[u16; 81]; 81]; NUM_ATTACK_PATTERNS],
 }
 
-impl AttackOrderTable {
-    const INVALID: u8 = u8::MAX;
+impl AttackOffsetTable {
+    const INVALID: u16 = u16::MAX;
 
     fn new() -> Self {
         let mut data = [[[Self::INVALID; 81]; 81]; NUM_ATTACK_PATTERNS];
@@ -589,28 +589,26 @@ impl AttackOrderTable {
         Self { data }
     }
 
-    fn fill_pattern(table: &mut [[u8; 81]; 81], class: ThreatClass, color: Color) {
-        for from_raw in 0..81u8 {
-            let from_sq = Square::from_u8(from_raw).unwrap();
-            let bb = attacks_bb_colored(class, color, from_sq);
-            let mut order: u8 = 0;
-            let mut iter = bb;
-            while !iter.is_empty() {
-                let to_sq = iter.pop();
-                table[from_raw as usize][to_sq.raw() as usize] = order;
-                order += 1;
+    fn fill_pattern(table: &mut [[u16; 81]; 81], class: ThreatClass, color: Color) {
+        // 1 pattern は最大でも 81 × 81 組なので u16::MAX には届かない。
+        let mut offset = 0u16;
+        for (from_raw, row) in table.iter_mut().enumerate() {
+            let from_sq = Square::from_u8(from_raw as u8).unwrap();
+            let mut attacks = attacks_bb_colored(class, color, from_sq);
+            while !attacks.is_empty() {
+                row[attacks.pop().index()] = offset;
+                offset += 1;
             }
         }
     }
 
     #[inline]
-    fn get(&self, pattern: usize, from_sq: Square, to_sq: Square) -> u8 {
-        self.data[pattern][from_sq.raw() as usize][to_sq.raw() as usize]
+    fn get(&self, pattern: usize, from_sq: Square, to_sq: Square) -> u16 {
+        self.data[pattern][from_sq.index()][to_sq.index()]
     }
 }
 
-/// AttackOrderTable の LazyLock キャッシュ
-static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrderTable::new);
+static ATTACK_OFFSET_TABLE: LazyLock<AttackOffsetTable> = LazyLock::new(AttackOffsetTable::new);
 
 // =============================================================================
 // Threat index 計算
@@ -624,7 +622,7 @@ static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrde
 /// perspective で同一 edge を落とすので STM/NSTM 対称性は保たれる。
 ///
 /// necessarily-mutual は「逆向き駒が空盤面で `from_sq` に届くか」= index 算出用
-/// `ATTACK_ORDER_TABLE` の逆引き（O(1)、active edge は from→to 区間が空なので実盤面
+/// `ATTACK_OFFSET_TABLE` の逆引き（O(1)、active edge は from→to 区間が空なので実盤面
 /// 到達と一致）。
 ///
 /// tie-break は perspective swap と HM (Half-Mirror) file 反転のどちらでも不変な量で
@@ -644,7 +642,7 @@ fn is_canonical_dead(
     to_sq: Square,
 ) -> bool {
     let rev_pattern = attack_pattern_id(attacked_class, target_color);
-    let mutual = ATTACK_ORDER_TABLE.get(rev_pattern, to_sq, from_sq) != AttackOrderTable::INVALID;
+    let mutual = ATTACK_OFFSET_TABLE.get(rev_pattern, to_sq, from_sq) != AttackOffsetTable::INVALID;
     mutual && (attacker_class as u8) < (attacked_class as u8)
 }
 
@@ -676,15 +674,9 @@ fn threat_index_reference(
     let base = pair_base(attacker_side, attacker_class, attacked_side, attacked_class)?;
     let pattern = attack_pattern_id(attacker_class, oriented_color);
     let from_off = from_offset_table.get(pattern, from_sq_n);
-    let attack_ord = ATTACK_ORDER_TABLE.get(pattern, from_sq_n, to_sq_n);
-    debug_assert_ne!(
-        attack_ord,
-        AttackOrderTable::INVALID,
-        "attack_order: to_sq {} is not attacked by pattern {pattern} at {}",
-        to_sq_n.raw(),
-        from_sq_n.raw()
-    );
-    Some(base + from_off + attack_ord as usize)
+    let attack_ord =
+        compute_attack_order_colored(attacker_class, oriented_color, from_sq_n, to_sq_n);
+    Some(base + from_off + attack_ord)
 }
 
 // =============================================================================
@@ -725,8 +717,7 @@ static NORMALIZED_SQUARES: [[[Square; 81]; 2]; 2] = {
 struct ThreatIndexContext {
     perspective: Color,
     normalized: &'static [Square; 81],
-    from_offsets: &'static FromOffsetTable,
-    attack_orders: &'static AttackOrderTable,
+    attack_offsets: &'static AttackOffsetTable,
 }
 
 #[cfg(feature = "nnue-threat")]
@@ -736,8 +727,7 @@ impl ThreatIndexContext {
         Self {
             perspective,
             normalized: &NORMALIZED_SQUARES[perspective.index()][usize::from(hm)],
-            from_offsets: &FROM_OFFSET_TABLE,
-            attack_orders: &ATTACK_ORDER_TABLE,
+            attack_offsets: &ATTACK_OFFSET_TABLE,
         }
     }
 
@@ -756,8 +746,7 @@ impl ThreatIndexContext {
             perspective: self.perspective,
             normalized: self.normalized,
             pair_bases: &PAIR_BASE.as_chunks::<{ 2 * NUM_THREAT_CLASSES }>().0[pair_row],
-            from_offset: self.from_offsets.get(pattern, from),
-            attack_orders: &self.attack_orders.data[pattern][from.index()],
+            attack_offsets: &self.attack_offsets.data[pattern][from.index()],
         }
     }
 }
@@ -768,8 +757,7 @@ struct ThreatSource {
     perspective: Color,
     normalized: &'static [Square; 81],
     pair_bases: &'static [usize; 2 * NUM_THREAT_CLASSES],
-    from_offset: usize,
-    attack_orders: &'static [u8; 81],
+    attack_offsets: &'static [u16; 81],
 }
 
 #[cfg(feature = "nnue-threat")]
@@ -782,9 +770,9 @@ impl ThreatSource {
             return None;
         }
 
-        let order = self.attack_orders[self.normalized[to.index()].index()];
-        debug_assert_ne!(order, AttackOrderTable::INVALID);
-        Some(base + self.from_offset + usize::from(order))
+        let offset = self.attack_offsets[self.normalized[to.index()].index()];
+        debug_assert_ne!(offset, AttackOffsetTable::INVALID);
+        Some(base + usize::from(offset))
     }
 }
 
@@ -2117,16 +2105,22 @@ mod tests {
                             let source = ctx.source(color, class, from);
                             let from_n = normalize_sq_reference(from, perspective, hm);
                             let attacks = attacks_bb_colored(class, oriented_color, from_n);
+                            let pattern = attack_pattern_id(class, oriented_color);
+                            let from_offset = FROM_OFFSET_TABLE.get(pattern, from_n);
                             for to in squares.clone() {
                                 let to_n = normalize_sq_reference(to, perspective, hm);
-                                let is_attack = attacks.contains(to_n);
-                                assert_eq!(
-                                    source.attack_orders[to_n.index()] != AttackOrderTable::INVALID,
-                                    is_attack
-                                );
-                                if !is_attack {
+                                let offset = source.attack_offsets[to_n.index()];
+                                if !attacks.contains(to_n) {
+                                    assert_eq!(offset, AttackOffsetTable::INVALID);
                                     continue;
                                 }
+                                let order = compute_attack_order_colored(
+                                    class,
+                                    oriented_color,
+                                    from_n,
+                                    to_n,
+                                );
+                                assert_eq!(usize::from(offset), from_offset + order);
                                 for target_color in [Color::Black, Color::White] {
                                     let target_side = usize::from(target_color != perspective);
                                     for target_class in ALL_THREAT_CLASSES {
@@ -2860,37 +2854,6 @@ mod tests {
             verify_incremental(&mut pos, m);
             let gc = pos.gives_check(m);
             pos.do_move(m, gc);
-        }
-    }
-
-    /// AttackOrderTable と compute_attack_order_colored の一致テスト
-    #[test]
-    fn test_attack_order_table_matches_compute() {
-        let table = &*ATTACK_ORDER_TABLE;
-        for &class in &ALL_THREAT_CLASSES {
-            for &color in &[Color::Black, Color::White] {
-                if !is_directional(class) && color == Color::White {
-                    continue; // 非方向性駒は Black パターンのみ
-                }
-                let pattern = attack_pattern_id(class, color);
-                for from_raw in 0..81u8 {
-                    let from_sq = Square::from_u8(from_raw).unwrap();
-                    let bb = attacks_bb_colored(class, color, from_sq);
-                    let mut iter = bb;
-                    while !iter.is_empty() {
-                        let to_sq = iter.pop();
-                        let expected = compute_attack_order_colored(class, color, from_sq, to_sq);
-                        let got = table.get(pattern, from_sq, to_sq);
-                        assert_eq!(
-                            got,
-                            expected as u8,
-                            "Mismatch: {class:?} {color:?} from={} to={}",
-                            from_raw,
-                            to_sq.raw()
-                        );
-                    }
-                }
-            }
         }
     }
 
