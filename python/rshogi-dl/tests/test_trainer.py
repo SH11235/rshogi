@@ -520,8 +520,8 @@ class TrainerTest(unittest.TestCase):
             self.config, device="cuda", precision="bf16", fused_optimizer=True,
             execution="cuda-graph-fused-norm", fuse_ffn_residual_norm=True,
         )
-        with self.assertRaisesRegex(TrainingError, "model width of 128 or 256"):
-            self.run_training("wrong-model-width", config)
+        with self.assertRaisesRegex(TrainingError, "fuse_ffn_residual_norm requires width"):
+            self.run_training("wrong-model-width", config, model_config=replace(TEST_CONFIG, packed_qkv=True))
         with self.assertRaisesRegex(TrainingError, "packed QKV"):
             self.run_training("unpacked-qkv", config, model_config=replace(TEST_CONFIG, width=128))
 
