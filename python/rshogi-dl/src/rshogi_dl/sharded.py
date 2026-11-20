@@ -12,6 +12,7 @@ import sys
 from array import array
 from collections.abc import Callable, Iterable, Iterator
 from io import BytesIO
+from itertools import repeat
 from pathlib import Path
 
 import numpy as np
@@ -279,11 +280,13 @@ def _convert_records(
         columns["values"][count] = record.value
         columns["policy_present"][count] = record.policy is not None
         columns["legal_indices"].extend(record.legal_labels)
-        weights = dict(record.policy or ())
-        weight_sum = math.fsum(weights.values()) if record.policy is not None else 1.0
-        columns["policy_targets"].extend(
-            weights.get(label, 0.0) / weight_sum for label in record.legal_labels
-        )
+        targets = columns["policy_targets"]
+        if record.policy is None:
+            targets.extend(repeat(0.0, len(record.legal_labels)))
+        else:
+            weight_sum = math.fsum(weight for _, weight in record.policy)
+            weights = {label: weight / weight_sum for label, weight in record.policy}
+            targets.extend(map(weights.get, record.legal_labels, repeat(0.0)))
         count += 1
         total += 1
         columns["legal_offsets"][count] = len(columns["legal_indices"])
