@@ -26,23 +26,31 @@ class ModelConfig:
     width: int
     heads: int
     ffn_width: int
+    packed_qkv: bool = False
 
     def __post_init__(self) -> None:
-        for name, value in asdict(self).items():
+        for name in ("layers", "width", "heads", "ffn_width"):
+            value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if type(self.packed_qkv) is not bool:
+            raise ValueError("packed_qkv must be a boolean")
         if self.width % self.heads != 0:
             raise ValueError("width must be divisible by heads")
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, int | bool]:
         """checkpoint と ONNX metadata に入れる dict を返す。"""
-        return asdict(self)
+        result = asdict(self)
+        if not self.packed_qkv:
+            del result["packed_qkv"]
+        return result
 
     @classmethod
     def from_dict(cls, raw: object) -> ModelConfig:
         """:meth:`to_dict` の出力から復元する。過不足のある key は拒否する。"""
-        if type(raw) is not dict or set(raw) != {"layers", "width", "heads", "ffn_width"}:
-            raise ValueError("model config must have exactly layers, width, heads, ffn_width")
+        required = {"layers", "width", "heads", "ffn_width"}
+        if type(raw) is not dict or not required <= raw.keys() <= required | {"packed_qkv"}:
+            raise ValueError("model config requires layers, width, heads, ffn_width with optional packed_qkv")
         return cls(**raw)
 
 
@@ -72,15 +80,27 @@ class SelfAttention(nn.Module):
         self.key = nn.Linear(width, width)
         self.value = nn.Linear(width, width)
         self.output = nn.Linear(width, width)
+        self.qkv: nn.Linear | None = None
+
+    def pack_qkv(self) -> None:
+        projections = (self.query, self.key, self.value)
+        width = self.query.in_features
+        packed = nn.Linear(width, 3 * width, device="meta")
+        packed.weight = nn.Parameter(torch.cat([layer.weight.detach() for layer in projections]))
+        packed.bias = nn.Parameter(torch.cat([layer.bias.detach() for layer in projections]))
+        self.qkv = packed
+        del self.query, self.key, self.value
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         # batch 軸だけを -1 にすると、export した graph に動的な shape 計算が入らない。
         return x.view(-1, TOKEN_COUNT, self.heads, self.head_width).transpose(1, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        query = self._split_heads(self.query(x))
-        key = self._split_heads(self.key(x))
-        value = self._split_heads(self.value(x))
+        if self.qkv is None:
+            projections = self.query(x), self.key(x), self.value(x)
+        else:
+            projections = self.qkv(x).chunk(3, dim=-1)
+        query, key, value = (self._split_heads(projected) for projected in projections)
         # 配備 graph は実行方式に依存させず、標準 MatMul / Softmax の ONNX 契約を保つ。
         if self.attention_backend == "sdpa" and not torch.jit.is_tracing():
             attended = functional.scaled_dot_product_attention(
@@ -146,6 +166,9 @@ class SquareTransformer(nn.Module):
         )
         nn.init.normal_(self.token_embedding.weight, std=0.02)
         nn.init.normal_(self.position_embedding, std=0.02)
+        if config.packed_qkv:
+            for block in self.blocks:
+                block.attention.pack_qkv()
 
     def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``tokens`` は int64 の ``[B, 96]``。``([B, 2187] policy logit, [B, 1] value logit)`` を返す。"""
