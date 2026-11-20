@@ -142,12 +142,19 @@
 //! スライダー駒 (Lance, Bishop, Rook, Horse, Dragon) では index と active 列挙で
 //! 異なる利きを参照する点に注意。
 
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+use crate::bitboard::{
+    BISHOP_STEP, ROOK_STEP, between_bb_aligned, direct_of, king_effect, lance_step_effect,
+    ray_effect,
+};
 use crate::bitboard::{
     Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
     pawn_effect, rook_effect, silver_effect,
 };
 #[cfg(feature = "nnue-threat")]
 use crate::position::Position;
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+use crate::types::Piece;
 use crate::types::{Color, PieceType, Square};
 
 use super::accumulator::DirtyPiece;
@@ -1070,7 +1077,7 @@ pub(crate) fn decode_board_threat_info_fb(
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
 pub(crate) struct ThreatAncestor<'a> {
     pos: &'a Position,
-    pieces: [crate::types::Piece; 81],
+    pieces: [Piece; 81],
     touched: Bitboard,
     occupied: Bitboard,
     kings: [Square; 2],
@@ -1081,7 +1088,7 @@ impl<'a> ThreatAncestor<'a> {
     pub(crate) fn new(pos: &'a Position) -> Self {
         Self {
             pos,
-            pieces: [crate::types::Piece::NONE; 81],
+            pieces: [Piece::NONE; 81],
             touched: Bitboard::EMPTY,
             occupied: pos.occupied(),
             kings: [pos.king_square(Color::Black), pos.king_square(Color::White)],
@@ -1089,7 +1096,6 @@ impl<'a> ThreatAncestor<'a> {
     }
 
     pub(crate) fn undo(&mut self, dirty: &DirtyPiece) {
-        use crate::types::Piece;
         for cp in &dirty.changed_piece[..dirty.dirty_num as usize] {
             if let Some(sq) = decode_board_square_fb(cp.new_piece.fb) {
                 self.pieces[sq.index()] = Piece::NONE;
@@ -1138,16 +1144,78 @@ impl<'a> ThreatAncestor<'a> {
 }
 
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
-fn canonical_piece(pc: crate::types::Piece) -> crate::types::Piece {
+fn canonical_piece(pc: Piece) -> Piece {
     if pc.is_none() {
         return pc;
     }
     match pc.piece_type() {
         PieceType::ProPawn | PieceType::ProLance | PieceType::ProKnight | PieceType::ProSilver => {
-            crate::types::Piece::new(pc.color(), PieceType::Gold)
+            Piece::new(pc.color(), PieceType::Gold)
         }
         _ => pc,
     }
+}
+
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+fn threat_short_attackers(pos: &Position, sq: Square) -> Bitboard {
+    let pawns = pos.pieces_pt(PieceType::Pawn);
+    let knights = pos.pieces_pt(PieceType::Knight);
+    let silvers = pos.pieces_pt(PieceType::Silver);
+    let golds = pos.golds();
+    let majors = (ROOK_STEP[sq.index()] & pos.pieces_pt(PieceType::Horse))
+        | (BISHOP_STEP[sq.index()] & pos.pieces_pt(PieceType::Dragon));
+    let steps = |color: Color| {
+        ((pawn_effect(!color, sq) & pawns)
+            | (knight_effect(!color, sq) & knights)
+            | (silver_effect(!color, sq) & silvers)
+            | (gold_effect(!color, sq) & golds))
+            & pos.pieces_c(color)
+    };
+    steps(Color::Black) | steps(Color::White) | (king_effect(sq) & majors)
+}
+
+#[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
+fn append_threat_edge(
+    from: Square,
+    pc: Piece,
+    to: Square,
+    target: Piece,
+    mirrors: [bool; 2],
+    output: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
+) -> bool {
+    let Some(dc) = ThreatClass::from_piece_type(target.piece_type()) else {
+        return true;
+    };
+    let ac = ThreatClass::from_piece_type(pc.piece_type()).unwrap();
+    #[cfg(feature = "threat-profile-full-symdedup")]
+    if is_canonical_dead(ac, from, dc, target.color(), to) {
+        return true;
+    }
+    for perspective in [Color::Black, Color::White] {
+        let p = perspective.index();
+        let hm = mirrors[p];
+        let attacker_side = usize::from(pc.color() != perspective);
+        let Some(index) = threat_index(
+            attacker_side,
+            ac,
+            if attacker_side == 0 {
+                Color::Black
+            } else {
+                Color::White
+            },
+            usize::from(target.color() != perspective),
+            dc,
+            normalize_sq(from, perspective, hm),
+            normalize_sq(to, perspective, hm),
+            &FROM_OFFSET_TABLE,
+        ) else {
+            continue;
+        };
+        if output[p].len() == MAX_CHANGED_THREAT_FEATURES || !output[p].push(index) {
+            return false;
+        }
+    }
+    true
 }
 
 /// 祖先と現局面の物理差分を一度列挙し、両視点の index に変換する。
@@ -1163,85 +1231,115 @@ pub(crate) fn append_threat_endpoint_diff(
     }
     count_threat_diff!();
     let pos = before.pos;
-    let after_occ = pos.occupied();
+    let old_occ = before.occupied;
+    let new_occ = pos.occupied();
+    let occupied = old_occ | new_occ;
+    let occupancy_changed = old_occ ^ new_occ;
+    let unchanged = new_occ & !changed;
     let mirrors = [Color::Black, Color::White].map(|p| is_hm_mirror(pos.king_square(p), p));
-    let mut sources = changed;
+    let mut visited = Bitboard::EMPTY;
     let mut squares = changed;
     while !squares.is_empty() {
         let sq = squares.pop();
-        // changed 以外の升では、現局面の駒種別の利きが祖先でも使える。
-        sources |= pos.attackers_to_occ(sq, before.occupied);
-        sources |= pos.attackers_to_occ(sq, after_occ);
-    }
-    while !sources.is_empty() {
-        let from = sources.pop();
-        let new_pc = canonical_piece(pos.piece_on(from));
-        let old_pc = if changed.contains(from) {
-            before.pieces[from.index()]
+        let old_pc = before.pieces[sq.index()];
+        let new_pc = pos.piece_on(sq);
+        let bishop_sources = BISHOP_STEP[sq.index()] & unchanged & pos.bishop_horse();
+        let rook_sources = ROOK_STEP[sq.index()]
+            & unchanged
+            & (pos.rook_dragon()
+                | (lance_step_effect(Color::White, sq)
+                    & pos.pieces(Color::Black, PieceType::Lance))
+                | (lance_step_effect(Color::Black, sq)
+                    & pos.pieces(Color::White, PieceType::Lance)));
+        let sliders = bishop_sources | rook_sources;
+        let is_threat_piece = |pc: Piece| !pc.is_none() && pc.piece_type() != PieceType::King;
+        let short_attackers = if is_threat_piece(old_pc) || is_threat_piece(new_pc) {
+            threat_short_attackers(pos, sq) & unchanged
         } else {
-            new_pc
+            Bitboard::EMPTY
         };
-        let targets = |pc: crate::types::Piece, occupied| {
-            if pc.is_none() || pc.piece_type() == PieceType::King {
-                Bitboard::EMPTY
+
+        let mut nearest = Bitboard::EMPTY;
+        if bishop_sources.is_not_empty() {
+            nearest |= bishop_effect(sq, occupied) & occupied;
+        }
+        if rook_sources.is_not_empty() {
+            nearest |= rook_effect(sq, occupied) & occupied;
+        }
+        // 両端にいる最初の駒より奥の占有差分は、この升への利きに影響しない。
+        let common = nearest & !occupancy_changed;
+        let mut old_nearest = common;
+        let mut new_nearest = common;
+        let mut differing = nearest & occupancy_changed;
+        while !differing.is_empty() {
+            let blocker = differing.pop();
+            let dir = direct_of(sq, blocker).unwrap();
+            if old_occ.contains(blocker) {
+                old_nearest.set(blocker);
+                new_nearest |= ray_effect(dir, sq, new_occ) & new_occ;
             } else {
-                attacks_from_piece(pc.piece_type(), pc.color(), from, occupied) & occupied
+                new_nearest.set(blocker);
+                old_nearest |= ray_effect(dir, sq, old_occ) & old_occ;
             }
-        };
-        let old_targets = targets(old_pc, before.occupied);
-        let new_targets = targets(new_pc, after_occ);
-        let mut affected = if old_pc == new_pc {
-            (old_targets ^ new_targets) | ((old_targets | new_targets) & changed)
-        } else {
-            old_targets | new_targets
-        };
-        while !affected.is_empty() {
-            let to = affected.pop();
-            for (is_before, pc, active, output) in [
-                (true, old_pc, old_targets.contains(to), &mut *removed),
-                (false, new_pc, new_targets.contains(to), &mut *added),
-            ] {
-                if !active {
-                    continue;
-                }
-                // 対象駒は ThreatClass で金系をまとめるため、現局面の駒をそのまま使える。
-                let target = if is_before && changed.contains(to) {
-                    before.pieces[to.index()]
-                } else {
-                    pos.piece_on(to)
-                };
-                let Some(dc) = ThreatClass::from_piece_type(target.piece_type()) else {
-                    continue;
-                };
-                let ac = ThreatClass::from_piece_type(pc.piece_type()).unwrap();
-                #[cfg(feature = "threat-profile-full-symdedup")]
-                if is_canonical_dead(ac, from, dc, target.color(), to) {
-                    continue;
-                }
-                for perspective in [Color::Black, Color::White] {
-                    let hm = mirrors[perspective.index()];
-                    let Some(index) = threat_index(
-                        usize::from(pc.color() != perspective),
-                        ac,
-                        if perspective == Color::Black {
-                            pc.color()
-                        } else {
-                            !pc.color()
-                        },
-                        usize::from(target.color() != perspective),
-                        dc,
-                        normalize_sq(from, perspective, hm),
-                        normalize_sq(to, perspective, hm),
-                        &FROM_OFFSET_TABLE,
-                    ) else {
+        }
+
+        for (pc, occ, nearest, is_before, output) in [
+            (old_pc, old_occ, old_nearest, true, &mut *removed),
+            (new_pc, new_occ, new_nearest, false, &mut *added),
+        ] {
+            let sliding_attackers = nearest & sliders;
+            if pc.is_none() {
+                // この端点で空いている升を挟む辺は、反対側の端点では必ず遮られる。
+                let mut sources = sliding_attackers;
+                while !sources.is_empty() {
+                    let from = sources.pop();
+                    let dir = direct_of(from, sq).unwrap();
+                    let targets = ray_effect(dir, sq, Bitboard::EMPTY) & nearest & unchanged;
+                    let Some(to) = targets.lsb() else {
                         continue;
                     };
-                    let output = &mut output[perspective.index()];
-                    if output.len() == MAX_CHANGED_THREAT_FEATURES || !output.push(index) {
+                    if visited.is_not_empty()
+                        && (visited & between_bb_aligned(from, to)).is_not_empty()
+                    {
+                        continue;
+                    }
+                    if !append_threat_edge(
+                        from,
+                        pos.piece_on(from),
+                        to,
+                        pos.piece_on(to),
+                        mirrors,
+                        output,
+                    ) {
+                        return false;
+                    }
+                }
+            } else if pc.piece_type() != PieceType::King {
+                let mut targets = attacks_from_piece(pc.piece_type(), pc.color(), sq, occ) & occ;
+                while !targets.is_empty() {
+                    let to = targets.pop();
+                    let target = if is_before && changed.contains(to) {
+                        before.pieces[to.index()]
+                    } else {
+                        pos.piece_on(to)
+                    };
+                    if !append_threat_edge(sq, pc, to, target, mirrors, output) {
+                        return false;
+                    }
+                }
+                // 変化升を始点とする辺は、その升から出る辺の列挙に任せる。
+                let mut sources = short_attackers | sliding_attackers;
+                while !sources.is_empty() {
+                    let from = sources.pop();
+                    if !append_threat_edge(from, pos.piece_on(from), sq, pc, mirrors, output) {
                         return false;
                     }
                 }
             }
+        }
+        // 同じ辺を複数の空き升から見つけたときは、最初の升だけで列挙する。
+        if occupancy_changed.contains(sq) {
+            visited.set(sq);
         }
     }
     true
@@ -2355,6 +2453,114 @@ mod tests {
                 pos.undo_move(mv);
             }
         }
+    }
+
+    fn assert_endpoint_diff_matches_full(old: &Position, ancestor: &ThreatAncestor<'_>) {
+        use std::collections::BTreeMap;
+
+        let current = ancestor.pos;
+        let mut removed = std::array::from_fn(|_| IndexList::new());
+        let mut added = std::array::from_fn(|_| IndexList::new());
+        assert!(append_threat_endpoint_diff(ancestor, &mut removed, &mut added));
+        for perspective in [Color::Black, Color::White] {
+            // 端点差分と同じ座標で比較するため、両端に現局面の HM を使う。
+            let king = current.king_square(perspective);
+            let mut counts = BTreeMap::<usize, i32>::new();
+            for (pos, sign) in [(old, -1), (current, 1)] {
+                let mut active = Vec::new();
+                append_active_threat_indices(pos, perspective, king, &mut active);
+                for index in active {
+                    *counts.entry(index).or_default() += sign;
+                }
+            }
+            for (output, sign) in [(&removed, -1), (&added, 1)] {
+                let expected: Vec<_> = counts
+                    .iter()
+                    .flat_map(|(&index, &count)| {
+                        std::iter::repeat_n(index, (count * sign).max(0) as usize)
+                    })
+                    .collect();
+                let mut actual: Vec<_> = output[perspective.index()].iter().collect();
+                actual.sort_unstable();
+                assert_eq!(
+                    actual,
+                    expected,
+                    "{perspective:?}, sign={sign}, {} -> {}",
+                    old.to_sfen(),
+                    current.to_sfen()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_diff_matches_feature_multisets_on_random_paths() {
+        use crate::movegen::generate_legal_all;
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x6258_a15d);
+        let (mut capture, mut promotion, mut drop, mut king_move, mut restored) =
+            (false, false, false, false, false);
+        for sfen in [
+            crate::position::SFEN_HIRATE,
+            "+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24",
+            "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1",
+            "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut old = Position::new();
+            let mut path = Vec::new();
+            for _ in 0..96 {
+                let mut list = MoveList::new();
+                generate_legal_all(&pos, &mut list);
+                if list.is_empty() {
+                    break;
+                }
+                let mv = list[rng.random_range(0..list.len())];
+                capture |= !pos.piece_on(mv.to()).is_none();
+                promotion |= mv.is_promotion();
+                drop |= mv.is_drop();
+                king_move |=
+                    !mv.is_drop() && pos.piece_on(mv.from()).piece_type() == PieceType::King;
+                let previous = pos.to_sfen();
+                path.push((previous, pos.do_move(mv, pos.gives_check(mv))));
+
+                for distance in [2, 3, 4, 6, 12, 24] {
+                    let Some(start) = path.len().checked_sub(distance) else {
+                        continue;
+                    };
+                    old.set_sfen(&path[start].0).unwrap();
+                    let mut ancestor = ThreatAncestor::new(&pos);
+                    for (_, dirty) in path[start..].iter().rev() {
+                        ancestor.undo(dirty);
+                    }
+                    restored |= (ancestor.touched & !ancestor.changed_squares()).is_not_empty();
+                    assert_endpoint_diff_matches_full(&old, &ancestor);
+                }
+            }
+        }
+        assert!(capture && promotion && drop && king_move && restored);
+    }
+
+    #[test]
+    fn endpoint_diff_emits_one_slider_edge_through_multiple_vacated_squares() {
+        let sfen = "4k4/9/9/9/R1S1S1p2/9/9/9/4K4 b - 1";
+        let mut old = Position::new();
+        old.set_sfen(sfen).unwrap();
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        let dirty = ["7e6d", "5a4a", "5e4d"].map(|text| {
+            let mv = pos.to_move(Move::from_usi(text).unwrap()).unwrap();
+            assert!(pos.is_legal(mv));
+            pos.do_move(mv, pos.gives_check(mv))
+        });
+        let mut ancestor = ThreatAncestor::new(&pos);
+        for entry in dirty.iter().rev() {
+            ancestor.undo(entry);
+        }
+        assert_endpoint_diff_matches_full(&old, &ancestor);
     }
 
     #[test]
