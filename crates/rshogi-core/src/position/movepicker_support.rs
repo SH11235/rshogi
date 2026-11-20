@@ -348,8 +348,12 @@ impl Position {
     /// 静的駒交換評価を判定する。
     /// 成りボーナスは考慮しない。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
+        #[cfg(feature = "search-stats")]
+        let diag_caller = crate::search::diagnostics::begin_see(self, m);
         // PASSは駒交換が発生しないので >= 0
         if m.is_pass() {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::see_outcome(diag_caller, usize::from(threshold.raw() <= 0));
             return threshold.raw() <= 0;
         }
 
@@ -372,6 +376,8 @@ impl Position {
 
         // toの駒価値がthreshold未満 → 取り返されなくてもfalse
         if swap < 0 {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::see_outcome(diag_caller, 0);
             return false;
         }
 
@@ -386,6 +392,8 @@ impl Position {
 
         // 動かす駒を取り返されても閾値以上 → true
         if swap <= 0 {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::see_outcome(diag_caller, 1);
             return true;
         }
 
@@ -397,6 +405,8 @@ impl Position {
             self.occupied() ^ Bitboard::from_square(m.from()) ^ Bitboard::from_square(to)
         };
         let mut stm = self.side_to_move();
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::see_outcome(diag_caller, 2);
         let mut attackers = self.attackers_to_occ(to, occupied);
         let mut res = 1i32;
 

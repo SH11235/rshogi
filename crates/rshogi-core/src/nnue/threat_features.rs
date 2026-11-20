@@ -385,6 +385,20 @@ const PAIR_DATA: ([usize; NUM_PAIRS], usize) = build_pair_base();
 #[cfg(feature = "nnue-threat")]
 static PAIR_BASE: [usize; NUM_PAIRS] = PAIR_DATA.0;
 
+/// 格納された Threat 行の範囲を、攻撃駒クラス・被攻撃駒クラス・同陣営フラグとともに返す。
+/// クラス番号は [`ThreatClass`] の定義に従う。除外 profile の行範囲は含まない。
+#[cfg(feature = "nnue-threat")]
+pub fn threat_pair_ranges() -> impl Iterator<Item = (usize, usize, bool, std::ops::Range<usize>)> {
+    PAIR_BASE.iter().enumerate().filter_map(|(pair, &start)| {
+        let ac = pair / (2 * NUM_THREAT_CLASSES) % NUM_THREAT_CLASSES;
+        let dc = pair % NUM_THREAT_CLASSES;
+        let attacker_side = pair / (2 * NUM_THREAT_CLASSES * NUM_THREAT_CLASSES);
+        let attacked_side = pair / NUM_THREAT_CLASSES % 2;
+        (start != EXCLUDED_PAIR_BASE)
+            .then(|| (ac, dc, attacker_side == attacked_side, start..start + ATTACKS_PER_COLOR[ac]))
+    })
+}
+
 /// pair_base を取得。除外された pair は None を返す。
 ///
 /// Profile 0 (除外なし) では `EXCLUDED_PAIR_BASE` が存在しないため、
@@ -1139,6 +1153,7 @@ fn canonical_piece(pc: crate::types::Piece) -> crate::types::Piece {
 /// 祖先と現局面の物理差分を一度列挙し、両視点の index に変換する。
 #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
 pub(crate) fn append_threat_endpoint_diff(
+    #[cfg(feature = "search-stats")] record: bool,
     before: &ThreatBoard,
     pos: &Position,
     removed: &mut [IndexList<MAX_CHANGED_THREAT_FEATURES>; 2],
@@ -1154,7 +1169,12 @@ pub(crate) fn append_threat_endpoint_diff(
     if changed.is_empty() {
         return true;
     }
+    #[cfg(not(feature = "search-stats"))]
     count_threat_diff!();
+    #[cfg(feature = "search-stats")]
+    if record {
+        count_threat_diff!();
+    }
     let mut sources = changed;
     let mut squares = changed;
     while !squares.is_empty() {
@@ -1162,6 +1182,10 @@ pub(crate) fn append_threat_endpoint_diff(
         // 動いた駒は changed に含まれ、動いていない駒の種別は両端で同じ。
         sources |= pos.attackers_to_occ(sq, before.occupied);
         sources |= pos.attackers_to_occ(sq, after.occupied);
+    }
+    #[cfg(feature = "search-stats")]
+    if record {
+        crate::search::diagnostics::threat_geometry(changed.count(), sources.count());
     }
     while !sources.is_empty() {
         let from = sources.pop();
@@ -1198,6 +1222,10 @@ pub(crate) fn append_threat_endpoint_diff(
                 #[cfg(feature = "threat-profile-full-symdedup")]
                 if is_canonical_dead(ac, from, dc, target.color(), to) {
                     continue;
+                }
+                #[cfg(feature = "search-stats")]
+                if record {
+                    crate::search::diagnostics::threat_physical_edge();
                 }
                 for perspective in [Color::Black, Color::White] {
                     let hm = is_hm_mirror(pos.king_square(perspective), perspective);
@@ -2285,7 +2313,14 @@ mod tests {
                 assert_eq!(restored.kings, before.kings);
                 let mut removed = std::array::from_fn(|_| IndexList::new());
                 let mut added = std::array::from_fn(|_| IndexList::new());
-                assert!(append_threat_endpoint_diff(&restored, &pos, &mut removed, &mut added));
+                assert!(append_threat_endpoint_diff(
+                    #[cfg(feature = "search-stats")]
+                    true,
+                    &restored,
+                    &pos,
+                    &mut removed,
+                    &mut added
+                ));
                 for perspective in [Color::Black, Color::White] {
                     if !before.same_mirror(&pos, perspective) {
                         continue;
@@ -2317,6 +2352,8 @@ mod tests {
                         }
                     }
                     assert!(!append_threat_endpoint_diff(
+                        #[cfg(feature = "search-stats")]
+                        true,
                         &restored,
                         &pos,
                         &mut full_removed,

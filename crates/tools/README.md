@@ -38,6 +38,7 @@
 | walk と同じ辿りで RAMU の手番の局面の main の伝播の値と外部定跡の値を比べ、食い違う局面の表と Markdown の報告、定跡が切れた所を根にした木のキューの行を出す (受付の木の照合つき) | [book_mine master opp-book-diff](docs/book_mine.md#master-opp-book-diff-外部定跡と食い違う局面) |
 | 自分は main、相手は main・alt を指して辿れる出口を層ごとの外部ソート・到達済みキーのマージで分類し、既存の木との重複を除いてキューにする | [book_mine master exits](docs/book_mine.md#master-exits-元データを辿って出口を列挙する) |
 | Threat の幅を縮め、速度試験用 net を作る | [resize_nnue_threat](docs/resize_nnue_threat.md) |
+| Threat のペアクラス別に重みの大きさを調べる | [threat_weight_stats](docs/threat_weight_stats.md) |
 | LayerStacks の FT と L1 の列を並べ替える | [permute_nnue_ft](docs/permute_nnue_ft.md) |
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |
 

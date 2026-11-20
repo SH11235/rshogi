@@ -69,6 +69,8 @@ pub mod stats;
 pub(crate) mod threat_exclusion;
 #[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_features;
+#[cfg(feature = "nnue-threat")]
+pub use threat_features::{NUM_THREAT_CLASSES, threat_pair_ranges};
 
 pub use progress_q16::{
     compute_progresskpabs_q16_sum, get_layer_stack_progress_kpabs_q16_weights,

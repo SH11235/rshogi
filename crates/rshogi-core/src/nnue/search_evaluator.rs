@@ -316,6 +316,8 @@ impl SearchEvaluator {
             }
             #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks { net, stack, cache } => {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::nnue_input(pos);
                 super::network::update_and_evaluate_layer_stacks_cached(net, pos, stack, cache)
             }
             #[cfg(feature = "nnue-runtime-dimensions")]

@@ -1813,11 +1813,20 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         let stack_dims = stack.architecture_dims();
         macro_rules! do_update {
             ($net:expr, $stack:expr, $cache_variant:ident) => {{
+                #[cfg(feature = "search-stats")]
+                let diag_request = crate::search::diagnostics::NnueRequest::new();
                 let current_entry = $stack.current();
                 if current_entry.accumulator.computed_accumulation {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ACC_REUSED, 1);
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ANCESTOR_HIST_0, 1);
+
                     return;
                 }
 
+                #[cfg(feature = "search-stats")]
+                $net.feature_transformer.diagnose_ft_ancestors(pos, $stack);
                 #[cfg(feature = "nnue-threat")]
                 if $net.feature_transformer.has_threat {
                     let threat_cache = if let Some(
@@ -1832,6 +1841,9 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 if let Some(prev_idx) = current_entry.previous {
                     let prev_computed = $stack.entry_at(prev_idx).accumulator.computed_accumulation;
                     if prev_computed {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ANCESTOR_HIST_1, 1);
+
                         let dirty_piece = $stack.current().dirty_piece;
                         let (prev_acc, current_acc) =
                             $stack.get_prev_and_current_accumulators(prev_idx);
@@ -1867,11 +1879,15 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     if let Some((source_idx, _depth)) =
                         $stack.find_usable_accumulator(max_depth)
                     {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ANCESTOR_HIST_0 + _depth.min(8), 1);
                         updated = $net.forward_update_incremental(pos, $stack, source_idx);
                     }
                 }
 
                 if !updated {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::NNUE_ACC_FALLBACK, 1);
                     let acc = &mut $stack.current_mut().accumulator;
                     if let Some(
                         super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),
@@ -1882,9 +1898,10 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                         $net.refresh_accumulator(pos, acc);
                     }
                 }
+                #[cfg(feature = "search-stats")]
+                drop(diag_request);
             }};
         }
-
         match (self, stack) {
             #[cfg(feature = "layerstacks-1536x16x32")]
             (

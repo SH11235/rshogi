@@ -1178,6 +1178,26 @@ impl Position {
             return self.do_pass_move_impl::<ALLOW_MISSING_KINGS>();
         }
 
+        #[cfg(feature = "search-stats")]
+        {
+            use crate::search::diagnostics as d;
+            d::add(
+                if m.is_drop() {
+                    d::DO_DROP
+                } else if self.piece_on(m.to()).is_some() {
+                    d::DO_CAPTURE
+                } else {
+                    d::DO_QUIET
+                },
+                1,
+            );
+            if m.is_promote() {
+                d::add(d::DO_PROMOTION, 1);
+            }
+            if !m.is_drop() && self.piece_on(m.from()).piece_type() == PieceType::King {
+                d::add(d::DO_KING, 1);
+            }
+        }
         let us = self.side_to_move;
         let them = !us;
         let prev_continuous = self.cur_state().continuous_check;
@@ -1655,6 +1675,9 @@ impl Position {
     }
 
     pub(crate) fn do_null_move_with_prefetch<P: TtPrefetch>(&mut self, prefetcher: &P) {
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(crate::search::diagnostics::DO_NULL, 1);
+
         // update_repetition_info を呼ばないため、repetition 系フィールドの初期化は
         // partial_clone の zero クリアに依存している。in-place 化する場合は要注意。
         let mut new_state = self.cur_state().partial_clone();
@@ -1697,6 +1720,9 @@ impl Position {
     }
 
     fn do_pass_move_impl<const ALLOW_MISSING_KINGS: bool>(&mut self) -> DirtyPiece {
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(crate::search::diagnostics::DO_PASS, 1);
+
         // release ビルドでも検出
         assert!(self.can_pass(), "Cannot pass: rule disabled, in check, or no pass rights");
 
@@ -1810,10 +1836,22 @@ impl Position {
         let mut repetition_times = 0;
         let mut repetition_type = RepetitionState::None;
 
+        #[cfg(feature = "search-stats")]
+        let mut diag_comparisons = 0usize;
         if max_back >= 4 {
             // 千日手は最短4手で成立するため4手前から比較開始
             let mut dist = 4;
             while dist <= max_back {
+                #[cfg(feature = "search-stats")]
+                {
+                    diag_comparisons += 1;
+                }
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(
+                    crate::search::diagnostics::REPETITION_COMPARISONS,
+                    1,
+                );
+
                 let st_idx = current_idx - dist as usize;
                 debug_assert!(st_idx < self.state_stack.len());
                 // SAFETY: dist <= max_back <= current_idx、かつ cur_state の不変条件より
@@ -1862,6 +1900,11 @@ impl Position {
         }
 
         let st = self.cur_state_mut();
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            crate::search::diagnostics::REPETITION_HIST_0 + diag_comparisons,
+            1,
+        );
         st.repetition = repetition;
         st.repetition_times = repetition_times;
         st.repetition_type = repetition_type;

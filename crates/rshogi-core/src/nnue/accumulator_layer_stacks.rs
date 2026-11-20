@@ -200,6 +200,15 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     ) {
         let entry = &mut self.entries[key.0.raw() as usize][key.1 as usize];
         let was_valid = entry.valid;
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            if was_valid {
+                crate::search::diagnostics::NNUE_FT_FINNY
+            } else {
+                crate::search::diagnostics::NNUE_FT_FULL
+            },
+            1,
+        );
         // panic 時は、途中まで更新された cache を再利用しない。
         entry.valid = false;
         let mut removed = IndexList::new();
@@ -219,6 +228,19 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
             added.extend(
                 piece_list.iter().filter(|bp| **bp != BonaPiece::ZERO).map(|&bp| idx_fn(bp)),
             );
+        }
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            if was_valid {
+                crate::search::diagnostics::NNUE_FINNY_ROWS
+            } else {
+                crate::search::diagnostics::NNUE_FT_FULL_ROWS
+            },
+            (removed.len() + added.len()) as u64,
+        );
+        #[cfg(feature = "search-stats")]
+        if was_valid {
+            crate::search::diagnostics::finny_pair(key.1.index(), removed.len() + added.len());
         }
         apply_weight_changes_to_two::<L1>(
             &mut entry.accumulation,
@@ -254,6 +276,15 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     {
         let entry = &mut self.entries[key.0.raw() as usize][key.1 as usize];
         let was_valid = entry.valid;
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            if was_valid {
+                crate::search::diagnostics::NNUE_FT_FINNY
+            } else {
+                crate::search::diagnostics::NNUE_FT_FULL
+            },
+            1,
+        );
         // panic 時は、main / PSQT の片方だけ更新された cache を再利用しない。
         entry.valid = false;
         let mut removed = IndexList::new();
@@ -275,6 +306,19 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
                 piece_list.iter().filter(|bp| **bp != BonaPiece::ZERO).map(|&bp| idx_fn(bp)),
             );
             *psqt_acc = *psqt_biases;
+        }
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            if was_valid {
+                crate::search::diagnostics::NNUE_FINNY_ROWS
+            } else {
+                crate::search::diagnostics::NNUE_FT_FULL_ROWS
+            },
+            (removed.len() + added.len()) as u64,
+        );
+        #[cfg(feature = "search-stats")]
+        if was_valid {
+            crate::search::diagnostics::finny_pair(key.1.index(), removed.len() + added.len());
         }
         apply_weight_changes_to_two::<L1>(
             &mut entry.accumulation,

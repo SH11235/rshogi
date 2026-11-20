@@ -197,6 +197,8 @@ pub(super) fn qsearch<const NT: u8>(
         return tt_value;
     }
 
+    #[cfg(feature = "search-stats")]
+    let mut diag_mate_called = false;
     let mut best_move = Move::NONE;
 
     let corr_value = correction_value(st, ctx, pos, ply);
@@ -206,13 +208,24 @@ pub(super) fn qsearch<const NT: u8>(
     let mut static_eval = if in_check {
         Value::NONE
     } else if tt_hit && tt_data.eval != Value::NONE {
+        #[cfg(feature = "search-stats")]
+        super::diagnostics::add(super::diagnostics::EVAL_TT, 1);
         unadjusted_static_eval = tt_data.eval;
         unadjusted_static_eval
     } else {
         // 置換表に無いときだけ簡易1手詰め判定を行う
         if !tt_hit {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::MATE_QS_CALLS, 1);
+            #[cfg(feature = "search-stats")]
+            {
+                diag_mate_called = true;
+            }
             let mate_move = pos.mate_1ply();
             if mate_move.is_some() {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::MATE_QS_FOUND, 1);
+
                 let mate_value = Value::mate_in(ply + 1);
                 let stored_value = value_to_tt(mate_value, ply);
                 #[cfg(feature = "tt-trace")]
@@ -341,6 +354,10 @@ pub(super) fn qsearch<const NT: u8>(
                 inc_stat_by_depth!(st, tt_write_by_depth, 0);
             }
         }
+        #[cfg(feature = "search-stats")]
+        if diag_mate_called {
+            crate::search::diagnostics::add(crate::search::diagnostics::MATE_QS_STAND_PAT, 1);
+        }
         return v;
     }
 
@@ -372,6 +389,20 @@ pub(super) fn qsearch<const NT: u8>(
         MovePicker::new(pos, tt_move, DEPTH_QS, ply, cont_tables, ctx.generate_all_legal_moves)
     };
 
+    #[cfg(feature = "search-stats")]
+    crate::search::diagnostics::add(crate::search::diagnostics::QS_LOOP_NODES, 1);
+    #[cfg(feature = "search-stats")]
+    if !in_check {
+        let max_value = (pos.pieces_c(!pos.side_to_move())
+            & !pos.pieces_pt(crate::types::PieceType::King))
+        .iter()
+        .map(|sq| piece_value(pos.piece_on(sq)))
+        .max()
+        .unwrap_or(0);
+        if futility_base + Value::new(max_value) <= alpha {
+            crate::search::diagnostics::add(crate::search::diagnostics::QS_ALL_CAPTURE_FUTILITY, 1);
+        }
+    }
     let mut move_count = 0;
 
     // 逐次 next_move 方式（バッファへの事前 collect はしない）。
@@ -390,6 +421,19 @@ pub(super) fn qsearch<const NT: u8>(
             break;
         }
 
+        #[cfg(feature = "search-stats")]
+        let diag_after_two = move_count >= 2;
+        #[cfg(feature = "search-stats")]
+        {
+            if diag_after_two {
+                crate::search::diagnostics::add(crate::search::diagnostics::QS_AFTER_TWO_PICKED, 1);
+            }
+            if !mv.is_pass() && pos.is_capture(mv) {
+                crate::search::diagnostics::add(crate::search::diagnostics::QS_CAPTURE_PICKED, 1);
+            }
+        }
+        #[cfg(feature = "search-stats")]
+        let mut diag_first_see = false;
         // MovePicker が返した手の数を記録
         inc_stat!(st, qs_moves_picked);
 
@@ -427,6 +471,11 @@ pub(super) fn qsearch<const NT: u8>(
                     continue;
                 }
 
+                #[cfg(feature = "search-stats")]
+                {
+                    crate::search::diagnostics::see_caller(3, false);
+                    diag_first_see = true;
+                }
                 if !pos.see_ge(mv, alpha - futility_base) {
                     inc_stat!(st, qs_futility_pruned);
                     // SEE で alpha - futility_base を下回った場合、
@@ -442,6 +491,8 @@ pub(super) fn qsearch<const NT: u8>(
                 continue;
             }
 
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::see_caller(4, diag_first_see);
             if !pos.see_ge(mv, Value::new(-78)) {
                 inc_stat!(st, qs_see_margin_pruned);
                 continue;
@@ -452,6 +503,10 @@ pub(super) fn qsearch<const NT: u8>(
         unsafe { st.stack.get_unchecked_mut(ply as usize) }.current_move = mv;
 
         // 実際に探索された手をカウント
+        #[cfg(feature = "search-stats")]
+        if diag_after_two {
+            crate::search::diagnostics::add(crate::search::diagnostics::QS_AFTER_TWO_SEARCHED, 1);
+        }
         inc_stat!(st, qs_moves_searched);
 
         do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);

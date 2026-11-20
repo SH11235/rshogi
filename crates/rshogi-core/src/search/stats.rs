@@ -197,6 +197,7 @@ impl SearchStats {
     /// 統計をリセット
     pub fn reset(&mut self) {
         *self = Self::default();
+        crate::search::diagnostics::reset();
     }
 
     /// 統計をフォーマットして文字列として返す
@@ -436,6 +437,7 @@ impl SearchStats {
             ));
         }
 
+        report.push_str(&crate::search::diagnostics::report());
         report
     }
 }

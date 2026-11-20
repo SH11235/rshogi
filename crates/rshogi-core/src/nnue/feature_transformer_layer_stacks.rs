@@ -615,6 +615,18 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         Ok(())
     }
 
+    /// 駒 FT の量子化重みを feature-major 順で返す。各行は L1 要素。
+    #[cfg(feature = "nnue-threat")]
+    pub fn piece_ft_weights(&self) -> &[i16] {
+        &self.weights
+    }
+
+    /// Threat FT があれば、実際に格納する行幅と feature-major 順の量子化重みを返す。
+    #[cfg(feature = "nnue-threat")]
+    pub fn threat_ft_weights(&self) -> Option<(usize, &[i8])> {
+        self.has_threat.then_some((threat_width(L1), &self.threat_weights))
+    }
+
     /// Threat 重みの行を取得（i8[T]）
     #[cfg(feature = "nnue-threat")]
     #[inline]
@@ -740,9 +752,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         perspective: Color,
         king_sq: crate::types::Square,
         accumulation: &mut ThreatAccumulation<L1>,
+        #[cfg(feature = "search-stats")] ancestor: bool,
     ) {
         let mut batch = ThreatRefreshBatch::new();
         threat_features::for_each_active_threat_index(pos, perspective, king_sq, |index| {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::threat_refresh_row(index, perspective.index(), ancestor);
             batch.push(self, accumulation, index);
         });
         batch.flush(self, accumulation);
@@ -876,11 +891,19 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         pos: &Position,
         acc: &mut AccumulatorLayerStacks<L1>,
         refresh: [bool; 2],
+        #[cfg(feature = "search-stats")] ancestor: bool,
     ) {
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::add(
+            crate::search::diagnostics::NNUE_THREAT_FULL,
+            refresh.into_iter().map(u64::from).sum(),
+        );
         if refresh == [true; 2] {
             let mut batches = [ThreatRefreshBatch::new(), ThreatRefreshBatch::new()];
             threat_features::for_each_active_threat_index_both(pos, |perspective, index| {
                 let p = perspective.index();
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::threat_refresh_row(index, p, ancestor);
                 batches[p].push(self, acc.get_threat_mut(p), index);
             });
             for (p, batch) in batches.iter_mut().enumerate() {
@@ -895,6 +918,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                         perspective,
                         pos.king_square(perspective),
                         acc.get_threat_mut(p),
+                        #[cfg(feature = "search-stats")]
+                        ancestor,
                     );
                 }
             }
@@ -908,6 +933,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         accumulation: &mut ThreatAccumulation<L1>,
         indices: &IndexList<MAX_CHANGED_THREAT_FEATURES>,
     ) {
+        #[cfg(feature = "search-stats")]
+        crate::search::diagnostics::threat_update_rows(indices.iter());
+
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
@@ -1107,6 +1135,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// 差分計算を使わずにAccumulatorを計算
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorLayerStacks<L1>) {
         for perspective in [Color::Black, Color::White] {
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FULL, 1);
             let p = perspective as usize;
             let accumulation = acc.get_mut(p);
 
@@ -1116,6 +1146,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             // アクティブな特徴量の重みを加算
             let mut active_indices = IndexList::new();
             append_active_indices::<FT>(pos, perspective, &mut active_indices);
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(
+                crate::search::diagnostics::NNUE_FT_FULL_ROWS,
+                active_indices.len() as u64,
+            );
             for index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
@@ -1129,7 +1164,13 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         #[cfg(feature = "nnue-threat")]
         if self.has_threat {
-            self.refresh_threat_perspectives(pos, acc, [true; 2]);
+            self.refresh_threat_perspectives(
+                pos,
+                acc,
+                [true; 2],
+                #[cfg(feature = "search-stats")]
+                false,
+            );
         }
 
         acc.computed_accumulation = true;
@@ -1157,12 +1198,20 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             let reset = <FT::Set as FeatureSet>::needs_refresh(dirty_piece, perspective);
 
             if reset {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FULL, 1);
+
                 // 玉が移動した場合は全計算
                 let accumulation = acc.get_mut(p);
                 accumulation.copy_from_slice(&self.biases.0);
 
                 let mut active_indices = IndexList::new();
                 append_active_indices::<FT>(pos, perspective, &mut active_indices);
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(
+                    crate::search::diagnostics::NNUE_FT_FULL_ROWS,
+                    active_indices.len() as u64,
+                );
                 for index in active_indices.iter() {
                     self.add_weights(accumulation, index);
                 }
@@ -1172,6 +1221,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
                 }
             } else {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_INCREMENTAL, 1);
                 // 差分更新
                 let mut removed = IndexList::new();
                 let mut added = IndexList::new();
@@ -1198,10 +1249,20 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 if !fast_applied {
                     curr.copy_from_slice(prev);
                     for index in removed.iter() {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                            1,
+                        );
                         self.sub_weights(curr, index);
                     }
 
                     for index in added.iter() {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                            1,
+                        );
                         self.add_weights(curr, index);
                     }
                 }
@@ -1250,6 +1311,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                         &mut t_added,
                     );
                     if ok {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_THREAT_INCREMENTAL,
+                            1,
+                        );
                         self.apply_threat_rows::<false>(curr_threat, &t_removed);
                         self.apply_threat_rows::<true>(curr_threat, &t_added);
                     } else {
@@ -1262,7 +1328,13 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         #[cfg(feature = "nnue-threat")]
         if self.has_threat {
-            self.refresh_threat_perspectives(pos, acc, threat_refresh);
+            self.refresh_threat_perspectives(
+                pos,
+                acc,
+                threat_refresh,
+                #[cfg(feature = "search-stats")]
+                false,
+            );
         }
 
         acc.computed_accumulation = true;
@@ -1318,6 +1390,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
                 }
             } else {
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_INCREMENTAL, 1);
                 count_update!();
                 // 差分更新（キャッシュ不使用）
                 let mut removed = IndexList::new();
@@ -1345,10 +1419,20 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 if !fast_applied {
                     curr.copy_from_slice(prev);
                     for index in removed.iter() {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                            1,
+                        );
                         self.sub_weights(curr, index);
                     }
 
                     for index in added.iter() {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                            1,
+                        );
                         self.add_weights(curr, index);
                     }
                 }
@@ -1394,6 +1478,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                         &mut t_added,
                     );
                     if ok {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_THREAT_INCREMENTAL,
+                            1,
+                        );
                         self.apply_threat_rows::<false>(curr_threat, &t_removed);
                         self.apply_threat_rows::<true>(curr_threat, &t_added);
                     } else {
@@ -1405,7 +1494,13 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         #[cfg(feature = "nnue-threat")]
         if self.has_threat {
-            self.refresh_threat_perspectives(pos, acc, threat_refresh);
+            self.refresh_threat_perspectives(
+                pos,
+                acc,
+                threat_refresh,
+                #[cfg(feature = "search-stats")]
+                false,
+            );
         }
 
         acc.computed_accumulation = true;
@@ -1448,7 +1543,13 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         #[cfg(feature = "nnue-threat")]
         if self.has_threat {
-            self.refresh_threat_perspectives(pos, acc, [true; 2]);
+            self.refresh_threat_perspectives(
+                pos,
+                acc,
+                [true; 2],
+                #[cfg(feature = "search-stats")]
+                false,
+            );
         }
 
         acc.computed_accumulation = true;
@@ -1483,6 +1584,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             accumulation.copy_from_slice(&self.biases.0);
             let mut active_indices = IndexList::new();
             append_active_indices::<FT>(pos, perspective, &mut active_indices);
+            #[cfg(feature = "search-stats")]
+            crate::search::diagnostics::add(
+                crate::search::diagnostics::NNUE_FT_FULL_ROWS,
+                active_indices.len() as u64,
+            );
             for index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
@@ -1547,6 +1653,135 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         );
     }
 
+    #[cfg(feature = "search-stats")]
+    pub(super) fn diagnose_ft_ancestors(
+        &self,
+        pos: &Position,
+        stack: &AccumulatorStackLayerStacks<L1>,
+    ) {
+        use super::bona_piece_halfka_hm_merged::{E_KING, F_KING};
+        use crate::search::diagnostics;
+        let current = [
+            *pos.piece_list().piece_list_fb(),
+            *pos.piece_list().piece_list_fw(),
+        ];
+        let mut before = current;
+        let mut index = stack.current_index();
+        let mut dirty_count = 0;
+        let mut candidate = [None; 2];
+        for distance in 1..=8 {
+            let entry = stack.entry_at(index);
+            let Some(previous) = entry.previous.filter(|&i| i < index) else {
+                break;
+            };
+            for n in 0..entry.dirty_piece.dirty_num as usize {
+                let pn = entry.dirty_piece.piece_no[n].0 as usize;
+                before[0][pn] = entry.dirty_piece.changed_piece[n].old_piece.fb;
+                before[1][pn] = entry.dirty_piece.changed_piece[n].old_piece.fw;
+                dirty_count += 1;
+            }
+            index = previous;
+            if !cfg!(feature = "nnue-effect-bucket")
+                && stack.entry_at(index).accumulator.computed_accumulation
+                && candidate[0].is_none()
+            {
+                for perspective in [Color::Black, Color::White] {
+                    let p = perspective.index();
+                    let king_base = if p == 0 { F_KING } else { E_KING };
+                    let king_raw = before[0][PieceNumber::KING as usize..].iter().find_map(|bp| {
+                        (bp.value() as usize).checked_sub(king_base).filter(|&sq| sq < 81)
+                    });
+                    let Some(king_raw) = king_raw else {
+                        continue;
+                    };
+                    let old_king = crate::types::Square::from_u8(king_raw as u8).unwrap();
+                    let old_index = FT::feature_indexer(perspective, old_king);
+                    let new_index = FT::feature_indexer(perspective, pos.king_square(perspective));
+                    let limit = if FT::INCLUDE_KING_IN_PIECE_LIST {
+                        PieceNumber::NB
+                    } else {
+                        PieceNumber::KING as usize
+                    };
+                    let mut rows = 0;
+                    for n in 0..limit {
+                        let old = before[p][n];
+                        let new = current[p][n];
+                        let old = (old != BonaPiece::ZERO).then(|| old_index(old));
+                        let new = (new != BonaPiece::ZERO).then(|| new_index(new));
+                        if old != new {
+                            rows += usize::from(old.is_some()) + usize::from(new.is_some());
+                        }
+                    }
+                    candidate[p] = Some((rows, distance, dirty_count));
+                }
+            }
+            if candidate.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        // 鎖の終端が horizon より近い場合も、既に見つけた祖先は利用できる。
+        for (p, &value) in candidate.iter().enumerate() {
+            for (h, bound) in [2, 4, 8].into_iter().enumerate() {
+                if let Some(value) = value.filter(|v| v.1 <= bound) {
+                    diagnostics::ft_candidate(p, h, Some(value));
+                }
+            }
+        }
+    }
+
+    #[cfg(all(feature = "nnue-threat", feature = "search-stats"))]
+    fn diagnose_threat_ancestors(
+        &self,
+        pos: &Position,
+        stack: &AccumulatorStackLayerStacks<L1>,
+        full: [bool; 2],
+    ) {
+        use crate::search::diagnostics as d;
+        let mut board = threat_features::ThreatBoard::new(pos);
+        let mut index = stack.current_index();
+        let mut rescued = [[false; 2]; 2];
+        for distance in 1..=12 {
+            let entry = stack.entry_at(index);
+            let Some(previous) = entry.previous.filter(|&i| i < index) else {
+                break;
+            };
+            board.undo(&entry.dirty_piece);
+            index = previous;
+            if !stack.entry_at(index).accumulator.computed_accumulation {
+                continue;
+            }
+            let mut removed =
+                std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
+            let mut added =
+                std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
+            if !threat_features::append_threat_endpoint_diff(
+                false,
+                &board,
+                pos,
+                &mut removed,
+                &mut added,
+            ) {
+                continue;
+            }
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective.index();
+                if !full[p] || !board.same_mirror(pos, perspective) {
+                    continue;
+                }
+                for (h, bound) in [8, 12].into_iter().enumerate() {
+                    if distance <= bound && !rescued[h][p] {
+                        rescued[h][p] = true;
+                        d::add(d::THREAT_RESCUED + h * 2 + p, 1);
+                        d::add(
+                            d::THREAT_RESCUED_ROWS + h * 2 + p,
+                            (removed[p].len() + added[p].len()) as u64,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// 駒側の更新方法とは独立に、Threat の計算済み祖先を再利用する。
     #[cfg(all(feature = "nnue-threat", any(test, feature = "layerstack-arch")))]
     pub(super) fn update_with_threat_ancestor(
@@ -1565,6 +1800,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             if let Some(parent) = parent.filter(|_| !reset && !cfg!(feature = "nnue-effect-bucket"))
             {
                 count_update!();
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_INCREMENTAL, 1);
                 let (prev, current) = stack.get_prev_and_current_accumulators(parent);
                 if !self.try_apply_dirty_piece_fast_from_source(
                     prev.get(p),
@@ -1581,6 +1818,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                         pos.king_square(perspective),
                         &mut removed,
                         &mut added,
+                    );
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(
+                        crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                        (removed.len() + added.len()) as u64,
                     );
                     current.get_mut(p).copy_from_slice(prev.get(p));
                     for index in removed.iter() {
@@ -1623,8 +1865,15 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     );
                 } else {
                     acc.get_mut(p).copy_from_slice(&self.biases.0);
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_FULL, 1);
                     let mut active = IndexList::new();
                     append_active_indices::<FT>(pos, perspective, &mut active);
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(
+                        crate::search::diagnostics::NNUE_FT_FULL_ROWS,
+                        active.len() as u64,
+                    );
                     for index in active.iter() {
                         self.add_weights(acc.get_mut(p), index);
                     }
@@ -1636,6 +1885,10 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             }
         }
 
+        #[cfg(feature = "search-stats")]
+        let mut touched = crate::bitboard::Bitboard::EMPTY;
+        #[cfg(feature = "search-stats")]
+        let mut distance = 0;
         let mut board = threat_features::ThreatBoard::new(pos);
         let mut index = stack.current_index();
         let mut source = None;
@@ -1645,6 +1898,17 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             let Some(previous) = entry.previous.filter(|&previous| previous < index) else {
                 break;
             };
+            #[cfg(feature = "search-stats")]
+            {
+                distance += 1;
+                for cp in &entry.dirty_piece.changed_piece[..entry.dirty_piece.dirty_num as usize] {
+                    for bp in [cp.old_piece.fb, cp.new_piece.fb] {
+                        if let Some(sq) = threat_features::decode_board_square_fb(bp) {
+                            touched |= crate::bitboard::Bitboard::from_square(sq);
+                        }
+                    }
+                }
+            }
             board.undo(&entry.dirty_piece);
             index = previous;
             if stack.entry_at(index).accumulator.computed_accumulation {
@@ -1654,12 +1918,45 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
         let mut removed = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
         let mut added = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
+        #[cfg(feature = "search-stats")]
+        if source.is_some() {
+            use crate::search::diagnostics as d;
+            d::set_threat_distance(distance);
+            d::add(d::THREAT_DISTANCE + distance - 1, 1);
+            d::add(d::NNUE_ANCESTOR_HIST_0 + distance, 1);
+            d::add(d::THREAT_TOUCHED + distance - 1, touched.count() as u64);
+        }
         let diff_ok = source.is_some()
-            && threat_features::append_threat_endpoint_diff(&board, pos, &mut removed, &mut added);
+            && threat_features::append_threat_endpoint_diff(
+                #[cfg(feature = "search-stats")]
+                true,
+                &board,
+                pos,
+                &mut removed,
+                &mut added,
+            );
+        #[cfg(feature = "search-stats")]
+        if diff_ok {
+            use crate::search::diagnostics as d;
+            d::add(d::THREAT_ENDPOINT_SUCCESS + distance - 1, 1);
+            for p in 0..2 {
+                d::add(
+                    d::THREAT_ENDPOINT_ROWS + (distance - 1) * 2 + p,
+                    (removed[p].len() + added[p].len()) as u64,
+                );
+            }
+        }
         let refresh = [Color::Black, Color::White].map(|p| !diff_ok || !board.same_mirror(pos, p));
         for perspective in [Color::Black, Color::White] {
             let p = perspective.index();
             if !refresh[p] {
+                #[cfg(feature = "search-stats")]
+                {
+                    use crate::search::diagnostics as d;
+                    d::add(d::NNUE_THREAT_INCREMENTAL, 1);
+                    d::add(d::THREAT_DIFF_P + p, 1);
+                    d::add(d::THREAT_DIFF_ROWS_P + p, (removed[p].len() + added[p].len()) as u64);
+                }
                 let (prev, current) = stack.get_prev_and_current_accumulators(source.unwrap());
                 let threat = current.get_threat_mut(p);
                 threat.copy_from_slice(prev.get_threat(p));
@@ -1667,7 +1964,35 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 self.apply_threat_rows::<true>(threat, &added[p]);
             }
         }
-        self.refresh_threat_perspectives(pos, &mut stack.current_mut().accumulator, refresh);
+        self.refresh_threat_perspectives(
+            pos,
+            &mut stack.current_mut().accumulator,
+            refresh,
+            #[cfg(feature = "search-stats")]
+            true,
+        );
+        #[cfg(feature = "search-stats")]
+        {
+            use crate::search::diagnostics as d;
+            for perspective in [Color::Black, Color::White] {
+                let p = perspective.index();
+                if refresh[p] {
+                    let reason = if source.is_none() {
+                        0
+                    } else if !board.same_mirror(pos, perspective) {
+                        1
+                    } else {
+                        2
+                    };
+                    d::add(d::THREAT_FULL_REASON + p * 4 + reason, 1);
+                    d::add(d::THREAT_FULL_P + p, 1);
+                }
+            }
+            d::add(d::THREAT_FULL_SIDES + refresh.iter().filter(|&&v| v).count(), 1);
+            if refresh.iter().any(|&v| v) {
+                self.diagnose_threat_ancestors(pos, stack, refresh);
+            }
+        }
         let acc = &mut stack.current_mut().accumulator;
         acc.computed_accumulation = true;
         acc.computed_score = false;
@@ -1716,6 +2041,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     "King moved between source and current"
                 );
 
+                #[cfg(feature = "search-stats")]
+                crate::search::diagnostics::add(crate::search::diagnostics::NNUE_FT_INCREMENTAL, 1);
                 let king_sq = pos.king_square(perspective);
                 let mut removed = IndexList::new();
                 let mut added = IndexList::new();
@@ -1736,9 +2063,19 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     king_sq,
                 ) {
                     for index in removed.iter() {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                            1,
+                        );
                         self.sub_weights(accumulation, index);
                     }
                     for index in added.iter() {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                            1,
+                        );
                         self.add_weights(accumulation, index);
                     }
                 }
@@ -1783,6 +2120,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     );
                     let threat_acc = stack.current_mut().accumulator.get_threat_mut(p);
                     if ok {
+                        #[cfg(feature = "search-stats")]
+                        crate::search::diagnostics::add(
+                            crate::search::diagnostics::NNUE_THREAT_INCREMENTAL,
+                            1,
+                        );
                         self.apply_threat_rows::<false>(threat_acc, &t_removed);
                         self.apply_threat_rows::<true>(threat_acc, &t_added);
                     } else {
@@ -1794,6 +2136,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     pos,
                     &mut stack.current_mut().accumulator,
                     threat_refresh,
+                    #[cfg(feature = "search-stats")]
+                    false,
                 );
             } else {
                 count_threat_multiply!();
@@ -1802,6 +2146,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     pos,
                     &mut stack.current_mut().accumulator,
                     [true; 2],
+                    #[cfg(feature = "search-stats")]
+                    false,
                 );
             }
         }
@@ -2028,6 +2374,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             1 => {
                 let (old_bp, new_bp) = old_new(0);
                 if old_bp != BonaPiece::ZERO && new_bp != BonaPiece::ZERO {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(
+                        crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                        2,
+                    );
                     let sub_index = indexer(old_bp);
                     let add_index = indexer(new_bp);
                     if FROM_SOURCE {
@@ -2053,6 +2404,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     && old_bp1 != BonaPiece::ZERO
                     && new_bp1 != BonaPiece::ZERO
                 {
+                    #[cfg(feature = "search-stats")]
+                    crate::search::diagnostics::add(
+                        crate::search::diagnostics::NNUE_FT_DIFF_ROWS,
+                        4,
+                    );
                     let sub_index0 = indexer(old_bp0);
                     let add_index0 = indexer(new_bp0);
                     let sub_index1 = indexer(old_bp1);
@@ -2698,6 +3054,74 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "nnue-threat", feature = "search-stats"))]
+    #[test]
+    fn diagnostic_threat_rescue_horizons_and_mirror_fallback() {
+        use crate::search::diagnostics as d;
+        fn count(key: &str) -> u64 {
+            d::report()
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{key}=")))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        const N: usize = 64;
+        let ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
+        for distance in [5, 9, 13] {
+            let mut pos = Position::new();
+            pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b - 1").unwrap();
+            let mut stack = AccumulatorStackLayerStacks::<N>::new();
+            stack.current_mut().accumulator.computed_accumulation = true;
+            for _ in 0..distance {
+                pos.do_null_move();
+                stack.push();
+            }
+            d::reset();
+            ft.update_with_threat_ancestor(&pos, &mut stack, None);
+            assert_eq!(count("threat_full_sides[2]"), 1);
+            assert_eq!(count("threat_full_reason[0]"), 1);
+            assert_eq!(count("threat_full_reason[4]"), 1);
+            for p in 0..2 {
+                assert_eq!(count(&format!("threat_rescued[{p}]")), u64::from(distance <= 8));
+                assert_eq!(count(&format!("threat_rescued[{}]", 2 + p)), u64::from(distance <= 12));
+            }
+            assert!(stack.current().accumulator.computed_accumulation);
+            assert_eq!(
+                stack.current().accumulator.threat_accumulation,
+                [super::super::threat_width::zero::<N>(); 2]
+            );
+            assert!(!stack.entry_at(1).accumulator.computed_accumulation);
+        }
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b - 1").unwrap();
+        let mut stack = AccumulatorStackLayerStacks::<N>::new();
+        stack.current_mut().accumulator.computed_accumulation = true;
+        let mv = crate::types::Move::from_usi("5i6i").unwrap();
+        let dirty = pos.do_move(mv, pos.gives_check(mv));
+        stack.push();
+        stack.current_mut().dirty_piece = dirty;
+        stack.current_mut().accumulator.computed_accumulation = true;
+        pos.do_null_move();
+        stack.push();
+        stack.current_mut().accumulator.computed_accumulation = true;
+        let mv = crate::types::Move::from_usi("6i5i").unwrap();
+        let dirty = pos.do_move(mv, pos.gives_check(mv));
+        stack.push();
+        stack.current_mut().dirty_piece = dirty;
+        d::reset();
+        ft.update_with_threat_ancestor(&pos, &mut stack, None);
+        assert_eq!(count("threat_full_sides[1]"), 1);
+        assert_eq!(count("threat_full_reason[1]"), 1);
+        assert_eq!(count("threat_distance[0]"), 1);
+        assert_eq!(count("threat_rescued[0]"), 1);
+        assert_eq!(count("threat_rescued[1]"), 0);
+        assert_eq!(count("threat_endpoint_success[0]"), 1);
+        assert_eq!(count("threat_touched[0]"), 2);
+        assert_eq!(count("threat_changed[0]"), 2);
+        assert_eq!(count("threat_physical_edges[0]"), 0);
+    }
+
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn shared_threat_full_refresh_matches_per_perspective_raw_accumulator() {
@@ -2729,7 +3153,13 @@ mod tests {
                     let mut sentinel = super::super::threat_width::zero::<N>();
                     sentinel.fill(i16::MAX);
                     actual.threat_accumulation.fill(sentinel);
-                    ft.refresh_threat_perspectives(pos, &mut actual, refresh);
+                    ft.refresh_threat_perspectives(
+                        pos,
+                        &mut actual,
+                        refresh,
+                        #[cfg(feature = "search-stats")]
+                        false,
+                    );
                     for p in 0..2 {
                         assert_eq!(
                             actual.get_threat(p),

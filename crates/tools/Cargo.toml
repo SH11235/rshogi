@@ -114,6 +114,11 @@ path = "src/bin/nnue_saturation.rs"
 required-features = ["layerstack-arch"]
 
 [[bin]]
+name = "threat_weight_stats"
+path = "src/bin/threat_weight_stats.rs"
+required-features = ["layerstack-arch", "nnue-threat"]
+
+[[bin]]
 name = "bench_nnue_eval"
 path = "src/bin/bench_nnue_eval.rs"
 required-features = ["layerstack-arch"]
