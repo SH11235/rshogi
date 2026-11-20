@@ -75,9 +75,9 @@ class TrainerConfig:
     optimizer: str = "adamw"
     muon_learning_rate: float | None = None
     compile_ffn: bool = False
-    compile_attention: bool = False
     fuse_norm_cast: bool = False
     prefetch_input: bool = False
+    compile_attention: bool = False
 
     def __post_init__(self) -> None:
         limits = {

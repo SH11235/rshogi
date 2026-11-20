@@ -12,7 +12,6 @@ def tuned_training_forward(
     model: SquareTransformer, batch_size: int, *, fused_norm: bool, cast_norm: bool = False,
     compile_ffn: bool = False, compile_attention: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-
     def select_forward(operation, enabled):
         if not enabled:
             return None
