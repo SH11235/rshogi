@@ -131,6 +131,9 @@ python -m rshogi_dl.sharded verify --data "$SHOGI_DATA/teachers/dl/<compressed-d
 全 shard の変換が完了してから manifest を公開します。配列、行順、分割情報、論理内容 digest は同じです。
 学習では圧縮側のディレクトリを通常の入力として指定できます。途中再開では開始時と同じデータセットを指定してください。
 
+新規作成時は `convert` に `--compression-level 3` を指定すると、圧縮 shard を直接書き出せます。
+`convert_jsonl` と `convert_records` では `compression_level=3` を指定します。指定がなければ既定の NPY 形式です。
+
 変換プログラムからは `rshogi_dl.sharded.convert_records` に行の iterable を渡せます。
 行は JSONL と共通の形式で、同じ検証と重みの正規化を経て shard に保存されます。
 `source_name` と `source_size` には入力の名前とバイト数を指定します。入力の安定性は呼び出し元で保証してください。
