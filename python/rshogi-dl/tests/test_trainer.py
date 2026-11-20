@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from rshogi_dl.checkpoint import load_checkpoint
+from rshogi_dl.export import export_onnx
 from rshogi_dl.model import TEST_CONFIG, SquareTransformer
 from rshogi_dl.paths import ArtifactPathError
 from rshogi_dl.sharded import DatasetError, convert_jsonl, dataset_info, iter_batches
@@ -90,6 +91,23 @@ class TrainerTest(unittest.TestCase):
         canonical = load_checkpoint(self.root / "resumed" / "checkpoint.pt")
         self.assert_nested_equal(canonical.model.state_dict(), resumed["model_state"])
         self.assertEqual(canonical.training_status, "validation-only")
+
+    def test_packed_projection_resume_and_export(self) -> None:
+        packed = replace(TEST_CONFIG, packed_qkv=True)
+        first, resumed, full = (self.root / name for name in ("packed-first", "packed-resumed", "packed-full"))
+        run_training(self.train, self.validation, first, packed, replace(self.config, max_steps=3))
+        run_training(self.train, self.validation, full, packed, self.config)
+        checkpoint = first / "resume-final.pt"
+        run_training(self.train, self.validation, resumed, packed, self.config, resume=checkpoint)
+        with self.assertRaises(ResumeError):
+            run_training(self.train, self.validation, self.root / "different-layout", TEST_CONFIG, self.config,
+                         resume=checkpoint)
+        uninterrupted, restarted = (load_resume(path / "resume-final.pt") for path in (full, resumed))
+        for key in ("model_state", "optimizer_state", "progress"):
+            self.assert_nested_equal(uninterrupted[key], restarted[key])
+        model = load_checkpoint(resumed / "checkpoint.pt").model
+        self.assertEqual(model.config, packed)
+        self.assertTrue(export_onnx(model, self.root / "packed.onnx").is_file())
 
     def test_cursor_seeks_without_opening_earlier_shards(self) -> None:
         expected = list(iter_batches(self.train, 1))[3:]

@@ -530,7 +530,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--resume")
     parser.add_argument("--config", choices=sorted(NAMED_CONFIGS), default="initial")
-    parser.add_argument("--model-config", help="layers/width/heads/ffn_width の JSON object")
+    parser.add_argument("--model-config", help="layers/width/heads/ffn_width と任意の packed_qkv を含む JSON object")
     parser.add_argument("--max-steps", type=int, required=True)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)

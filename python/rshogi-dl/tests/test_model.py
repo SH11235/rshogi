@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import random
 import unittest
 
@@ -221,6 +222,36 @@ class AttentionBackendTest(unittest.TestCase):
             explicit.named_parameters(), sdpa.named_parameters(), strict=True
         ):
             torch.testing.assert_close(actual, expected, rtol=1e-8, atol=1e-10, msg=name)
+
+    def test_packed_projection_matches_split_projection(self) -> None:
+        split = build(TEST_CONFIG, seed=7).double()
+        packed = build(replace(TEST_CONFIG, packed_qkv=True), seed=7).double()
+        baseline = dict(split.named_parameters())
+        groups = []
+        for name, parameter in packed.named_parameters():
+            prefix, _, suffix = name.rpartition(".qkv.")
+            originals = ([baseline[f"{prefix}.{part}.{suffix}"] for part in ("query", "key", "value")]
+                         if prefix else [baseline[name]])
+            groups.append((originals, parameter))
+            torch.testing.assert_close(torch.cat(originals) if len(originals) == 3 else originals[0],
+                                       parameter, rtol=0, atol=0)
+        batch = collate([validate_record(record) for record in synthetic_records(seed=9, count=3)])
+        outputs = [model(batch.tokens) for model in (split, packed)]
+        for expected, actual in zip(*outputs, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=1e-8, atol=1e-10)
+        split_optimizer, packed_optimizer = (torch.optim.AdamW(model.parameters()) for model in (split, packed))
+        for output, optimizer in zip(outputs, (split_optimizer, packed_optimizer), strict=True):
+            policy_value_loss(*output, batch).total.backward()
+            optimizer.step()
+        for originals, parameter in groups:
+            parts = parameter.chunk(3) if len(originals) == 3 else (parameter,)
+            for part, original in zip(parts, originals, strict=True):
+                torch.testing.assert_close(part, original, rtol=1e-8, atol=1e-10)
+            for name in ("exp_avg", "exp_avg_sq"):
+                expected = [split_optimizer.state[original][name] for original in originals]
+                actual = packed_optimizer.state[parameter][name]
+                torch.testing.assert_close(actual, torch.cat(expected) if len(expected) == 3 else expected[0],
+                                           rtol=1e-8, atol=1e-10)
 
 
 class GradientTest(unittest.TestCase):

@@ -208,7 +208,8 @@ python -m rshogi_dl.trainer \
 | --- | --- |
 | `--max-steps` | 必須。有限のbatch更新試行数。AMPでskipした試行も数える |
 | `--batch-size` | 1..4096、既定128。epoch末尾の小さいbatchも使用 |
-| `--config` / `--model-config` | `initial` / `test`、または`layers/width/heads/ffn_width`のJSON object |
+| `--config` | モデルのプリセット。`initial` または `test` |
+| `--model-config` | `layers`、`width`、`heads`、`ffn_width` を含む JSON object。`"packed_qkv": true` で Q・K・V の射影を1回の線形演算にまとめる |
 | `--attention-backend` | `explicit` / `sdpa`。既定explicit |
 | `--execution` | `eager` / `compile`。既定eager。compile初回費用も学習時間に含む |
 | `--compile-mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs`。既定default。非defaultはcompile時だけ指定可 |
