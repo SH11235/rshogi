@@ -16,9 +16,9 @@ import torch
 from rshogi_dl.checkpoint import load_checkpoint
 from rshogi_dl._optimizers import BatchedMuon, MuonAdamW
 from rshogi_dl._residual_norm import compiled_residual_forward
-from rshogi_dl._tuned_ffn import tuned_ffn_forward
+from rshogi_dl._tuned_blocks import tuned_training_forward
 from rshogi_dl.export import export_onnx
-from rshogi_dl.model import TEST_CONFIG, FeedForward, SquareTransformer
+from rshogi_dl.model import TEST_CONFIG, FeedForward, SelfAttention, SquareTransformer
 from rshogi_dl.paths import ArtifactPathError
 from rshogi_dl.sharded import DatasetError, convert_jsonl, dataset_info, iter_batches
 from rshogi_dl.trainer import TrainerConfig, TrainingError, evaluate, run_training
@@ -437,31 +437,40 @@ class TrainerTest(unittest.TestCase):
         for native, actual in zip(native_grads, fused_grads, strict=True):
             torch.testing.assert_close(actual, native)
 
-    def test_tuned_ffn_routes_full_batches_only(self) -> None:
-        with self.assertRaisesRegex(ValueError, "whole-step CUDA Graph"):
-            replace(self.config, compile_ffn=True)
+    def test_tuned_blocks_route_full_batches_only(self) -> None:
+        for option in ("compile_ffn", "compile_attention"):
+            with self.subTest(option=option), self.assertRaisesRegex(ValueError, "whole-step CUDA Graph"):
+                replace(self.config, **{option: True})
         model = SquareTransformer(replace(TEST_CONFIG, packed_qkv=True))
         tokens = next(iter_batches(self.train, 2)).tokens
         for fused_norm in (False, True):
-            compiled_batches = []
+            for compile_ffn, compile_attention in ((True, False), (False, True), (True, True)):
+                compiled_batches = {FeedForward.forward: [], SelfAttention.forward: []}
 
-            def compile_mock(fn, **kwargs):
-                if fn is not FeedForward.forward:
-                    return fn
-                self.assertEqual(kwargs["mode"], "max-autotune-no-cudagraphs")
+                def compile_mock(fn, **kwargs):
+                    if fn not in compiled_batches:
+                        return fn
+                    self.assertEqual(kwargs["mode"], "max-autotune-no-cudagraphs")
 
-                def run(layer, inputs):
-                    compiled_batches.append(inputs.shape[0])
-                    return fn(layer, inputs)
+                    def run(layer, inputs):
+                        compiled_batches[fn].append(inputs.shape[0])
+                        return fn(layer, inputs)
 
-                return run
+                    return run
 
-            with self.subTest(fused_norm=fused_norm), mock.patch("torch.compile", side_effect=compile_mock):
-                forward = tuned_ffn_forward(model, 2, fused_norm=fused_norm)
-                for batch in (tokens, tokens[:1], tokens):
-                    for expected, actual in zip(model(batch), forward(batch), strict=True):
-                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-                self.assertEqual(compiled_batches, [2] * (2 * len(model.blocks)))
+                with (
+                    self.subTest(fused_norm=fused_norm, ffn=compile_ffn, attention=compile_attention),
+                    mock.patch("torch.compile", side_effect=compile_mock),
+                ):
+                    forward = tuned_training_forward(
+                        model, 2, fused_norm=fused_norm, compile_ffn=compile_ffn, compile_attention=compile_attention,
+                    )
+                    for batch in (tokens, tokens[:1], tokens):
+                        for expected, actual in zip(model(batch), forward(batch), strict=True):
+                            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    expected_batches = [2] * (2 * len(model.blocks))
+                    self.assertEqual(compiled_batches[FeedForward.forward], expected_batches if compile_ffn else [])
+                    self.assertEqual(compiled_batches[SelfAttention.forward], expected_batches if compile_attention else [])
 
     def test_fused_norm_cast_moves_the_bf16_conversion(self) -> None:
         with self.assertRaisesRegex(ValueError, "cuda-graph-fused-norm"):
@@ -560,6 +569,13 @@ class TrainerTest(unittest.TestCase):
         self.check_cuda_graph_resume("cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True)
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_tuned_attention_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True, compile_attention=True,
+            fuse_norm_cast=True, prefetch_input=True,
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_norm_cast_resume_after_eager_fallback(self) -> None:
         self.check_cuda_graph_resume(
             "cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True, fuse_norm_cast=True,
@@ -573,7 +589,7 @@ class TrainerTest(unittest.TestCase):
         )
 
     def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *,
-                                compile_ffn: bool = False, fuse_norm_cast: bool = False,
+                                compile_ffn: bool = False, compile_attention: bool = False, fuse_norm_cast: bool = False,
                                 prefetch_input: bool = False) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
@@ -587,6 +603,7 @@ class TrainerTest(unittest.TestCase):
             attention_backend="sdpa", optimizer=optimizer,
             muon_learning_rate=0.002 if optimizer != "adamw" else None,
             compile_ffn=compile_ffn,
+            compile_attention=compile_attention,
             fuse_norm_cast=fuse_norm_cast,
             prefetch_input=prefetch_input,
         )
