@@ -2942,7 +2942,10 @@ mod tests {
     type TestSpec = HalfKaHmMergedSpec;
     type TestFt = FeatureTransformerLayerStacks<TEST_L1, TestSpec>;
 
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(all(
+        feature = "nnue-threat",
+        any(feature = "layerstack-arch", not(feature = "nnue-effect-bucket"))
+    ))]
     #[test]
     fn threat_walk_matches_full_refresh_after_undo_and_redo() {
         use crate::movegen::{MoveList, generate_legal_all};
@@ -2978,6 +2981,8 @@ mod tests {
             let mut cache = AccumulatorCacheLayerStacks::new();
             ft.refresh_accumulator(&pos, &mut stack.current_mut().accumulator);
             for batch in 0..40 {
+                // 5 手の batch は祖先を遡る上限 (4 手) を超えて全部の作り直しになるので、手の種類は数えない
+                let via_diff = batch % 5 != 4;
                 let mut played = Vec::new();
                 for _ in 0..=batch % 5 {
                     let mut legal = MoveList::new();
@@ -2986,11 +2991,13 @@ mod tests {
                         break;
                     }
                     let mv = legal[rng.random_range(0..legal.len())];
-                    covered[0] |= !pos.piece_on(mv.to()).is_none();
-                    covered[1] |= mv.is_promote();
-                    covered[2] |= mv.is_drop();
-                    covered[3] |=
-                        !mv.is_drop() && pos.piece_on(mv.from()).piece_type() == PieceType::King;
+                    if via_diff {
+                        covered[0] |= !pos.piece_on(mv.to()).is_none();
+                        covered[1] |= mv.is_promote();
+                        covered[2] |= mv.is_drop();
+                        covered[3] |= !mv.is_drop()
+                            && pos.piece_on(mv.from()).piece_type() == PieceType::King;
+                    }
                     stack.push();
                     stack.current_mut().dirty_piece = pos.do_move(mv, pos.gives_check(mv));
                     played.push(mv);
