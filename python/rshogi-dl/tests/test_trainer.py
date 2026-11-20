@@ -16,8 +16,9 @@ import torch
 from rshogi_dl.checkpoint import load_checkpoint
 from rshogi_dl._optimizers import BatchedMuon, MuonAdamW
 from rshogi_dl._residual_norm import compiled_residual_forward
+from rshogi_dl._tuned_ffn import tuned_ffn_forward
 from rshogi_dl.export import export_onnx
-from rshogi_dl.model import TEST_CONFIG, SquareTransformer
+from rshogi_dl.model import TEST_CONFIG, FeedForward, SquareTransformer
 from rshogi_dl.paths import ArtifactPathError
 from rshogi_dl.sharded import DatasetError, convert_jsonl, dataset_info, iter_batches
 from rshogi_dl.trainer import TrainerConfig, TrainingError, evaluate, run_training
@@ -436,6 +437,32 @@ class TrainerTest(unittest.TestCase):
         for native, actual in zip(native_grads, fused_grads, strict=True):
             torch.testing.assert_close(actual, native)
 
+    def test_tuned_ffn_routes_full_batches_only(self) -> None:
+        with self.assertRaisesRegex(ValueError, "whole-step CUDA Graph"):
+            replace(self.config, compile_ffn=True)
+        model = SquareTransformer(replace(TEST_CONFIG, packed_qkv=True))
+        tokens = next(iter_batches(self.train, 2)).tokens
+        for fused_norm in (False, True):
+            compiled_batches = []
+
+            def compile_mock(fn, **kwargs):
+                if fn is not FeedForward.forward:
+                    return fn
+                self.assertEqual(kwargs["mode"], "max-autotune-no-cudagraphs")
+
+                def run(layer, inputs):
+                    compiled_batches.append(inputs.shape[0])
+                    return fn(layer, inputs)
+
+                return run
+
+            with self.subTest(fused_norm=fused_norm), mock.patch("torch.compile", side_effect=compile_mock):
+                forward = tuned_ffn_forward(model, 2, fused_norm=fused_norm)
+                for batch in (tokens, tokens[:1], tokens):
+                    for expected, actual in zip(model(batch), forward(batch), strict=True):
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                self.assertEqual(compiled_batches, [2] * (2 * len(model.blocks)))
+
     def test_muon_config_and_checkpoint_parameter_partition(self) -> None:
         for options in ({"optimizer": "muon", "muon_learning_rate": 0.002},
                         {"muon_learning_rate": 0.002},
@@ -509,7 +536,11 @@ class TrainerTest(unittest.TestCase):
                 error = torch.linalg.vector_norm(p - q) / torch.linalg.vector_norm(p - initial)
                 self.assertLessEqual(float(error.detach()), 0.025)
 
-    def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw") -> None:
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_tuned_ffn_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume("cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True)
+
+    def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *, compile_ffn: bool = False) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
             record["policy"] = None if index in (10, 11, 12) else [[record["legal_labels"][0], 1]]
@@ -521,6 +552,7 @@ class TrainerTest(unittest.TestCase):
             device="cuda", precision="bf16", fused_optimizer=True, execution=execution,
             attention_backend="sdpa", optimizer=optimizer,
             muon_learning_rate=0.002 if optimizer != "adamw" else None,
+            compile_ffn=compile_ffn,
         )
         full = self.run_training("graph", config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)

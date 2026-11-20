@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 from torch.nn import functional
 
-from .model import SquareTransformer
+from .model import FeedForward, SquareTransformer
 
 
 def _add_normalize(residual, update, weight, bias, epsilon):
@@ -15,6 +15,8 @@ def _add_normalize(residual, update, weight, bias, epsilon):
 
 def compiled_residual_forward(
     model: SquareTransformer,
+    *,
+    run_ffn: Callable[[FeedForward, torch.Tensor], torch.Tensor] | None = None,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     add_normalize = torch.compile(_add_normalize, fullgraph=True, dynamic=True)
 
@@ -26,7 +28,8 @@ def compiled_residual_forward(
                 residual, block.attention(block.attention_norm(residual)),
                 norm.weight, norm.bias, norm.eps,
             )
-            residual = residual + block.ffn(ffn_input)
+            update = block.ffn(ffn_input) if run_ffn is None else run_ffn(block.ffn, ffn_input)
+            residual = residual + update
         return model._readout(model.final_norm(residual))
 
     return forward

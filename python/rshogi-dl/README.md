@@ -213,6 +213,7 @@ python -m rshogi_dl.trainer \
 | `--attention-backend` | `explicit` / `sdpa`。既定explicit |
 | `--execution` | `eager` / `compile` / `cuda-graph` / `cuda-graph-fused-norm`。既定eager。compileとgraph記録の初回費用も学習時間に含む |
 | `--compile-mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs`。既定default。非defaultはcompile時だけ指定可 |
+| `--compile-ffn` | 学習時の満杯batchでFFNのCUDA kernelを探索。既定は無効 |
 | `--precision` | `fp32` / `tf32` / `fp16` / `bf16`。既定fp32。FP16はGradScalerを使用 |
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
 | `--optimizer` | `adamw`（既定）/ `muon` / `batched-muon` |
@@ -232,6 +233,8 @@ python -m rshogi_dl.trainer \
 `--execution cuda-graph` は `--device cuda --precision bf16 --fused-optimizer` と併用します。全行に方策教師があり、設定batchサイズを満たし、合法手列が512以下のbatchを固定幅に揃え、準備4更新を経て学習更新全体を記録します。ほかのbatchは通常更新を使います。記録は実行開始・再開ごとに作り直します。reportの`cudagraphs_requested`は要求した設定を示し、`cuda_graph_replayed_steps`はこの実行区間でgraphを使用した更新数を示します。
 
 `--execution cuda-graph-fused-norm` は上記と同じ条件で、attention直後の残差加算とLayerNormもInductorでまとめます。起動時にコンパイルがかかるため、学習時間全体で効果を確認してください。評価・ONNX出力には通常のモデル演算を使います。
+
+`--compile-ffn` は上記2つのCUDA Graph実行方式で併用できます。設定batchサイズを満たす学習入力に対してFFNをコンパイルし、カーネル候補を計測します。端数batchのFFN、評価およびONNX出力は通常の演算を使います。短い学習では初回の探索費用が大きくなるため、実データの全体時間で選んでください。途中再開では同じ `--compile-ffn` 設定を指定します。
 
 最終`report.json`の学習時間・samples/sはデータ供給、転送、更新と途中の記録・checkpoint保存を含み、setupと最終held-out評価は別時間です。held-outのpolicy CEはpolicyがある行、value BCEとBrierは全行で重み付き集計します。全行policyなしなら`policy_ce=null`です。有限windowを使った値はその先頭windowの評価であり、全datasetの品質を代表するとは限りません。
 
