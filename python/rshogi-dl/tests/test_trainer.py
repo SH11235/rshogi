@@ -565,8 +565,16 @@ class TrainerTest(unittest.TestCase):
             "cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True, fuse_norm_cast=True,
         )
 
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_prefetch_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True,
+            fuse_norm_cast=True, prefetch_input=True,
+        )
+
     def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *,
-                                compile_ffn: bool = False, fuse_norm_cast: bool = False) -> None:
+                                compile_ffn: bool = False, fuse_norm_cast: bool = False,
+                                prefetch_input: bool = False) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
             record["policy"] = None if index in (10, 11, 12) else [[record["legal_labels"][0], 1]]
@@ -580,6 +588,7 @@ class TrainerTest(unittest.TestCase):
             muon_learning_rate=0.002 if optimizer != "adamw" else None,
             compile_ffn=compile_ffn,
             fuse_norm_cast=fuse_norm_cast,
+            prefetch_input=prefetch_input,
         )
         full = self.run_training("graph", config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)
@@ -594,10 +603,25 @@ class TrainerTest(unittest.TestCase):
             resumed = self.run_training(f"graph-resumed-{step}", config, resume=path)
             self.assertEqual(resumed["progress"], full["progress"])
             self.assertGreater(resumed["cuda_graph_replayed_steps"], 0)
-        for name in ("graph", "graph-resumed-4", "graph-resumed-8"):
+        runs = ["graph", "graph-resumed-4", "graph-resumed-8"]
+        if prefetch_input:
+            synchronous = replace(config, prefetch_input=False)
+            self.run_training("synchronous", synchronous)
+            self.run_training(
+                "resume-without-prefetch", synchronous, resume=self.root / "graph/resume-0000000008.pt",
+            )
+            self.run_training(
+                "resume-with-prefetch", config, resume=self.root / "synchronous/resume-0000000008.pt",
+            )
+            runs.extend(("synchronous", "resume-without-prefetch", "resume-with-prefetch"))
+        for name in runs:
             checkpoint = load_resume(self.root / name / "resume-final.pt")
             for field in ("model_state", "optimizer_state", "progress", "rng"):
                 self.assert_nested_equal(expected[field], checkpoint[field])
+
+    def test_prefetch_requires_cuda_graph(self) -> None:
+        with self.assertRaisesRegex(ValueError, "prefetch_input requires whole-step CUDA Graph execution"):
+            replace(self.config, prefetch_input=True)
 
     def test_compile_mode_validation_forwarding_and_resume_identity(self) -> None:
         for options in (

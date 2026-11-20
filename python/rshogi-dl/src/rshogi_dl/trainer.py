@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, fields
 from itertools import islice
@@ -51,7 +52,7 @@ class TrainingError(RuntimeError):
 class TrainerConfig:
     """max_steps は AMP skip を含む有限の更新試行数。
 
-    再開で変更できるのは総試行数と保存・記録間隔だけ。他の設定は更新列・評価条件を固定する。
+    再開で変更できるのは総試行数、保存・記録間隔と入力先読み。他の設定は更新列・評価条件を固定する。
     """
 
     max_steps: int
@@ -75,6 +76,7 @@ class TrainerConfig:
     muon_learning_rate: float | None = None
     compile_ffn: bool = False
     fuse_norm_cast: bool = False
+    prefetch_input: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -86,7 +88,9 @@ class TrainerConfig:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
-        for name in ("fused_optimizer", "deterministic", "validation_only", "compile_ffn", "fuse_norm_cast"):
+        for name in (
+            "fused_optimizer", "deterministic", "validation_only", "compile_ffn", "fuse_norm_cast", "prefetch_input",
+        ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
         for name, choices in {
@@ -115,8 +119,9 @@ class TrainerConfig:
             raise ValueError("CPU requires fp32 and an unfused optimizer")
         if self.execution != "compile" and self.compile_mode != "default":
             raise ValueError("non-default compile_mode requires compiled execution")
-        if self.compile_ffn and self.execution not in _STEP_GRAPH_EXECUTIONS:
-            raise ValueError("compile_ffn requires whole-step CUDA Graph execution")
+        for name in ("compile_ffn", "prefetch_input"):
+            if getattr(self, name) and self.execution not in _STEP_GRAPH_EXECUTIONS:
+                raise ValueError(f"{name} requires whole-step CUDA Graph execution")
         if self.fuse_norm_cast and self.execution != "cuda-graph-fused-norm":
             raise ValueError("fuse_norm_cast requires cuda-graph-fused-norm execution")
         if self.execution in _STEP_GRAPH_EXECUTIONS and (
@@ -133,17 +138,16 @@ def _config_dict(config: TrainerConfig) -> dict:
     payload = asdict(config)
     if config.optimizer == "adamw":
         del payload["optimizer"], payload["muon_learning_rate"]
-    if not config.compile_ffn:
-        del payload["compile_ffn"]
-    if not config.fuse_norm_cast:
-        del payload["fuse_norm_cast"]
+    for name in ("compile_ffn", "fuse_norm_cast", "prefetch_input"):
+        if not payload[name]:
+            del payload[name]
     return payload
 
 
 def _identity(config: TrainerConfig) -> dict:
     return {
         name: value for name, value in _config_dict(config).items()
-        if name not in ("max_steps", "checkpoint_every", "log_every")
+        if name not in ("max_steps", "checkpoint_every", "log_every", "prefetch_input")
     }
 
 
@@ -152,6 +156,18 @@ def _transfer(batch: Batch, device: torch.device) -> Batch:
         field.name: value.to(device) if isinstance(value := getattr(batch, field.name), torch.Tensor) else value
         for field in fields(Batch)
     })
+
+
+def _read_ahead(source: Iterator[Batch], executor: ThreadPoolExecutor) -> Iterator[Batch]:
+    pending = executor.submit(next, source, None)
+    try:
+        batch = pending.result()
+        while batch is not None:
+            pending = executor.submit(next, source, None)
+            yield batch
+            batch = pending.result()
+    finally:
+        pending.cancel()
 
 
 def _autocast(config: TrainerConfig):
@@ -242,7 +258,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
     try:
         expected = {field.name for field in fields(TrainerConfig)}
         optimizer_fields = {"optimizer", "muon_learning_rate"}
-        required = expected - optimizer_fields - {"compile_ffn", "fuse_norm_cast"}
+        required = expected - optimizer_fields - {"compile_ffn", "fuse_norm_cast", "prefetch_input"}
         saved_config = payload["trainer_config"]
         if (
             type(saved_config) is not dict or not required <= saved_config.keys() <= expected
@@ -476,18 +492,24 @@ def run_training(
             rolling.add_(torch.stack((loss.total.detach(), loss.policy.detach(), loss.value.detach())))
 
         graph = (
-            StepGraph(config.batch_size, device, update, _transfer, tuple(model.parameters()))
+            StepGraph(
+                config.batch_size, device, update, _transfer, tuple(model.parameters()),
+                prefetch_input=config.prefetch_input,
+            )
             if uses_step_graph else None
         )
         _sync(device)
         started = time.perf_counter()
-        with (output / "metrics.jsonl").open("x", encoding="utf-8") as metrics:
+        reader = ThreadPoolExecutor(max_workers=1) if config.prefetch_input else nullcontext()
+        with (output / "metrics.jsonl").open("x", encoding="utf-8") as metrics, reader as executor:
             while progress["step"] < config.max_steps:
                 if source is None:
                     source = iter_batches(
                         datasets["train"]["path"], config.batch_size,
                         start_record=progress["sample_cursor"],
                     )
+                    if executor is not None:
+                        source = _read_ahead(islice(source, config.max_steps - progress["step"]), executor)
                 batch = next(source)
                 samples = batch.tokens.shape[0]
                 if graph is None or not graph.try_update(batch):
@@ -593,6 +615,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--compile-ffn", action="store_true")
     parser.add_argument("--fuse-norm-cast", action="store_true")
+    parser.add_argument("--prefetch-input", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
     parser.add_argument("--optimizer", choices=_OPTIMIZERS, default="adamw")
