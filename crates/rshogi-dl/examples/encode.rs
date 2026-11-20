@@ -31,6 +31,8 @@ fn encode_positions(input: impl BufRead, mut output: impl Write, format: Format)
     if format == Format::TrainingBinary {
         output.write_all(BINARY_HEADER)?;
     }
+    let mut legal_labels = Vec::new();
+    let mut requested_labels = Vec::new();
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -61,20 +63,20 @@ fn encode_positions(input: impl BufRead, mut output: impl Write, format: Format)
                 writeln!(output)?;
             }
             Format::TrainingBinary => {
-                let labels = legal
-                    .iter()
-                    .map(|m| Ok((m.to_u16(), u16::try_from(make_move_label(*m, side))?)))
-                    .collect::<Result<Vec<_>>>()?;
-                let requested = matching_labels(requested, &labels)?;
-                let legal_count = u16::try_from(labels.len())?;
-                let requested_count = u16::try_from(requested.len())?;
+                legal_labels.clear();
+                for m in &legal {
+                    legal_labels.push((m.to_u16(), u16::try_from(make_move_label(*m, side))?));
+                }
+                matching_labels(requested, &legal_labels, &mut requested_labels)?;
+                let legal_count = u16::try_from(legal_labels.len())?;
+                let requested_count = u16::try_from(requested_labels.len())?;
                 output.write_all(tokens.as_slice())?;
                 output.write_all(&legal_count.to_le_bytes())?;
                 output.write_all(&requested_count.to_le_bytes())?;
-                for (_, label) in labels {
+                for (_, label) in &legal_labels {
                     output.write_all(&label.to_le_bytes())?;
                 }
-                for label in requested {
+                for label in &requested_labels {
                     output.write_all(&label.to_le_bytes())?;
                 }
             }
@@ -83,18 +85,21 @@ fn encode_positions(input: impl BufRead, mut output: impl Write, format: Format)
     Ok(())
 }
 
-fn matching_labels(requested: Option<&str>, legal: &[(u16, u16)]) -> Result<Vec<u16>> {
-    requested
-        .into_iter()
-        .flat_map(|moves| moves.split('\t'))
-        .map(|input| {
-            let code = Move::from_usi_strict(input).context("invalid USI move")?.to_u16();
-            legal
-                .iter()
-                .find_map(|&(candidate, label)| (candidate == code).then_some(label))
-                .with_context(|| format!("illegal move: {input}"))
-        })
-        .collect()
+fn matching_labels(
+    requested: Option<&str>,
+    legal: &[(u16, u16)],
+    output: &mut Vec<u16>,
+) -> Result<()> {
+    output.clear();
+    for input in requested.into_iter().flat_map(|moves| moves.split('\t')) {
+        let code = Move::from_usi_strict(input).context("invalid USI move")?.to_u16();
+        let label = legal
+            .iter()
+            .find_map(|&(candidate, label)| (candidate == code).then_some(label))
+            .with_context(|| format!("illegal move: {input}"))?;
+        output.push(label);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
