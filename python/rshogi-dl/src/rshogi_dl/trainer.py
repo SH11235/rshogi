@@ -23,6 +23,7 @@ from .data import Batch
 from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact, shogi_data_root
+from ._optimizers import MuonAdamW, validate_optimizer_groups
 from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
 from ._residual_norm import compiled_residual_forward
 from ._step_graph import StepGraph
@@ -34,6 +35,7 @@ from .trainer_checkpoint import (
     validate_scaler_state,
 )
 
+_OPTIMIZERS = ("adamw", "muon", "batched-muon")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
 _CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
 _STEP_GRAPH_EXECUTIONS = ("cuda-graph", "cuda-graph-fused-norm")
@@ -68,6 +70,8 @@ class TrainerConfig:
     validation_batches: int = 32
     checkpoint_every: int = 0
     log_every: int = 100
+    optimizer: str = "adamw"
+    muon_learning_rate: float | None = None
 
     def __post_init__(self) -> None:
         limits = {
@@ -85,7 +89,7 @@ class TrainerConfig:
         for name, choices in {
             "device": ("cpu", "cuda"), "attention_backend": ATTENTION_BACKENDS,
             "execution": _EXECUTIONS, "precision": ("fp32", "tf32", "fp16", "bf16"),
-            "compile_mode": COMPILE_MODES,
+            "compile_mode": COMPILE_MODES, "optimizer": _OPTIMIZERS,
         }.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f"{name} must be one of {choices}")
@@ -95,6 +99,15 @@ class TrainerConfig:
                 raise ValueError(f"{name} must be finite")
             if value < 0 or (name == "learning_rate" and value == 0):
                 raise ValueError(f"invalid {name}")
+        if self.optimizer == "adamw":
+            if self.muon_learning_rate is not None:
+                raise ValueError("muon_learning_rate requires a Muon optimizer")
+        else:
+            rate = self.muon_learning_rate
+            if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
+                raise ValueError("Muon requires a positive finite muon_learning_rate")
+            if self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer:
+                raise ValueError("Muon requires CUDA, BF16 and fused AdamW")
         if self.device == "cpu" and (self.precision != "fp32" or self.fused_optimizer):
             raise ValueError("CPU requires fp32 and an unfused optimizer")
         if self.execution != "compile" and self.compile_mode != "default":
@@ -109,9 +122,16 @@ class TrainerConfig:
             raise ValueError("at most eight intermediate checkpoints per run are allowed")
 
 
+def _config_dict(config: TrainerConfig) -> dict:
+    payload = asdict(config)
+    if config.optimizer == "adamw":
+        del payload["optimizer"], payload["muon_learning_rate"]
+    return payload
+
+
 def _identity(config: TrainerConfig) -> dict:
     return {
-        name: value for name, value in asdict(config).items()
+        name: value for name, value in _config_dict(config).items()
         if name not in ("max_steps", "checkpoint_every", "log_every")
     }
 
@@ -209,12 +229,12 @@ def _runtime() -> dict:
 
 def _validate_resume(payload, config, model_config, datasets) -> dict:
     try:
-        if (
-            type(payload["trainer_config"]) is not dict
-            or set(payload["trainer_config"]) != {field.name for field in fields(TrainerConfig)}
-        ):
+        expected = {field.name for field in fields(TrainerConfig)}
+        legacy = expected - {"optimizer", "muon_learning_rate"}
+        saved_config = payload["trainer_config"]
+        if type(saved_config) is not dict or set(saved_config) not in (expected, legacy):
             raise ResumeError("unexpected saved trainer configuration fields")
-        saved = TrainerConfig(**payload["trainer_config"])
+        saved = TrainerConfig(**saved_config)
         previous_model = ModelConfig.from_dict(payload["model_config"])
     except (TypeError, ValueError) as error:
         raise ResumeError(f"invalid saved configuration: {error}") from error
@@ -246,7 +266,11 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
 
 
 def _check_optimizer(optimizer, model, progress) -> None:
-    parameters = set(model.parameters())
+    if isinstance(optimizer, MuonAdamW):
+        optimizer.validate_muon(progress["optimizer_updates"])
+        parameters = set(optimizer.adamw_parameters)
+    else:
+        parameters = set(model.parameters())
     policy_parameters = set(model.policy_head.parameters())
     if not set(optimizer.state).issubset(parameters):
         raise ResumeError("unexpected AdamW parameter state")
@@ -292,7 +316,7 @@ def _checkpoint(path, model, optimizer, scaler, config, datasets, progress) -> N
     validate_scaler_state(scaler_state, enabled=config.precision == "fp16")
     atomic_save(path, {
         **CONTRACT,
-        "model_config": model.config.to_dict(), "trainer_config": asdict(config),
+        "model_config": model.config.to_dict(), "trainer_config": _config_dict(config),
         "datasets": datasets, "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(), "scaler_state": scaler_state,
         "scheduler_state": None, "progress": dict(progress),
@@ -381,10 +405,17 @@ def run_training(
     with _settings(config) as device:
         uses_step_graph = config.execution in _STEP_GRAPH_EXECUTIONS
         model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
-            fused=config.fused_optimizer, capturable=uses_step_graph,
-        )
+        if config.optimizer == "adamw":
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
+                fused=config.fused_optimizer, capturable=uses_step_graph,
+            )
+        else:
+            optimizer = MuonAdamW(
+                model, lr=config.learning_rate, muon_lr=config.muon_learning_rate,
+                weight_decay=config.weight_decay, capturable=uses_step_graph,
+                batched=config.optimizer == "batched-muon",
+            )
         scaler = torch.amp.GradScaler(
             "cuda", enabled=config.precision == "fp16",
             growth_factor=SCALER_GROWTH_FACTOR,
@@ -395,12 +426,8 @@ def run_training(
             try:
                 model.load_state_dict(payload["model_state"], strict=True)
                 saved_optimizer = payload["optimizer_state"]
-                if (
-                    type(saved_optimizer) is not dict
-                    or set(saved_optimizer) != {"state", "param_groups"}
-                    or saved_optimizer["param_groups"] != optimizer.state_dict()["param_groups"]
-                ):
-                    raise ResumeError("AdamW parameter groups differ from configuration")
+                if config.optimizer == "adamw":
+                    validate_optimizer_groups(saved_optimizer, optimizer, "AdamW")
                 optimizer.load_state_dict(payload["optimizer_state"])
                 scaler.load_state_dict(payload["scaler_state"])
                 _check_optimizer(optimizer, model, progress)
@@ -425,7 +452,7 @@ def run_training(
                 break
             parent = parent.parent
         _write_json(output / "run.json", {
-            "model_config": model_config.to_dict(), "trainer_config": asdict(config),
+            "model_config": model_config.to_dict(), "trainer_config": _config_dict(config),
             "datasets": datasets, "resume": str(Path(resume).resolve()) if resume else None,
             "training_status": TRAINING_STATUS,
         })
@@ -531,7 +558,7 @@ def run_training(
                 uses_step_graph
                 or (config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES)
             ),
-            "trainer_config": asdict(config), "model_config": model_config.to_dict(),
+            "trainer_config": _config_dict(config), "model_config": model_config.to_dict(),
             "datasets": datasets, "progress": progress,
             "amp_skipped_steps": progress["step"] - progress["optimizer_updates"],
             "setup_seconds": setup_seconds, "training_seconds": training_seconds,
@@ -567,6 +594,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
+    parser.add_argument("--optimizer", choices=_OPTIMIZERS, default="adamw")
+    parser.add_argument("--muon-learning-rate", type=float)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--validation-batches", type=int, default=32, help="0 で全 held-out dataset")

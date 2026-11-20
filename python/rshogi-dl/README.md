@@ -215,13 +215,17 @@ python -m rshogi_dl.trainer \
 | `--compile-mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs`。既定default。非defaultはcompile時だけ指定可 |
 | `--precision` | `fp32` / `tf32` / `fp16` / `bf16`。既定fp32。FP16はGradScalerを使用 |
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
+| `--optimizer` | `adamw`（既定）/ `muon` / `batched-muon` |
+| `--muon-learning-rate` | `muon` / `batched-muon` の学習率。両方式で必須 |
 | `--threads` | CPU thread数、既定1 |
 | `--validation-batches` | held-out先頭batchの上限、既定32。0は全件評価 |
 | `--checkpoint-every` | 中間checkpointの試行間隔。既定0は最終状態のみ。中間は最大8個 |
 | `--log-every` | `metrics.jsonl`への記録間隔。既定100 |
 | `--deterministic` | 決定的アルゴリズムを要求。CUDAでは起動前に`CUBLAS_WORKSPACE_CONFIG=:4096:8`等を設定 |
 
-順序は dataset の行順で、暗黙の shuffle はしません。epoch 末尾から先頭に戻り、一定 learning rate の AdamW で更新します。`metrics.jsonl` には loss、実 optimizer 更新数、policy head の更新数、AMP skip 数、epoch と sample cursor を記録します。policy のない batch では policy head の更新数は増えません。毎 step の全 parameter コピーや CPU への loss 同期は行いません。出力先は最初から `$SHOGI_DATA/runs/rshogi-dl/` 配下の新規 directory で、既存 run や checkpoint を上書き・削除しません。
+順序は dataset の行順で、暗黙の shuffle はしません。epoch 末尾から先頭に戻り、設定した optimizer と一定の learning rate で更新します。`metrics.jsonl` には loss、実 optimizer 更新数、policy head の更新数、AMP skip 数、epoch と sample cursor を記録します。policy のない batch では policy head の更新数は増えません。毎 step の全 parameter コピーや CPU への loss 同期は行いません。出力先は最初から `$SHOGI_DATA/runs/rshogi-dl/` 配下の新規 directory で、既存 run や checkpoint を上書き・削除しません。
+
+`muon` と `batched-muon` は CUDA・BF16・`--fused-optimizer` を指定して使います。attentionとFFNの二次元重みにMuonを使い、埋め込み・正規化・bias・各ヘッドはAdamWで更新します。`batched-muon` は同じ形状の行列でNewton–Schulz反復をまとめます。再開時は同じ方式と学習率を指定します。
 
 `reduce-overhead`と`max-autotune`はCUDA graphを要求するcompile modeで、CPUでは拒否します。この2つをCUDAで使うときは更新試行の境界をcompilerへ通知します。`default`と`max-autotune-no-cudagraphs`はCPU compileでも使えます。compile時はmodelだけをcompileし、lossやoptimizer更新は通常の実行経路です。
 
