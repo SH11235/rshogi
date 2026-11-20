@@ -11,6 +11,7 @@ import stat
 import sys
 from array import array
 from collections.abc import Callable, Iterable, Iterator
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -150,12 +151,19 @@ def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array],
     }
     files = {}
     for name, values in arrays.items():
+        header_buffer = BytesIO()
+        np.lib.format.write_array_header_1_0(header_buffer, np.lib.format.header_data_from_array_1_0(values))
+        header = header_buffer.getvalue()
+        payload = memoryview(values).cast("B")
+        digest = hashlib.sha256(header)
+        digest.update(payload)
         path = directory / f"{name}.npy"
         with path.open("xb") as stream:
-            np.lib.format.write_array(stream, values, version=(1, 0), allow_pickle=False)
+            stream.write(header)
+            stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        files[name] = {"size": path.stat().st_size, "sha256": _hash(path)}
+        files[name] = {"size": len(header) + payload.nbytes, "sha256": digest.hexdigest()}
     _write_json(
         directory / "metadata.json",
         {"format": FORMAT, "records": count, "legal_entries": entries, "files": files},
