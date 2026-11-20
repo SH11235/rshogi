@@ -713,7 +713,7 @@ class TrainerTest(unittest.TestCase):
         from rshogi_dl._ffn_residual_norm import ffn_residual_norm
 
         rng = torch.Generator(device="cuda").manual_seed(111)
-        shape = (7, 96, width)
+        shape = (7, 97, width)
         residual = torch.randn(shape, device="cuda", generator=rng).requires_grad_()
         update = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng).requires_grad_()
         weight, bias = (
