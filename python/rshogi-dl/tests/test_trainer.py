@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 import math
+import os
 from pathlib import Path
 import random
 import unittest
@@ -407,6 +408,46 @@ class TrainerTest(unittest.TestCase):
             with self.assertRaisesRegex(TrainingError, "no CPU fallback"):
                 self.run_training("cuda", replace(self.config, device="cuda"))
         self.assertFalse((self.root / "cuda").exists())
+
+    def test_cuda_graph_requires_cuda_bf16_fused_eager(self) -> None:
+        options = {"device": "cuda", "precision": "bf16", "fused_optimizer": True, "execution": "cuda-graph"}
+        replace(self.config, **options)
+        for invalid in ({"device": "cpu", "precision": "fp32", "fused_optimizer": False},
+                        {"precision": "fp16"}, {"fused_optimizer": False},
+                        {"compile_mode": "reduce-overhead"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                replace(self.config, **(options | invalid))
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_resume_after_eager_fallback(self) -> None:
+        records = synthetic_records(seed=29, count=19)
+        for index, record in enumerate(records):
+            record["policy"] = None if index in (10, 11, 12) else [[record["legal_labels"][0], 1]]
+        records[14]["legal_labels"] = list(range(513))
+        records[14]["policy"] = [[0, 1]]
+        self.train = self.make_dataset("mixed-policy", records)
+        config = replace(
+            self.config, max_steps=19, batch_size=2, checkpoint_every=4, weight_decay=0.01,
+            device="cuda", precision="bf16", fused_optimizer=True, execution="cuda-graph",
+            attention_backend="sdpa",
+        )
+        full = self.run_training("graph", config)
+        self.assertEqual(full["cuda_graph_replayed_steps"], 8)
+        self.assertEqual(full["progress"]["optimizer_updates"], 19)
+        self.assertEqual(full["progress"]["policy_optimizer_updates"], 17)
+        with mock.patch("rshogi_dl._step_graph._WARMUP_STEPS", config.max_steps):
+            eager = self.run_training("padded-eager", config)
+        self.assertEqual(eager["cuda_graph_replayed_steps"], 0)
+        expected = load_resume(self.root / "padded-eager" / "resume-final.pt")
+        for step in (4, 8):
+            path = self.root / "graph" / f"resume-{step:010d}.pt"
+            resumed = self.run_training(f"graph-resumed-{step}", config, resume=path)
+            self.assertEqual(resumed["progress"], full["progress"])
+            self.assertGreater(resumed["cuda_graph_replayed_steps"], 0)
+        for name in ("graph", "graph-resumed-4", "graph-resumed-8"):
+            checkpoint = load_resume(self.root / name / "resume-final.pt")
+            for field in ("model_state", "optimizer_state", "progress", "rng"):
+                self.assert_nested_equal(expected[field], checkpoint[field])
 
     def test_compile_mode_validation_forwarding_and_resume_identity(self) -> None:
         for options in (

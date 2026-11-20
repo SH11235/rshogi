@@ -24,6 +24,7 @@ from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact, shogi_data_root
 from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
+from ._step_graph import StepGraph
 from .sharded import DatasetError, dataset_info, iter_batches
 from .trainer_checkpoint import (
     CONTRACT, ResumeError, atomic_save, capture_rng, export_checkpoint, load_resume, restore_rng,
@@ -80,7 +81,7 @@ class TrainerConfig:
                 raise ValueError(f"{name} must be boolean")
         for name, choices in {
             "device": ("cpu", "cuda"), "attention_backend": ATTENTION_BACKENDS,
-            "execution": ("eager", "compile"), "precision": ("fp32", "tf32", "fp16", "bf16"),
+            "execution": ("eager", "compile", "cuda-graph"), "precision": ("fp32", "tf32", "fp16", "bf16"),
             "compile_mode": COMPILE_MODES,
         }.items():
             if getattr(self, name) not in choices:
@@ -93,8 +94,12 @@ class TrainerConfig:
                 raise ValueError(f"invalid {name}")
         if self.device == "cpu" and (self.precision != "fp32" or self.fused_optimizer):
             raise ValueError("CPU requires fp32 and an unfused optimizer")
-        if self.execution == "eager" and self.compile_mode != "default":
+        if self.execution != "compile" and self.compile_mode != "default":
             raise ValueError("non-default compile_mode requires compiled execution")
+        if self.execution == "cuda-graph" and (
+            self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer
+        ):
+            raise ValueError("cuda-graph execution requires CUDA, BF16 and fused AdamW")
         if self.device == "cpu" and self.compile_mode in _CUDAGRAPH_MODES:
             raise ValueError("CUDA graph compile modes require a CUDA device")
         if self.checkpoint_every and self.max_steps // self.checkpoint_every > 8:
@@ -374,7 +379,7 @@ def run_training(
         model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
-            fused=config.fused_optimizer,
+            fused=config.fused_optimizer, capturable=config.execution == "cuda-graph",
         )
         scaler = torch.amp.GradScaler(
             "cuda", enabled=config.precision == "fp16",
@@ -425,6 +430,23 @@ def run_training(
         rolling = torch.zeros(3, device=device)
         rolling_steps = 0
         finite = torch.ones((), dtype=torch.bool, device=device)
+
+        def update(batch: Batch, has_policy: bool) -> None:
+            optimizer.zero_grad(set_to_none=True)
+            with _autocast(config):
+                policy, value = execution(batch.tokens)
+                loss = policy_value_loss(policy, value, batch)
+            finite.logical_and_(torch.isfinite(loss.total.detach()))
+            scaler.scale(loss.total).backward()
+            clear_unused_policy_head_gradients(model, has_policy)
+            scaler.step(optimizer)
+            scaler.update()
+            rolling.add_(torch.stack((loss.total.detach(), loss.policy.detach(), loss.value.detach())))
+
+        graph = (
+            StepGraph(config.batch_size, device, update, _transfer, tuple(model.parameters()))
+            if config.execution == "cuda-graph" else None
+        )
         _sync(device)
         started = time.perf_counter()
         with (output / "metrics.jsonl").open("x", encoding="utf-8") as metrics:
@@ -436,23 +458,12 @@ def run_training(
                     )
                 batch = next(source)
                 samples = batch.tokens.shape[0]
-                has_policy = has_policy_targets(batch)
-                batch = _transfer(batch, device)
-                optimizer.zero_grad(set_to_none=True)
-                if (
-                    config.device == "cuda" and config.execution == "compile"
-                    and config.compile_mode in _CUDAGRAPH_MODES
-                ):
-                    torch.compiler.cudagraph_mark_step_begin()
-                with _autocast(config):
-                    policy, value = execution(batch.tokens)
-                    loss = policy_value_loss(policy, value, batch)
-                finite.logical_and_(torch.isfinite(loss.total.detach()))
-                scaler.scale(loss.total).backward()
-                clear_unused_policy_head_gradients(model, has_policy)
-                scaler.step(optimizer)
-                scaler.update()
-                rolling += torch.stack((loss.total.detach(), loss.policy.detach(), loss.value.detach()))
+                if graph is None or not graph.try_update(batch):
+                    has_policy = has_policy_targets(batch)
+                    batch = _transfer(batch, device)
+                    if config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES:
+                        torch.compiler.cudagraph_mark_step_begin()
+                    update(batch, has_policy)
                 rolling_steps += 1
                 progress["step"] += 1
                 progress["sample_cursor"] += samples
@@ -492,6 +503,10 @@ def run_training(
                     )
         _sync(device)
         training_seconds = time.perf_counter() - started
+        graph_replays = graph.replays if graph is not None else 0
+        if graph is not None:
+            optimizer.zero_grad(set_to_none=True)
+            del graph
         _update_progress(optimizer, model, progress)
         if progress["step"] > initial_step and progress["optimizer_updates"] == initial_updates:
             raise TrainingError("no optimizer update completed in this segment")
@@ -507,7 +522,8 @@ def run_training(
         report = {
             "training_status": TRAINING_STATUS, "dataset_validation_only": config.validation_only,
             "cudagraphs_requested": (
-                config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES
+                config.execution == "cuda-graph"
+                or (config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES)
             ),
             "trainer_config": asdict(config), "model_config": model_config.to_dict(),
             "datasets": datasets, "progress": progress,
@@ -518,6 +534,8 @@ def run_training(
             "validation": validation, "resume_checkpoint": "resume-final.pt",
             "export_checkpoint": "checkpoint.pt",
         }
+        if config.execution == "cuda-graph":
+            report["cuda_graph_replayed_steps"] = graph_replays
         _write_json(output / "report.json", report)
         return report
 
@@ -539,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
-    parser.add_argument("--execution", choices=("eager", "compile"), default="eager")
+    parser.add_argument("--execution", choices=("eager", "compile", "cuda-graph"), default="eager")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
