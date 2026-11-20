@@ -130,7 +130,8 @@ threat の Finny cache 経路はない。universal の既存 threat 更新は全
 | `threat_rows_upd[<ac>_<dc>_<same\|opp>]` | Threat の差分適用で加算・減算した行数。祖先差分を含む |
 | `threat_rows_ref[<ac>_<dc>_<same\|opp>]` | Threat の全再構築で加算した行数 |
 | `piece_rows_upd` | 駒 FT の通常差分で加算・減算した行数 |
-| `piece_rows_ref` | 駒 FT の全再構築で加算した行数と、Finny refresh の差分で加算・減算した行数の合計 |
+| `piece_rows_ref` | 駒 FT の全再構築で加算した行数 |
+| `piece_rows_finny` | 駒 FT の Finny refresh の差分 (キャッシュとの差) で加算・減算した行数 |
 | `eval_nnue` | 静的 LayerStacks で実際に NNUE 評価した回数。評価1回あたりの行数の分母 |
 
 `ac` は攻撃駒、`dc` は被攻撃駒。番号は 0=歩、1=香、2=桂、3=銀、4=金相当、

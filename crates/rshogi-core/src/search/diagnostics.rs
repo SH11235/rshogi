@@ -492,7 +492,8 @@ pub(crate) fn report() -> String {
             writeln!(out, "{key}={}", c[base..base + 5].iter().sum::<u64>()).unwrap();
         }
         writeln!(out, "piece_rows_upd={}", c[NNUE_FT_DIFF_ROWS]).unwrap();
-        writeln!(out, "piece_rows_ref={}", c[NNUE_FT_FULL_ROWS] + c[NNUE_FINNY_ROWS]).unwrap();
+        writeln!(out, "piece_rows_ref={}", c[NNUE_FT_FULL_ROWS]).unwrap();
+        writeln!(out, "piece_rows_finny={}", c[NNUE_FINNY_ROWS]).unwrap();
     });
     #[cfg(feature = "nnue-threat")]
     write_threat_pair_rows(&mut out);
