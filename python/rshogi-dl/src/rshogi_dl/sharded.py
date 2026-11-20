@@ -416,9 +416,9 @@ def _append(scratch: dict, row: int, shard: _Shard, start: int, count: int) -> i
     width = int(lengths.max())
     if width:
         mask = np.arange(width)[None, :] < lengths[:, None]
-        indices = (offsets[:-1, None] + np.arange(width)[None, :])[mask]
-        scratch["legal_indices"][row:row + count, :width][mask] = source["legal_indices"][indices]
-        scratch["policy_targets"][row:row + count, :width][mask] = source["policy_targets"][indices]
+        entries = slice(offsets[0], offsets[-1])
+        scratch["legal_indices"][row:row + count, :width][mask] = source["legal_indices"][entries]
+        scratch["policy_targets"][row:row + count, :width][mask] = source["policy_targets"][entries]
         scratch["legal_mask"][row:row + count, :width] = mask
     return width
 
