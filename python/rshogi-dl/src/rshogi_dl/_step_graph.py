@@ -59,7 +59,10 @@ class StepGraph:
             if self._graph is None:
                 self._static = self._transfer(batch, self._device)
                 self._graph = torch.cuda.CUDAGraph()
-                with torch.autograd.set_multithreading_enabled(False), torch.cuda.graph(self._graph):
+                with (
+                    torch.autograd.set_multithreading_enabled(False),
+                    torch.cuda.graph(self._graph, stream=self._warm_stream),
+                ):
                     self._update(self._static, True)
                 # Eager fallback can replace .grad while replay still uses its captured buffers.
                 self._gradients = tuple(parameter.grad for parameter in self._parameters)
