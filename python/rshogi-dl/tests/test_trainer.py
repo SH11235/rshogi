@@ -672,8 +672,15 @@ class TrainerTest(unittest.TestCase):
                 torch.testing.assert_close(fallback, attention(tokens), atol=0, rtol=0)
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_width_224_ffn_residual_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", fuse_norm_cast=True, prefetch_input=True, fuse_ffn_residual_norm=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=224, heads=7, ffn_width=512, packed_qkv=True),
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_ffn_residual_fusion_matches_native(self) -> None:
-        for width in (128, 256):
+        for width in (128, 192, 224, 256):
             with self.subTest(width=width):
                 self.check_ffn_residual_fusion(width)
 

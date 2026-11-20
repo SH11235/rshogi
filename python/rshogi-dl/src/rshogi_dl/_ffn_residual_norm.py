@@ -16,14 +16,36 @@ def _shuffle_xor(value, offset: tl.constexpr):
 
 
 @triton.jit
-def _warp_stats(residual, update, added, start):
+def _lane_zero(value):
+    return tl.inline_asm_elementwise(
+        "shfl.sync.idx.b32 $0, $1, 0, 31, -1;",
+        constraints="=f,f", args=[value], dtype=tl.float32, is_pure=True, pack=1,
+    )
+
+
+@triton.jit
+def _combine_stats(mean, squares, count, peer_mean, peer_squares, peer_count):
+    total = count + peer_count
+    reciprocal = tl.div_rn(1.0, tl.maximum(total, 1.0))
+    fraction = count * reciprocal
+    peer_fraction = peer_count * reciprocal
+    delta = mean - peer_mean
+    mean = tl.fma(peer_fraction, peer_mean, fraction * mean)
+    squares = tl.fma((delta * delta) * peer_count, fraction, squares + peer_squares)
+    return mean, squares, total
+
+
+@triton.jit
+def _warp_stats(residual, update, added, start, valid, full: tl.constexpr):
     values = ()
     mean = tl.full((32,), 0.0, tl.float32)
     squares = tl.full((32,), 0.0, tl.float32)
+    if not full:
+        count = tl.where(valid, 4.0, 0.0)
     for i in tl.static_range(4):
-        value = tl.load(residual + start + i) + tl.load(update + start + i).to(tl.float32)
+        value = tl.load(residual + start + i, valid, 0) + tl.load(update + start + i, valid, 0).to(tl.float32)
         values += (value,)
-        tl.store(added + start + i, value)
+        tl.store(added + start + i, value, valid)
         delta = value - mean
         mean = tl.fma(delta, 1.0 / (i + 1), mean)
         squares = tl.fma(delta, value - mean, squares)
@@ -31,9 +53,13 @@ def _warp_stats(residual, update, added, start):
     for stage in tl.static_range(5):
         peer_mean = _shuffle_xor(mean, 16 >> stage)
         peer_squares = _shuffle_xor(squares, 16 >> stage)
-        delta = mean - peer_mean
-        mean = mean * 0.5 + peer_mean * 0.5
-        squares = tl.fma(delta * delta, 2.0 * (1 << stage), squares + peer_squares)
+        if full:
+            delta = mean - peer_mean
+            mean = mean * 0.5 + peer_mean * 0.5
+            squares = tl.fma(delta * delta, 2.0 * (1 << stage), squares + peer_squares)
+        else:
+            peer_count = _shuffle_xor(count, 16 >> stage)
+            mean, squares, count = _combine_stats(mean, squares, count, peer_mean, peer_squares, peer_count)
     return values, mean, squares
 
 
@@ -45,13 +71,24 @@ def _forward(
     row = tl.program_id(0)
     col = 4 * lane
     start = width * row + col
-    values, mean, squares = _warp_stats(residual, update, added, start)
-    if width == 256:
-        right, right_mean, right_squares = _warp_stats(residual, update, added, start + 128)
-        delta = mean - right_mean
-        mean = mean * 0.5 + right_mean * 0.5
-        squares = tl.fma(delta * delta, 64.0, squares + right_squares)
-    inverse = tl.rsqrt(squares * (1.0 / width) + eps)
+    values, mean, squares = _warp_stats(residual, update, added, start, True, True)
+    if width > 128:
+        valid = col + 128 < width
+        right, right_mean, right_squares = _warp_stats(residual, update, added, start + 128, valid, width == 256)
+        if width == 256:
+            delta = mean - right_mean
+            mean = mean * 0.5 + right_mean * 0.5
+            squares = tl.fma(delta * delta, 64.0, squares + right_squares)
+        else:
+            mean, squares, _ = _combine_stats(
+                _lane_zero(mean), _lane_zero(squares), 128.0,
+                _lane_zero(right_mean), _lane_zero(right_squares), width - 128.0,
+            )
+    if width == 128 or width == 256:
+        variance = squares * (1.0 / width)
+    else:
+        variance = tl.div_rn(squares, width * 1.0)
+    inverse = tl.rsqrt(variance + eps)
     tl.store(means + row + lane, mean, lane == 0)
     tl.store(inverse_devs + row + lane, inverse, lane == 0)
     for i in tl.static_range(4):
@@ -59,29 +96,31 @@ def _forward(
         shift = tl.load(bias + col + i)
         output = tl.fma(scale, inverse * (values[i] - mean), shift)
         tl.store(normalized + start + i, output)
-        if width == 256:
-            scale_right = tl.load(weight + col + 128 + i)
-            shift_right = tl.load(bias + col + 128 + i)
+        if width > 128:
+            scale_right = tl.load(weight + col + 128 + i, valid, 0)
+            shift_right = tl.load(bias + col + 128 + i, valid, 0)
             right_output = tl.fma(scale_right, inverse * (right[i] - mean), shift_right)
-            tl.store(normalized + start + 128 + i, right_output)
+            tl.store(normalized + start + 128 + i, right_output, valid)
 
 
 @triton.jit
 def _input_gradient(
     data, means, inverse_devs, scale, residual_upstream, norm_upstream, residual_grad, update_grad, width: tl.constexpr,
+    block_width: tl.constexpr,
 ):
     row = tl.program_id(0)
-    col = tl.arange(0, width)
+    col = tl.arange(0, block_width)
     offsets = row * width + col
+    valid = col < width
     average = tl.load(means + row)
     inverse = tl.load(inverse_devs + row)
-    normalized = (tl.load(data + offsets) - average) * inverse
-    weighted = tl.load(norm_upstream + offsets).to(tl.float32) * tl.load(scale + col)
+    normalized = (tl.load(data + offsets, valid, 0) - average) * inverse
+    weighted = tl.load(norm_upstream + offsets, valid, 0).to(tl.float32) * tl.load(scale + col, valid, 0)
     center = tl.sum(weighted) / width
     stretch = tl.sum(weighted * normalized) / width
-    gradient = ((weighted - center) - normalized * stretch) * inverse + tl.load(residual_upstream + offsets)
-    tl.store(residual_grad + offsets, gradient)
-    tl.store(update_grad + offsets, gradient)
+    gradient = ((weighted - center) - normalized * stretch) * inverse + tl.load(residual_upstream + offsets, valid, 0)
+    tl.store(residual_grad + offsets, gradient, valid)
+    tl.store(update_grad + offsets, gradient, valid)
 
 
 @triton.jit
@@ -108,8 +147,10 @@ class _ResidualNorm(torch.autograd.Function):
         normalized = torch.empty_like(update)
         means = torch.empty(residual.shape[:-1], device=residual.device, dtype=torch.float32)
         inverse = torch.empty_like(means)
+        width = weight.numel()
         _forward[(means.numel(),)](
-            residual, update, weight, bias, added, normalized, means, inverse, eps, weight.numel(), num_warps=1,
+            residual, update, weight, bias, added, normalized, means, inverse, eps, width,
+            num_warps=1, enable_fp_fusion=width in (128, 256),
         )
         ctx.save_for_backward(added, means, inverse, weight)
         return added, normalized
@@ -124,7 +165,7 @@ class _ResidualNorm(torch.autograd.Function):
         width = weight.numel()
         _input_gradient[(rows,)](
             data, means, inverse, weight, residual_upstream.contiguous(), norm_upstream, residual_grad, update_grad,
-            width, num_warps=4,
+            width, triton.next_power_of_2(width), num_warps=4,
         )
         tiles = triton.cdiv(rows, 64)
         partial = torch.empty((tiles, 2 * width), dtype=torch.float32, device=data.device)
@@ -137,7 +178,7 @@ def ffn_residual_norm(residual, update, weight, bias, eps):
     width = residual.shape[-1] if residual.ndim else 0
     if (
         not residual.is_cuda
-        or width not in (128, 256)
+        or width not in (128, 192, 224, 256)
         or not residual.numel()
         or update.shape != residual.shape
         or weight.shape != (width,)
