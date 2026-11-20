@@ -170,20 +170,25 @@ class SquareTransformer(nn.Module):
             for block in self.blocks:
                 block.attention.pack_qkv()
 
-    def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """``tokens`` は int64 の ``[B, 96]``。``([B, 2187] policy logit, [B, 1] value logit)`` を返す。"""
+    def _embed(self, tokens: torch.Tensor) -> torch.Tensor:
         if not torch.jit.is_tracing():
             if tokens.dtype != torch.int64:
                 raise ValueError("tokens must be int64")
             if tokens.dim() != 2 or tokens.shape[1] != TOKEN_COUNT:
                 raise ValueError(f"tokens must have shape [B, {TOKEN_COUNT}]")
-        x = self.token_embedding(tokens) + self.position_embedding
-        for block in self.blocks:
-            x = block(x)
-        x = self.final_norm(x)
+        return self.token_embedding(tokens) + self.position_embedding
+
+    def _readout(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         policy = flatten_policy(self.policy_head(x[:, :SQUARE_COUNT]))
         value = self.value_head(x[:, CONTEXT_POSITION])
         return policy, value
+
+    def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``tokens`` は int64 の ``[B, 96]``。``([B, 2187] policy logit, [B, 1] value logit)`` を返す。"""
+        x = self._embed(tokens)
+        for block in self.blocks:
+            x = block(x)
+        return self._readout(self.final_norm(x))
 
     def parameter_groups(self) -> dict[str, list[nn.Parameter]]:
         """勾配と更新を確認する単位で parameter を分ける。全 parameter をちょうど 1 回ずつ含む。"""
