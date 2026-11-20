@@ -244,7 +244,7 @@ python -m rshogi_dl.trainer \
 
 `--fuse-norm-cast` は `--execution cuda-graph-fused-norm` で、FFNへの入力をLayerNormの融合処理内でBF16にします。残差はFP32で保持します。`--compile-ffn` と併用でき、途中再開では同じ設定を指定します。
 
-`--fuse-ffn-residual-norm` は幅128、`--execution cuda-graph-fused-norm`、CUDA Tritonを使用する学習で有効です。FP32のFFN残差加算と次ブロックのLayerNormをまとめ、正規化出力をBF16にします。評価とONNX出力には通常の演算を使い、途中再開では同じ設定を指定します。
+`--fuse-ffn-residual-norm` は幅128・連結QKVで、`--execution cuda-graph-fused-norm` とNVIDIA CUDA向けTritonを使用する学習で有効です。FP32のFFN残差加算と次ブロックのLayerNormをまとめ、正規化出力をBF16にします。評価とONNX出力には通常の演算を使い、途中再開では同じ設定を指定します。
 
 `--prefetch-input` は両方のCUDA Graph実行方式で使えます。Graphの対象外となるbatchは通常の転送を使います。途中再開で切り替えられます。
 

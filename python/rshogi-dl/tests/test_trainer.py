@@ -491,7 +491,7 @@ class TrainerTest(unittest.TestCase):
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         self.assertEqual(inputs, [torch.bfloat16] * len(model.blocks))
 
-    def test_ffn_residual_fusion_requires_cuda_graph_and_width_128(self) -> None:
+    def test_ffn_residual_fusion_requires_cuda_graph_width_128_and_packed_qkv(self) -> None:
         with self.assertRaisesRegex(ValueError, "cuda-graph-fused-norm"):
             replace(self.config, fuse_ffn_residual_norm=True)
         config = replace(
@@ -500,6 +500,8 @@ class TrainerTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(TrainingError, "model width of 128"):
             self.run_training("wrong-model-width", config)
+        with self.assertRaisesRegex(TrainingError, "packed QKV"):
+            self.run_training("unpacked-qkv", config, model_config=replace(TEST_CONFIG, width=128))
 
     def test_muon_config_and_checkpoint_parameter_partition(self) -> None:
         for options in ({"optimizer": "muon", "muon_learning_rate": 0.002},
@@ -603,7 +605,7 @@ class TrainerTest(unittest.TestCase):
         self.check_cuda_graph_resume(
             "cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True, compile_attention=True,
             fuse_norm_cast=True, prefetch_input=True, fuse_ffn_residual_norm=True,
-            model_config=replace(TEST_CONFIG, layers=2, width=128, heads=4, ffn_width=256),
+            model_config=replace(TEST_CONFIG, layers=2, width=128, heads=4, ffn_width=256, packed_qkv=True),
         )
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")

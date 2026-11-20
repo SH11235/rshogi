@@ -403,8 +403,11 @@ def run_training(
     resume: str | Path | None = None,
 ) -> dict:
     """有限回だけ更新し、再開状態・v1 export checkpoint・held-out report を新規 run に保存する。"""
-    if config.fuse_ffn_residual_norm and model_config.width != 128:
-        raise TrainingError("fuse_ffn_residual_norm requires a model width of 128")
+    if config.fuse_ffn_residual_norm:
+        if model_config.width != 128 or not model_config.packed_qkv:
+            raise TrainingError("fuse_ffn_residual_norm requires a model width of 128 and packed QKV")
+        if torch.version.cuda is None:
+            raise TrainingError("fuse_ffn_residual_norm requires NVIDIA CUDA")
     output = resolve_new_artifact(run_dir)
     if not output.is_relative_to(shogi_data_root() / "runs" / "rshogi-dl"):
         raise ArtifactPathError("training runs must be below $SHOGI_DATA/runs/rshogi-dl")
