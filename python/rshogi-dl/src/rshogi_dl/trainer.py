@@ -78,6 +78,7 @@ class TrainerConfig:
     fuse_norm_cast: bool = False
     prefetch_input: bool = False
     compile_attention: bool = False
+    fuse_ffn_residual_norm: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -91,7 +92,7 @@ class TrainerConfig:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
         for name in (
             "fused_optimizer", "deterministic", "validation_only",
-            "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input",
+            "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -124,8 +125,9 @@ class TrainerConfig:
         for name in ("compile_ffn", "compile_attention", "prefetch_input"):
             if getattr(self, name) and self.execution not in _STEP_GRAPH_EXECUTIONS:
                 raise ValueError(f"{name} requires whole-step CUDA Graph execution")
-        if self.fuse_norm_cast and self.execution != "cuda-graph-fused-norm":
-            raise ValueError("fuse_norm_cast requires cuda-graph-fused-norm execution")
+        for name in ("fuse_norm_cast", "fuse_ffn_residual_norm"):
+            if getattr(self, name) and self.execution != "cuda-graph-fused-norm":
+                raise ValueError(f"{name} requires cuda-graph-fused-norm execution")
         if self.execution in _STEP_GRAPH_EXECUTIONS and (
             self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer
         ):
@@ -140,7 +142,7 @@ def _config_dict(config: TrainerConfig) -> dict:
     payload = asdict(config)
     if config.optimizer == "adamw":
         del payload["optimizer"], payload["muon_learning_rate"]
-    for name in ("compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input"):
+    for name in ("compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -260,7 +262,9 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
     try:
         expected = {field.name for field in fields(TrainerConfig)}
         optimizer_fields = {"optimizer", "muon_learning_rate"}
-        required = expected - optimizer_fields - {"compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input"}
+        required = expected - optimizer_fields - {
+            "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
+        }
         saved_config = payload["trainer_config"]
         if (
             type(saved_config) is not dict or not required <= saved_config.keys() <= expected
@@ -399,6 +403,11 @@ def run_training(
     resume: str | Path | None = None,
 ) -> dict:
     """有限回だけ更新し、再開状態・v1 export checkpoint・held-out report を新規 run に保存する。"""
+    if config.fuse_ffn_residual_norm:
+        if model_config.width != 128 or not model_config.packed_qkv:
+            raise TrainingError("fuse_ffn_residual_norm requires a model width of 128 and packed QKV")
+        if torch.version.cuda is None:
+            raise TrainingError("fuse_ffn_residual_norm requires NVIDIA CUDA")
     output = resolve_new_artifact(run_dir)
     if not output.is_relative_to(shogi_data_root() / "runs" / "rshogi-dl"):
         raise ArtifactPathError("training runs must be below $SHOGI_DATA/runs/rshogi-dl")
@@ -454,9 +463,12 @@ def run_training(
             execution = tuned_training_forward(
                 model, config.batch_size, fused_norm=config.execution == "cuda-graph-fused-norm",
                 cast_norm=config.fuse_norm_cast, compile_ffn=config.compile_ffn, compile_attention=config.compile_attention,
+                fuse_ffn_residual_norm=config.fuse_ffn_residual_norm,
             )
         elif config.execution == "cuda-graph-fused-norm":
-            execution = compiled_residual_forward(model, cast_output=config.fuse_norm_cast)
+            execution = compiled_residual_forward(
+                model, cast_output=config.fuse_norm_cast, fuse_ffn_residual_norm=config.fuse_ffn_residual_norm,
+            )
         else:
             execution = model
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -618,6 +630,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compile-ffn", action="store_true")
     parser.add_argument("--compile-attention", action="store_true")
     parser.add_argument("--fuse-norm-cast", action="store_true")
+    parser.add_argument("--fuse-ffn-residual-norm", action="store_true")
     parser.add_argument("--prefetch-input", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
