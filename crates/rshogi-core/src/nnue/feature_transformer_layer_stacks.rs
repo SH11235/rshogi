@@ -1828,7 +1828,7 @@ impl<'a, const L1: usize, FT: LsFeatureSpec, W: PieceWeight> PieceTransformer<'a
             }
         }
 
-        let mut board = threat_features::ThreatBoard::new(pos);
+        let mut ancestor = threat_features::ThreatAncestor::new(pos);
         let mut index = stack.current_index();
         let mut source = None;
         // 長い鎖の復元費用を制限し、駒側の Finny 選択とは切り離す。
@@ -1837,7 +1837,7 @@ impl<'a, const L1: usize, FT: LsFeatureSpec, W: PieceWeight> PieceTransformer<'a
             let Some(previous) = entry.previous.filter(|&previous| previous < index) else {
                 break;
             };
-            board.undo(&entry.dirty_piece);
+            ancestor.undo(&entry.dirty_piece);
             index = previous;
             if stack.entry_at(index).accumulator.computed_accumulation {
                 source = Some(index);
@@ -1847,8 +1847,8 @@ impl<'a, const L1: usize, FT: LsFeatureSpec, W: PieceWeight> PieceTransformer<'a
         let mut removed = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
         let mut added = std::array::from_fn(|_| IndexList::<MAX_CHANGED_THREAT_FEATURES>::new());
         let diff_ok = source.is_some()
-            && threat_features::append_threat_endpoint_diff(&board, pos, &mut removed, &mut added);
-        let refresh = [Color::Black, Color::White].map(|p| !diff_ok || !board.same_mirror(pos, p));
+            && threat_features::append_threat_endpoint_diff(&ancestor, &mut removed, &mut added);
+        let refresh = [Color::Black, Color::White].map(|p| !diff_ok || !ancestor.same_mirror(p));
         for perspective in [Color::Black, Color::White] {
             let p = perspective.index();
             if !refresh[p] {
@@ -2941,6 +2941,90 @@ mod tests {
 
     type TestSpec = HalfKaHmMergedSpec;
     type TestFt = FeatureTransformerLayerStacks<TEST_L1, TestSpec>;
+
+    #[cfg(all(
+        feature = "nnue-threat",
+        any(feature = "layerstack-arch", not(feature = "nnue-effect-bucket"))
+    ))]
+    #[test]
+    fn threat_walk_matches_full_refresh_after_undo_and_redo() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        const L1: usize = 1536;
+        let mut ft = FeatureTransformerLayerStacks::<L1, TestSpec>::for_accumulator_tests();
+        ft.has_threat = true;
+        let width = threat_width(L1);
+        for (row, weights) in ft.threat_weights.make_mut().chunks_exact_mut(width).enumerate() {
+            let seed = (row as u32).wrapping_mul(0x9e37_79b9);
+            for (lane, weight) in weights.iter_mut().enumerate() {
+                *weight = (seed.rotate_left((lane % 32) as u32) >> 24) as i8;
+            }
+        }
+        let check = |pos: &Position, stack: &AccumulatorStackLayerStacks<L1>| {
+            let mut fresh = AccumulatorLayerStacks::new();
+            ft.refresh_accumulator(pos, &mut fresh);
+            let actual = &stack.current().accumulator;
+            assert!(actual.computed_accumulation);
+            for p in 0..2 {
+                assert_eq!(actual.get_threat(p), fresh.get_threat(p), "{} p={p}", pos.to_sfen());
+            }
+        };
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1536_7aee);
+        let mut covered = [false; 4];
+        let mut batch_lengths = [false; 5];
+        for _ in 0..4 {
+            let mut pos = Position::new();
+            pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+            let mut stack = AccumulatorStackLayerStacks::new();
+            let mut cache = AccumulatorCacheLayerStacks::new();
+            ft.refresh_accumulator(&pos, &mut stack.current_mut().accumulator);
+            for batch in 0..40 {
+                // 5 手の batch は祖先を遡る上限 (4 手) を超えて全部の作り直しになるので、手の種類は数えない
+                let via_diff = batch % 5 != 4;
+                let mut played = Vec::new();
+                for _ in 0..=batch % 5 {
+                    let mut legal = MoveList::new();
+                    generate_legal_all(&pos, &mut legal);
+                    if legal.is_empty() {
+                        break;
+                    }
+                    let mv = legal[rng.random_range(0..legal.len())];
+                    if via_diff {
+                        covered[0] |= !pos.piece_on(mv.to()).is_none();
+                        covered[1] |= mv.is_promote();
+                        covered[2] |= mv.is_drop();
+                        covered[3] |= !mv.is_drop()
+                            && pos.piece_on(mv.from()).piece_type() == PieceType::King;
+                    }
+                    stack.push();
+                    stack.current_mut().dirty_piece = pos.do_move(mv, pos.gives_check(mv));
+                    played.push(mv);
+                }
+                if played.is_empty() {
+                    break;
+                }
+                batch_lengths[played.len() - 1] = true;
+                ft.ensure_accumulator(&pos, &mut stack, Some(&mut cache));
+                check(&pos, &stack);
+
+                for &mv in played.iter().rev() {
+                    pos.undo_move(mv);
+                    stack.pop();
+                }
+                check(&pos, &stack);
+                for mv in played {
+                    stack.push();
+                    stack.current_mut().dirty_piece = pos.do_move(mv, pos.gives_check(mv));
+                }
+                ft.ensure_accumulator(&pos, &mut stack, Some(&mut cache));
+                check(&pos, &stack);
+            }
+        }
+        assert_eq!(covered, [true; 4], "捕獲・成り・駒打ち・玉移動");
+        assert_eq!(batch_lengths, [true; 5]);
+    }
 
     #[cfg(feature = "nnue-psqt")]
     #[test]
