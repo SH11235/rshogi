@@ -666,6 +666,10 @@ class TrainerTest(unittest.TestCase):
                 for left, right in zip((expected, *reference_grads), (actual, *candidate_grads), strict=True):
                     relative = (left.float() - right.float()).norm() / left.float().norm().clamp_min(1e-24)
                     self.assertLessEqual(float(relative), 0.01)
+                with mock.patch.object(attention.qkv, "forward", wraps=attention.qkv.forward) as projection:
+                    fallback = packed_attention_forward(attention, tokens)
+                projection.assert_called_once()
+                torch.testing.assert_close(fallback, attention(tokens), atol=0, rtol=0)
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_ffn_residual_fusion_matches_native(self) -> None:

@@ -1,6 +1,7 @@
 """CUDA training attention for 96 tokens and packed 32-wide heads."""
 
 import torch
+from torch.nn import functional
 import triton
 import triton.language as tl
 
@@ -130,7 +131,11 @@ class _PackedAttention(torch.autograd.Function):
 def packed_attention_forward(layer, inputs):
     packed = layer.qkv(inputs)
     if not packed.is_cuda or packed.dtype != torch.bfloat16 or not packed.is_contiguous() or packed.numel() >= 2**31:
-        return layer(inputs)
-    attended = _PackedAttention.apply(packed, layer.heads)
+        query, key, value = (layer._split_heads(projection) for projection in packed.chunk(3, dim=-1))
+        attended = functional.scaled_dot_product_attention(
+            query, key, value, dropout_p=0.0, is_causal=False, scale=layer.scale,
+        )
+    else:
+        attended = _PackedAttention.apply(packed, layer.heads)
     mixed = attended.transpose(1, 2)
     return layer.output(mixed.reshape(-1, TOKEN_COUNT, layer.heads * 32))
