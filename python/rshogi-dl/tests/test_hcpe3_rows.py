@@ -1,6 +1,9 @@
 import io
+import os
 from pathlib import Path
+import signal
 import struct
+import subprocess
 import unittest
 from unittest import mock
 
@@ -10,12 +13,13 @@ from rshogi_dl.sharded import DatasetError, convert_hcpe3, convert_records, veri
 from .support import artifact_tempdir, empty_board_tokens
 
 
-def source_stream() -> bytes:
+def source_stream(*, played=13, visits=(46, 19)) -> bytes:
     return (
         b"RSDLHC01" + struct.pack("<32sHH", b"a" * 32, 0, 0)
         + struct.pack("<32sHH", b"b" * 32, 2, 1)
         + struct.pack("<H", 1) + bytes(empty_board_tokens())
-        + struct.pack("<HHHB", 13, 2, 1, 2) + struct.pack("<HHHH", 13, 46, 46, 19)
+        + struct.pack("<HHHB", played, 2, len(visits) // 2, 2)
+        + struct.pack(f"<{2 + len(visits)}H", 13, 46, *visits)
     )
 
 
@@ -39,6 +43,14 @@ class Hcpe3RowsTest(unittest.TestCase):
         with self.assertRaisesRegex(Hcpe3RowsError, "truncated"):
             list(iter_frames(io.BytesIO(source_stream()[:-1])))
 
+    def test_rejects_illegal_played_labels_and_zero_visits(self):
+        for arguments, message in (
+            ({"played": 22}, "played label is not legal"),
+            ({"visits": (13, 0, 46, 19)}, "visit counts must be positive"),
+        ):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(Hcpe3RowsError, message):
+                list(iter_frames(io.BytesIO(source_stream(**arguments))))
+
     def test_conversion_checks_encoder_and_sources_before_manifest_publication(self):
         with artifact_tempdir() as temporary:
             root = Path(temporary)
@@ -54,7 +66,7 @@ class Hcpe3RowsTest(unittest.TestCase):
                     child = popen.return_value.__enter__.return_value
                     child.stdout = io.BytesIO(source_stream())
 
-                    def finish():
+                    def finish(*, timeout):
                         if purpose == "source-change":
                             source.write_bytes(b"updated")
                         return int(purpose == "encoder-error")
@@ -69,3 +81,36 @@ class Hcpe3RowsTest(unittest.TestCase):
                         with self.assertRaisesRegex(DatasetError, "encoder exited|source changed"):
                             convert_hcpe3([source], output, encoder="tool", shard_records=1)
                         self.assertFalse((output / "manifest.json").exists())
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process signals")
+    def test_failed_conversion_reaps_an_encoder_that_ignores_termination(self):
+        with artifact_tempdir() as temporary:
+            root = Path(temporary)
+            source = root / "game.hcpe3"
+            source.write_bytes(b"immutable")
+            encoder = root / "encoder"
+            encoder.write_text(
+                "#!/usr/bin/env python3\nimport signal, sys, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "sys.stdout.buffer.write(b'INVALID!')\nsys.stdout.buffer.flush()\n"
+                "time.sleep(2)\n",
+            )
+            encoder.chmod(0o700)
+            original_popen = subprocess.Popen
+            launched = []
+
+            def launch(*args, **kwargs):
+                child = original_popen(*args, **kwargs)
+                launched.append(child)
+                return child
+
+            output = root / "dataset"
+            with (
+                mock.patch("rshogi_dl.sharded._ENCODER_EXIT_GRACE_SECONDS", 0.05),
+                mock.patch("rshogi_dl.sharded.subprocess.Popen", side_effect=launch),
+                self.assertRaisesRegex(DatasetError, "unsupported HCPE3"),
+            ):
+                convert_hcpe3([source], output, encoder=encoder, shard_records=1)
+            self.assertEqual(len(launched), 1)
+            self.assertEqual(launched[0].returncode, -signal.SIGKILL)
+            self.assertFalse((output / "manifest.json").exists())

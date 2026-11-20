@@ -30,6 +30,7 @@ MAX_SHARD_RECORDS = 65536
 MAX_BATCH_SIZE = 16384
 _MAX_METADATA_BYTES = 65536
 _MAX_ARRAY_HEADER_BYTES = 1024
+_ENCODER_EXIT_GRACE_SECONDS = 5.0
 _ARRAY_NAMES = (
     "tokens", "values", "policy_present", "legal_offsets", "legal_indices", "policy_targets"
 )
@@ -282,7 +283,10 @@ def convert_hcpe3(
                         yield validate_record(frame.to_record())
             except Hcpe3RowsError as error:
                 raise DatasetError(str(error)) from error
-            status = child.wait()
+            try:
+                status = child.wait(timeout=_ENCODER_EXIT_GRACE_SECONDS)
+            except subprocess.TimeoutExpired as error:
+                raise DatasetError("HCPE3 encoder kept running after its output closed") from error
             if status != 0:
                 raise DatasetError(f"HCPE3 encoder exited with status {status}")
 
@@ -294,6 +298,11 @@ def convert_hcpe3(
         finally:
             if child.poll() is None:
                 child.terminate()
+                try:
+                    child.wait(timeout=_ENCODER_EXIT_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
 
 
 def _conversion_output(

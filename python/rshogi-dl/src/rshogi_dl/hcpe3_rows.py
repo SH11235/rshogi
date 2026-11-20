@@ -34,17 +34,17 @@ class PolicyFrame:
     ply: int
     played: int
     tokens: bytes
-    legal_count: int
-    visit_count: int
     value: float
-    labels_and_visits: bytes
+    legal_labels: tuple[int, ...]
+    candidate_visits: tuple[int, ...]
 
     def to_record(self) -> dict:
         """教師 shard が受け付ける行へ変換する。"""
-        legal = unpack_from(f"<{self.legal_count}H", self.labels_and_visits)
-        visits = unpack_from(f"<{2 * self.visit_count}H", self.labels_and_visits, 2 * self.legal_count)
+        visits = self.candidate_visits
         policy = [[visits[index], visits[index + 1]] for index in range(0, len(visits), 2)]
-        return {"tokens": list(self.tokens), "legal_labels": list(legal), "policy": policy, "value": self.value}
+        return {
+            "tokens": list(self.tokens), "legal_labels": list(self.legal_labels), "policy": policy, "value": self.value,
+        }
 
 
 def _complete(stream: BinaryIO, data: bytes, length: int) -> bytes:
@@ -83,5 +83,11 @@ def iter_frames(stream: BinaryIO) -> Iterator[GameFrame | PolicyFrame]:
             ):
                 raise Hcpe3RowsError("invalid HCPE3 policy row")
             previous_ply = ply
-            labels = _read(stream, 2 * legal_count + 4 * visit_count)
-            yield PolicyFrame(ply, played, tokens, legal_count, visit_count, result / 2, labels)
+            payload = _read(stream, 2 * legal_count + 4 * visit_count)
+            legal = unpack_from(f"<{legal_count}H", payload)
+            visits = unpack_from(f"<{2 * visit_count}H", payload, 2 * legal_count)
+            if played not in legal:
+                raise Hcpe3RowsError("HCPE3 played label is not legal")
+            if 0 in visits[1::2]:
+                raise Hcpe3RowsError("HCPE3 policy visit counts must be positive")
+            yield PolicyFrame(ply, played, tokens, result / 2, legal, visits)
