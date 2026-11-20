@@ -127,6 +127,23 @@ class ShardedTest(unittest.TestCase):
                             self.assertEqual(left.dtype, right.dtype)
                             self.assertTrue(torch.equal(left, right), field.name)
 
+    def test_direct_compression_preserves_logical_identity_for_both_writers(self) -> None:
+        records = special_records()
+        manifest = self.convert(records)
+        expected = {**manifest, "format": sharded.ZSTD_FORMAT}
+        jsonl = self.root / "direct-jsonl"
+        self.assertEqual(
+            convert_jsonl(self.source, jsonl, shard_records=3, compression_level=3), expected,
+        )
+        stream = self.root / "direct-stream"
+        self.assertEqual(sharded.convert_records(
+            iter(records), stream, source_size=manifest["source_size"], source_name=manifest["source_name"],
+            shard_records=3, compression_level=1,
+        ), expected)
+        for directory in (jsonl, stream):
+            self.assertEqual(verify_dataset(directory), expected)
+            self.assertEqual(list(directory.glob("shard-*/*.npy")), [])
+
     def test_compressed_frames_reject_truncation_extra_data_and_corruption(self) -> None:
         self.convert(special_records())
         compressed = self.root / "compressed"

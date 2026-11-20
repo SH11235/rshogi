@@ -12,7 +12,7 @@ import sys
 from array import array
 from collections.abc import Callable, Iterable, Iterator
 from io import BytesIO
-from itertools import repeat
+from itertools import chain, repeat
 from pathlib import Path
 
 import numpy as np
@@ -139,7 +139,9 @@ def _shard_dir(root: Path, index: int) -> Path:
     return root / f"shard-{index:08d}"
 
 
-def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array], count: int) -> str:
+def _write_shard(
+    root: Path, index: int, columns: dict[str, np.ndarray | array], count: int, compressor,
+) -> str:
     directory = _shard_dir(root, index)
     directory.mkdir()
     entries = len(columns["legal_indices"])
@@ -152,6 +154,7 @@ def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array],
         "policy_targets": np.asarray(columns["policy_targets"], dtype="<f4"),
     }
     files = {}
+    blocks = {}
     for name, values in arrays.items():
         header_buffer = BytesIO()
         np.lib.format.write_array_header_1_0(header_buffer, np.lib.format.header_data_from_array_1_0(values))
@@ -159,13 +162,21 @@ def _write_shard(root: Path, index: int, columns: dict[str, np.ndarray | array],
         payload = memoryview(values).cast("B")
         digest = hashlib.sha256(header)
         digest.update(payload)
-        path = directory / f"{name}.npy"
-        with path.open("xb") as stream:
-            stream.write(header)
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
         files[name] = {"size": len(header) + payload.nbytes, "sha256": digest.hexdigest()}
+        blocks[name] = header, payload
+    if compressor is None:
+        for name, (header, payload) in blocks.items():
+            path = directory / f"{name}.npy"
+            with path.open("xb") as stream:
+                stream.write(header)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+    else:
+        _write_compressed_arrays(
+            directory / "arrays.zst", compressor,
+            sum(file["size"] for file in files.values()), chain.from_iterable(blocks.values()),
+        )
     _write_json(
         directory / "metadata.json",
         {"format": FORMAT, "records": count, "legal_entries": entries, "files": files},
@@ -182,6 +193,7 @@ def convert_jsonl(
     teacher_kind: str = "unknown",
     split: str = "unknown",
     training_status: str = "unknown",
+    compression_level: int | None = None,
 ) -> dict:
     """全行を一度検証し、最大 ``shard_records`` 行ずつ保存して最後に manifest を公開する。
 
@@ -203,7 +215,7 @@ def convert_jsonl(
 
     return _convert_records(
         iter_records(source), output, source.name, source_signature[2], shard_records,
-        teacher_kind, split, training_status, check_source,
+        teacher_kind, split, training_status, check_source, compression_level,
     )
 
 
@@ -217,6 +229,7 @@ def convert_records(
     teacher_kind: str = "unknown",
     split: str = "unknown",
     training_status: str = "unknown",
+    compression_level: int | None = None,
 ) -> dict:
     """JSONL と同じ形式の行を逐次検証し、shard へ変換する。
 
@@ -226,6 +239,7 @@ def convert_records(
     return _convert_records(
         (validate_record(record) for record in records), output, _text(source_name, "source_name"),
         _positive_int(source_size, "source_size"), shard_records, teacher_kind, split, training_status,
+        compression_level=compression_level,
     )
 
 
@@ -254,7 +268,9 @@ def _convert_records(
     split: str,
     training_status: str,
     check_source: Callable[[], None] | None = None,
+    compression_level: int | None = None,
 ) -> dict:
+    compressor = None if compression_level is None else _compressor(compression_level)
     _initialize_output(output)
     columns = {
         "tokens": np.empty((shard_records, TOKEN_COUNT), dtype=np.uint8),
@@ -284,19 +300,20 @@ def _convert_records(
         total += 1
         columns["legal_offsets"][count] = len(columns["legal_indices"])
         if count == shard_records:
-            content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count)))
+            content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count, compressor)))
             shards += 1
             count = 0
             columns["legal_indices"] = array("H")
             columns["policy_targets"] = array("f")
             columns["legal_offsets"][0] = 0
     if count:
-        content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count)))
+        content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count, compressor)))
         shards += 1
     if not total:
         raise DatasetError("cannot convert an empty dataset")
     manifest = {
         **_CONTRACT,
+        "format": FORMAT if compressor is None else ZSTD_FORMAT,
         "source_name": source_name,
         "source_size": source_size,
         "dataset_content_sha256": content_digest.hexdigest(),
@@ -492,6 +509,22 @@ def _zstandard():
     return zstandard
 
 
+def _compressor(level: int):
+    if type(level) is not int or not 1 <= level <= 19:
+        raise DatasetError("compression level must be an integer in 1..19")
+    return _zstandard().ZstdCompressor(level=level, write_checksum=True)
+
+
+def _write_compressed_arrays(path: Path, compressor, raw_size: int, blocks: Iterable[bytes | memoryview]) -> None:
+    encoder = compressor.compressobj(size=raw_size)
+    with path.open("xb") as stream:
+        for block in blocks:
+            stream.write(encoder.compress(block))
+        stream.write(encoder.flush())
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _read_compressed_arrays(path: Path, size: int, layouts: dict, files: dict, verify_hashes: bool) -> dict:
     zstandard = _zstandard()
     raw_size = sum(file["size"] for file in files.values())
@@ -530,9 +563,7 @@ def _read_compressed_arrays(path: Path, size: int, layouts: dict, files: dict, v
 
 def compress_dataset(source: str | Path, destination: str | Path, *, level: int = 3) -> dict:
     """生成済みの NPY shard を検証し、配列と論理 digest を保った圧縮 dataset を公開する。"""
-    if type(level) is not int or not 1 <= level <= 19:
-        raise DatasetError("compression level must be an integer in 1..19")
-    zstandard = _zstandard()
+    compressor = _compressor(level)
     root = _dataset_path(source, new=False)
     output = _dataset_path(destination, new=True)
     if output.is_relative_to(root):
@@ -541,7 +572,6 @@ def compress_dataset(source: str | Path, destination: str | Path, *, level: int 
     manifest = _manifest(root)
     if manifest["format"] != FORMAT:
         raise DatasetError("compression source must be an NPY dataset")
-    compressor = zstandard.ZstdCompressor(level=level, write_checksum=True)
     _initialize_output(output)
     content_digest = hashlib.sha256()
 
@@ -558,18 +588,17 @@ def compress_dataset(source: str | Path, destination: str | Path, *, level: int 
         target = _shard_dir(output, index)
         target.mkdir()
         raw_size = sum(file["size"] for file in shard.files.values())
-        encoder = compressor.compressobj(size=raw_size)
-        with (target / "arrays.zst").open("xb") as stream:
+
+        def checked_blocks():
             for name in _ARRAY_NAMES:
                 info = shard.files[name]
                 with (directory / f"{name}.npy").open("rb") as array_file:
                     payload = array_file.read(info["size"] + 1)
                 if len(payload) != info["size"] or hashlib.sha256(payload).hexdigest() != info["sha256"]:
                     raise DatasetError(f"array checksum mismatch: {name}")
-                stream.write(encoder.compress(payload))
-            stream.write(encoder.flush())
-            stream.flush()
-            os.fsync(stream.fileno())
+                yield payload
+
+        _write_compressed_arrays(target / "arrays.zst", compressor, raw_size, checked_blocks())
         with (target / "metadata.json").open("xb") as stream:
             stream.write(metadata)
             stream.flush()
@@ -722,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
     convert.add_argument("--shard-records", type=int, default=4096)
     convert.add_argument("--teacher-kind", default="unknown")
     convert.add_argument("--split", default="unknown")
+    convert.add_argument("--compression-level", type=int)
     convert.add_argument(
         "--training-status", choices=("unknown", "validation-only"), default="unknown"
     )
@@ -741,6 +771,7 @@ def main(argv: list[str] | None = None) -> int:
                 teacher_kind=args.teacher_kind,
                 split=args.split,
                 training_status=args.training_status,
+                compression_level=args.compression_level,
             )
         elif args.command == "compress":
             result = compress_dataset(args.source, args.output, level=args.level)
