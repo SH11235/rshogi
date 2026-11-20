@@ -27,6 +27,7 @@ from ._optimizers import MuonAdamW, validate_adamw_state, validate_optimizer_gro
 from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
 from ._residual_norm import compiled_residual_forward
 from ._step_graph import StepGraph
+from ._tuned_ffn import tuned_ffn_forward
 from .sharded import DatasetError, dataset_info, iter_batches
 from .trainer_checkpoint import (
     CONTRACT, ResumeError, atomic_save, capture_rng, export_checkpoint, load_resume, restore_rng,
@@ -72,6 +73,7 @@ class TrainerConfig:
     log_every: int = 100
     optimizer: str = "adamw"
     muon_learning_rate: float | None = None
+    compile_ffn: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -83,7 +85,7 @@ class TrainerConfig:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
-        for name in ("fused_optimizer", "deterministic", "validation_only"):
+        for name in ("fused_optimizer", "deterministic", "validation_only", "compile_ffn"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
         for name, choices in {
@@ -112,6 +114,8 @@ class TrainerConfig:
             raise ValueError("CPU requires fp32 and an unfused optimizer")
         if self.execution != "compile" and self.compile_mode != "default":
             raise ValueError("non-default compile_mode requires compiled execution")
+        if self.compile_ffn and self.execution not in _STEP_GRAPH_EXECUTIONS:
+            raise ValueError("compile_ffn requires whole-step CUDA Graph execution")
         if self.execution in _STEP_GRAPH_EXECUTIONS and (
             self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer
         ):
@@ -126,6 +130,8 @@ def _config_dict(config: TrainerConfig) -> dict:
     payload = asdict(config)
     if config.optimizer == "adamw":
         del payload["optimizer"], payload["muon_learning_rate"]
+    if not config.compile_ffn:
+        del payload["compile_ffn"]
     return payload
 
 
@@ -230,9 +236,13 @@ def _runtime() -> dict:
 def _validate_resume(payload, config, model_config, datasets) -> dict:
     try:
         expected = {field.name for field in fields(TrainerConfig)}
-        legacy = expected - {"optimizer", "muon_learning_rate"}
+        optimizer_fields = {"optimizer", "muon_learning_rate"}
+        required = expected - optimizer_fields - {"compile_ffn"}
         saved_config = payload["trainer_config"]
-        if type(saved_config) is not dict or set(saved_config) not in (expected, legacy):
+        if (
+            type(saved_config) is not dict or not required <= saved_config.keys() <= expected
+            or len(optimizer_fields & saved_config.keys()) == 1
+        ):
             raise ResumeError("unexpected saved trainer configuration fields")
         saved = TrainerConfig(**saved_config)
         previous_model = ModelConfig.from_dict(payload["model_config"])
@@ -417,6 +427,8 @@ def run_training(
             raise TrainingError("model parameters are non-finite")
         if config.execution == "compile":
             execution = torch.compile(model, backend="inductor", mode=config.compile_mode)
+        elif config.compile_ffn:
+            execution = tuned_ffn_forward(model, config.batch_size, fused_norm=config.execution == "cuda-graph-fused-norm")
         elif config.execution == "cuda-graph-fused-norm":
             execution = compiled_residual_forward(model)
         else:
@@ -571,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
     parser.add_argument("--execution", choices=_EXECUTIONS, default="eager")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
+    parser.add_argument("--compile-ffn", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
     parser.add_argument("--optimizer", choices=_OPTIMIZERS, default="adamw")
