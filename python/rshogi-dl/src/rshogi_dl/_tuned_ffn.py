@@ -9,7 +9,7 @@ from ._residual_norm import compiled_residual_forward
 
 
 def tuned_ffn_forward(
-    model: SquareTransformer, batch_size: int, *, fused_norm: bool,
+    model: SquareTransformer, batch_size: int, *, fused_norm: bool, cast_norm: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     tuned = torch.compile(
         FeedForward.forward, fullgraph=True, dynamic=False, mode="max-autotune-no-cudagraphs",
@@ -21,7 +21,7 @@ def tuned_ffn_forward(
         return layer(inputs)
 
     if fused_norm:
-        return compiled_residual_forward(model, run_ffn=run_ffn)
+        return compiled_residual_forward(model, run_ffn=run_ffn, cast_output=cast_norm)
 
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = model._embed(tokens)
