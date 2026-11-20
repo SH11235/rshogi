@@ -127,9 +127,9 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     return value
 
 
-def _signature(path: Path) -> tuple[int, int, int, int, int]:
-    stat = path.stat()
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+def _signature(path: Path, *, follow_symlinks: bool = True) -> tuple[int, int, int, int, int, int]:
+    info = path.stat(follow_symlinks=follow_symlinks)
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode
 
 
 def _shard_dir(root: Path, index: int) -> Path:
@@ -381,7 +381,7 @@ class _Shard:
     def check_unchanged(self) -> None:
         for path, signature in self.signatures.items():
             try:
-                unchanged = not path.is_symlink() and _signature(path) == signature
+                unchanged = _signature(path, follow_symlinks=False) == signature
             except OSError as error:
                 raise DatasetError("dataset changed while reading") from error
             if not unchanged:
