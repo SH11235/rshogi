@@ -5,7 +5,7 @@ from collections.abc import Callable
 import torch
 from torch.nn import functional
 
-from .model import FeedForward, SquareTransformer
+from .model import FeedForward, SelfAttention, SquareTransformer
 
 
 def _add_normalize(residual, update, weight, bias, epsilon):
@@ -22,6 +22,7 @@ def compiled_residual_forward(
     model: SquareTransformer,
     *,
     run_ffn: Callable[[FeedForward, torch.Tensor], torch.Tensor] | None = None,
+    run_attention: Callable[[SelfAttention, torch.Tensor], torch.Tensor] | None = None,
     cast_output: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     normalize = _add_normalize_bf16 if cast_output else _add_normalize
@@ -30,10 +31,13 @@ def compiled_residual_forward(
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = model._embed(tokens)
         for block in model.blocks:
+            attention_input = block.attention_norm(residual)
+            attention = (
+                block.attention(attention_input) if run_attention is None else run_attention(block.attention, attention_input)
+            )
             norm = block.ffn_norm
             residual, ffn_input = add_normalize(
-                residual, block.attention(block.attention_norm(residual)),
-                norm.weight, norm.bias, norm.eps,
+                residual, attention, norm.weight, norm.bias, norm.eps,
             )
             update = block.ffn(ffn_input) if run_ffn is None else run_ffn(block.ffn, ffn_input)
             residual = residual + update
