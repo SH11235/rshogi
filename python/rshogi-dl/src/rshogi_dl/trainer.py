@@ -23,7 +23,7 @@ from .data import Batch
 from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact, shogi_data_root
-from ._optimizers import MuonAdamW, validate_optimizer_groups
+from ._optimizers import MuonAdamW, validate_adamw_state, validate_optimizer_groups
 from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
 from ._residual_norm import compiled_residual_forward
 from ._step_graph import StepGraph
@@ -287,28 +287,7 @@ def _check_optimizer(optimizer, model, progress) -> None:
             if updates:
                 raise ResumeError("missing AdamW state for updated parameter")
             continue
-        if set(state) != {"step", "exp_avg", "exp_avg_sq"}:
-            raise ResumeError("unexpected AdamW state")
-        for name in ("exp_avg", "exp_avg_sq"):
-            value = state[name]
-            if (
-                not isinstance(value, torch.Tensor) or value.shape != parameter.shape
-                or value.dtype != parameter.dtype or not bool(torch.isfinite(value).all())
-            ):
-                raise ResumeError("invalid AdamW moments")
-            if name == "exp_avg_sq" and bool((value < 0).any()):
-                raise ResumeError("AdamW second moments must be non-negative")
-            if not updates and bool((value != 0).any()):
-                raise ResumeError("unupdated AdamW moments must be zero")
-        step = state["step"]
-        if (
-            not isinstance(step, torch.Tensor) or step.numel() != 1
-            or not bool(torch.isfinite(step).all())
-            or step.item() < 0 or step.item() != int(step.item())
-        ):
-            raise ResumeError("invalid AdamW step")
-        if int(step.item()) != updates:
-            raise ResumeError("AdamW step differs from recorded parameter update count")
+        validate_adamw_state(state, parameter, updates)
 
 
 def _checkpoint(path, model, optimizer, scaler, config, datasets, progress) -> None:

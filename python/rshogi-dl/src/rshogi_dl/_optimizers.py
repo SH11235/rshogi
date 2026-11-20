@@ -69,6 +69,34 @@ def _validate_momentum(state, parameter) -> None:
         raise ResumeError("invalid Muon momentum buffer")
 
 
+def validate_adamw_state(state, parameter, updates=None, *, serialized=False) -> None:
+    if type(state) is not dict or set(state) != {"step", "exp_avg", "exp_avg_sq"}:
+        raise ResumeError("unexpected AdamW state")
+    for name in ("exp_avg", "exp_avg_sq"):
+        value = state[name]
+        if (
+            not isinstance(value, torch.Tensor) or value.shape != parameter.shape
+            or value.dtype != parameter.dtype or not bool(torch.isfinite(value).all())
+        ):
+            raise ResumeError("invalid AdamW moments")
+        if name == "exp_avg_sq" and bool((value < 0).any()):
+            raise ResumeError("AdamW second moments must be non-negative")
+        if updates == 0 and bool((value != 0).any()):
+            raise ResumeError("unupdated AdamW moments must be zero")
+    step = state["step"]
+    if (
+        not isinstance(step, torch.Tensor) or step.numel() != 1
+        or not bool(torch.isfinite(step).all())
+        or (serialized and (step.ndim != 0 or step.dtype != torch.float32))
+    ):
+        raise ResumeError("invalid AdamW step")
+    value = step.item()
+    if value < 0 or value != int(value):
+        raise ResumeError("invalid AdamW step")
+    if updates is not None and int(value) != updates:
+        raise ResumeError("AdamW step differs from recorded parameter update count")
+
+
 class MuonAdamW:
     def __init__(self, model, *, lr, muon_lr, weight_decay, capturable, batched):
         groups = model.parameter_groups()
@@ -109,6 +137,8 @@ class MuonAdamW:
             raise ResumeError("hybrid optimizer parameter order differs")
         validate_optimizer_groups(saved["adamw"], self._adamw, "AdamW")
         validate_optimizer_groups(saved["muon"], self._muon, "Muon")
+        for index, state in saved["adamw"]["state"].items():
+            validate_adamw_state(state, self.adamw_parameters[index], serialized=True)
         for index, state in saved["muon"]["state"].items():
             _validate_momentum(state, self._muon_parameters[index])
         self._adamw.load_state_dict(saved["adamw"])

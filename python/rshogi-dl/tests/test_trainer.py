@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 import json
 import math
@@ -13,7 +14,7 @@ import numpy as np
 import torch
 
 from rshogi_dl.checkpoint import load_checkpoint
-from rshogi_dl._optimizers import MuonAdamW
+from rshogi_dl._optimizers import BatchedMuon, MuonAdamW
 from rshogi_dl._residual_norm import compiled_residual_forward
 from rshogi_dl.export import export_onnx
 from rshogi_dl.model import TEST_CONFIG, SquareTransformer
@@ -448,13 +449,22 @@ class TrainerTest(unittest.TestCase):
         for p in model.parameters():
             p.grad = torch.ones_like(p)
         optimizer.step()
-        saved = optimizer.state_dict()
+        saved = deepcopy(optimizer.state_dict())
         optimizer.validate_muon(1)
         names = saved["parameter_names"]
         self.assertIn("blocks.0.attention.qkv.weight", names["muon"])
         self.assertIn("policy_head.weight", names["adamw"])
         self.assertIn("token_embedding.weight", names["adamw"])
         self.assertEqual(len(names["muon"]) + len(names["adamw"]), len(tuple(model.parameters())))
+        for slot, tensor, message in (
+            ("step", lambda value: value.double(), "AdamW step"),
+            ("exp_avg", lambda value: value.half(), "AdamW moments"),
+        ):
+            corrupted = deepcopy(saved)
+            state = corrupted["adamw"]["state"][0]
+            state[slot] = tensor(state[slot])
+            with self.subTest(slot=slot), self.assertRaisesRegex(ResumeError, message):
+                optimizer.load_state_dict(corrupted)
         state = saved["muon"]["state"][0]
         state["momentum_buffer"] = state["momentum_buffer"].double()
         with self.assertRaisesRegex(ResumeError, "momentum buffer"):
@@ -475,6 +485,28 @@ class TrainerTest(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_batched_muon_resume_after_eager_fallback(self) -> None:
         self.check_cuda_graph_resume("cuda-graph", optimizer="batched-muon")
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_batched_muon_matches_stock_updates_with_weight_decay(self) -> None:
+        random = torch.Generator(device="cuda").manual_seed(91)
+        reference = [torch.nn.Parameter(torch.randn(256, 128, device="cuda", generator=random)) for _ in range(3)]
+        candidate = [torch.nn.Parameter(p.detach().clone()) for p in reference]
+        options = {"lr": 0.002, "weight_decay": 0.01, "adjust_lr_fn": "match_rms_adamw"}
+        standard, batched = torch.optim.Muon(reference, **options), BatchedMuon(candidate, **options)
+        for _ in range(3):
+            before = [p.detach().clone() for p in reference]
+            for p, q in zip(reference, candidate, strict=True):
+                with torch.no_grad():
+                    q.copy_(p)
+                p.grad = q.grad = torch.randn(p.shape, device=p.device, generator=random)
+            standard.step()
+            batched.step()
+            for initial, p, q in zip(before, reference, candidate, strict=True):
+                torch.testing.assert_close(
+                    standard.state[p]["momentum_buffer"], batched.state[q]["momentum_buffer"], rtol=0, atol=0,
+                )
+                error = torch.linalg.vector_norm(p - q) / torch.linalg.vector_norm(p - initial)
+                self.assertLessEqual(float(error.detach()), 0.025)
 
     def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw") -> None:
         records = synthetic_records(seed=29, count=19)
