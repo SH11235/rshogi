@@ -51,10 +51,10 @@ class TrainerTest(unittest.TestCase):
         )
         return output
 
-    def run_training(self, name, config=None, **options):
+    def run_training(self, name, config=None, *, model_config=TEST_CONFIG, **options):
         return run_training(
             self.train, self.validation, self.root / name,
-            TEST_CONFIG, config or self.config, **options,
+            model_config, config or self.config, **options,
         )
 
     def assert_nested_equal(self, left, right):
@@ -491,6 +491,16 @@ class TrainerTest(unittest.TestCase):
                     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         self.assertEqual(inputs, [torch.bfloat16] * len(model.blocks))
 
+    def test_ffn_residual_fusion_requires_cuda_graph_and_width_128(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cuda-graph-fused-norm"):
+            replace(self.config, fuse_ffn_residual_norm=True)
+        config = replace(
+            self.config, device="cuda", precision="bf16", fused_optimizer=True,
+            execution="cuda-graph-fused-norm", fuse_ffn_residual_norm=True,
+        )
+        with self.assertRaisesRegex(TrainingError, "model width of 128"):
+            self.run_training("wrong-model-width", config)
+
     def test_muon_config_and_checkpoint_parameter_partition(self) -> None:
         for options in ({"optimizer": "muon", "muon_learning_rate": 0.002},
                         {"muon_learning_rate": 0.002},
@@ -588,9 +598,42 @@ class TrainerTest(unittest.TestCase):
             fuse_norm_cast=True, prefetch_input=True,
         )
 
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_ffn_residual_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True, compile_attention=True,
+            fuse_norm_cast=True, prefetch_input=True, fuse_ffn_residual_norm=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=128, heads=4, ffn_width=256),
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_ffn_residual_fusion_matches_native(self) -> None:
+        from rshogi_dl._ffn_residual_norm import ffn_residual_norm
+
+        rng = torch.Generator(device="cuda").manual_seed(111)
+        shape = (7, 96, 128)
+        residual = torch.randn(shape, device="cuda", generator=rng).requires_grad_()
+        update = torch.randn(shape, device="cuda", dtype=torch.bfloat16, generator=rng).requires_grad_()
+        weight, bias = (
+            torch.randn(128, device="cuda", generator=rng).requires_grad_() for _ in range(2)
+        )
+        params = residual, update, weight, bias
+        added = residual + update
+        reference = added, torch.nn.functional.layer_norm(added, (128,), weight, bias).bfloat16()
+        candidate = ffn_residual_norm(*params, 1e-5)
+        for expected, actual in zip(reference, candidate, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        upstream = tuple(torch.randn(x.shape, dtype=x.dtype, device="cuda", generator=rng) for x in reference)
+        expected = torch.autograd.grad(reference, params, upstream)
+        actual = torch.autograd.grad(candidate, params, upstream)
+        for left, right in zip(expected, actual, strict=True):
+            err = torch.linalg.vector_norm(left.float() - right.float()) / torch.linalg.vector_norm(left.float())
+            self.assertLessEqual(float(err), 0.00015)
+
     def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *,
                                 compile_ffn: bool = False, compile_attention: bool = False, fuse_norm_cast: bool = False,
-                                prefetch_input: bool = False) -> None:
+                                prefetch_input: bool = False, fuse_ffn_residual_norm: bool = False,
+                                model_config=TEST_CONFIG) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
             record["policy"] = None if index in (10, 11, 12) else [[record["legal_labels"][0], 1]]
@@ -606,29 +649,32 @@ class TrainerTest(unittest.TestCase):
             compile_attention=compile_attention,
             fuse_norm_cast=fuse_norm_cast,
             prefetch_input=prefetch_input,
+            fuse_ffn_residual_norm=fuse_ffn_residual_norm,
         )
-        full = self.run_training("graph", config)
+        full = self.run_training("graph", config, model_config=model_config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)
         self.assertEqual(full["progress"]["optimizer_updates"], 19)
         self.assertEqual(full["progress"]["policy_optimizer_updates"], 17)
         with mock.patch("rshogi_dl._step_graph._WARMUP_STEPS", config.max_steps):
-            eager = self.run_training("padded-eager", config)
+            eager = self.run_training("padded-eager", config, model_config=model_config)
         self.assertEqual(eager["cuda_graph_replayed_steps"], 0)
         expected = load_resume(self.root / "padded-eager" / "resume-final.pt")
         for step in (4, 8):
             path = self.root / "graph" / f"resume-{step:010d}.pt"
-            resumed = self.run_training(f"graph-resumed-{step}", config, resume=path)
+            resumed = self.run_training(f"graph-resumed-{step}", config, model_config=model_config, resume=path)
             self.assertEqual(resumed["progress"], full["progress"])
             self.assertGreater(resumed["cuda_graph_replayed_steps"], 0)
         runs = ["graph", "graph-resumed-4", "graph-resumed-8"]
         if prefetch_input:
             synchronous = replace(config, prefetch_input=False)
-            self.run_training("synchronous", synchronous)
+            self.run_training("synchronous", synchronous, model_config=model_config)
             self.run_training(
-                "resume-without-prefetch", synchronous, resume=self.root / "graph/resume-0000000008.pt",
+                "resume-without-prefetch", synchronous, model_config=model_config,
+                resume=self.root / "graph/resume-0000000008.pt",
             )
             self.run_training(
-                "resume-with-prefetch", config, resume=self.root / "synchronous/resume-0000000008.pt",
+                "resume-with-prefetch", config, model_config=model_config,
+                resume=self.root / "synchronous/resume-0000000008.pt",
             )
             runs.extend(("synchronous", "resume-without-prefetch", "resume-with-prefetch"))
         for name in runs:
