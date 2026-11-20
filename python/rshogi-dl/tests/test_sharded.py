@@ -109,6 +109,45 @@ class ShardedTest(unittest.TestCase):
         self.assertEqual([batch.value.tolist() for batch in iter_batches(self.output, 2)], [[0.0, 0.5], [1.0]])
         self.assertEqual(verify_dataset(self.output)["source_records"], 3)
 
+    def test_compressed_batches_preserve_contents_and_dataset_identity(self) -> None:
+        manifest = self.convert(special_records())
+        compressed = self.root / "compressed"
+        result = sharded.compress_dataset(self.output, compressed)
+        self.assertEqual(result, {**manifest, "format": sharded.ZSTD_FORMAT})
+        self.assertEqual(verify_dataset(compressed), result)
+        for start in (0, 2, 3, 10, 11):
+            for drop_last in (False, True):
+                with self.subTest(start=start, drop_last=drop_last):
+                    expected = iter_batches(self.output, 4, start_record=start, drop_last=drop_last)
+                    actual = iter_batches(compressed, 4, start_record=start, drop_last=drop_last)
+                    for want, got in zip(expected, actual, strict=True):
+                        for field in fields(data.Batch):
+                            left = getattr(want, field.name)
+                            right = getattr(got, field.name)
+                            self.assertEqual(left.dtype, right.dtype)
+                            self.assertTrue(torch.equal(left, right), field.name)
+
+    def test_compressed_frames_reject_truncation_extra_data_and_corruption(self) -> None:
+        self.convert(special_records())
+        compressed = self.root / "compressed"
+        sharded.compress_dataset(self.output, compressed)
+        payload = compressed / "shard-00000000" / "arrays.zst"
+        original = payload.read_bytes()
+        for damaged in (original[:-1], original + original, original[:-1] + bytes([original[-1] ^ 1])):
+            payload.write_bytes(damaged)
+            with self.assertRaisesRegex(DatasetError, "compressed shard"):
+                next(iter_batches(compressed, 1))
+
+    def test_compression_does_not_publish_when_a_source_checksum_differs(self) -> None:
+        self.convert(special_records())
+        source = self.output / "shard-00000001" / "values.npy"
+        payload = source.read_bytes()
+        source.write_bytes(payload[:-1] + bytes([payload[-1] ^ 1]))
+        compressed = self.root / "compressed"
+        with self.assertRaisesRegex(DatasetError, "checksum"):
+            sharded.compress_dataset(self.output, compressed)
+        self.assertFalse((compressed / "manifest.json").exists())
+
     def test_ragged_storage_and_bounded_conversion(self) -> None:
         write_jsonl(self.source, synthetic_records(seed=0, count=1))
         record = data.validate_record({

@@ -1,2 +1,4 @@
 # テストの参照実装だけが使う。package 本体は import しない。
 cshogi==1.0.4
+# 圧縮 shard のテスト用。NPY 形式のみの運用では任意。
+zstandard==0.25.0

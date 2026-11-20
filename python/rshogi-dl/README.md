@@ -117,6 +117,20 @@ pip install --no-deps -e .
 
 ## shard の作成と読み込み
 
+生成済みの NPY shard は Zstandard で可逆圧縮できます。圧縮形式を使う環境では
+`pip install zstandard==0.25.0` または `rshogi-dl[compression]` を導入してください。
+
+```sh
+python -m rshogi_dl.sharded compress \
+  --source "$SHOGI_DATA/teachers/dl/<dataset>" \
+  --output "$SHOGI_DATA/teachers/dl/<compressed-dataset>"
+python -m rshogi_dl.sharded verify --data "$SHOGI_DATA/teachers/dl/<compressed-dataset>"
+```
+
+圧縮レベルは既定3で、`--level` で変更できます。元の shard を保持したまま別ディレクトリへ出力し、
+全 shard の変換が完了してから manifest を公開します。配列、行順、分割情報、論理内容 digest は同じです。
+学習では圧縮側のディレクトリを通常の入力として指定できます。途中再開では開始時と同じデータセットを指定してください。
+
 変換プログラムからは `rshogi_dl.sharded.convert_records` に行の iterable を渡せます。
 行は JSONL と共通の形式で、同じ検証と重みの正規化を経て shard に保存されます。
 `source_name` と `source_size` には入力の名前とバイト数を指定します。入力の安定性は呼び出し元で保証してください。
@@ -161,7 +175,7 @@ for batch in iter_batches(dataset, batch_size=128, drop_last=False):
     print(batch.tokens.shape)
 ```
 
-reader はread-only mmapを使い、shardを順番に開き、shard境界を跨いでJSONL readerと同じ`Batch`を作ります。batchの上限は16384行です。末尾は`drop_last=True`で捨てられます。保持する作業領域は1shardのmappingと1batch分で、返したbatchは次の読込で書き換わりません。並べ替えやworker・GPU転送は行わず、CPU tensorを返します。
+reader はshardを順番に開き、NPYはread-only mmap、圧縮形式は1 shardずつメモリに展開し、shard境界を跨いでJSONL readerと同じ`Batch`を作ります。batchの上限は16384行です。末尾は`drop_last=True`で捨てられます。返したbatchは次の読込で書き換わりません。並べ替えやworker・GPU転送は行わず、CPU tensorを返します。
 
 このreaderの対象はconverterが生成した、変更されないdatasetです。既定ではheader・shape・dtype・file sizeと読込中の置換・変更を検査し、全sampleの再検証や全ファイルのhash scanを毎epoch行いません。配布・コピー後に全ファイルを検査するときは`verify`、または`iter_batches(..., verify_hashes=True)`を明示してください。使用中のshardを編集・削除・置換せず、新しいdatasetを別directoryに生成してください。
 

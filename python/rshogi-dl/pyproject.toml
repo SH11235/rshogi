@@ -18,7 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 cpu = ["onnxruntime==1.24.1"]
 cuda = ["onnxruntime-gpu==1.24.1"]
-test = ["cshogi==1.0.4"]
+compression = ["zstandard==0.25.0"]
+test = ["cshogi==1.0.4", "zstandard==0.25.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
