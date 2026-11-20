@@ -1,6 +1,7 @@
 """Training forward with compiled attention residual addition and LayerNorm."""
 
 from collections.abc import Callable
+from functools import partial
 
 import torch
 from torch.nn import functional
@@ -25,6 +26,7 @@ def compiled_residual_forward(
     run_attention: Callable[[SelfAttention, torch.Tensor], torch.Tensor] | None = None,
     cast_output: bool = False,
     fuse_ffn_residual_norm: bool = False,
+    fuse_ffn_residual_norm_backward: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     normalize = _add_normalize_bf16 if cast_output else _add_normalize
     add_normalize = torch.compile(normalize, fullgraph=True, dynamic=True)
@@ -34,7 +36,10 @@ def compiled_residual_forward(
             from ._ffn_residual_norm import ffn_residual_norm
         except ImportError as error:
             raise ValueError("fuse_ffn_residual_norm requires CUDA Triton") from error
-        normalize_ffn = ffn_residual_norm
+        normalize_ffn = (
+            partial(ffn_residual_norm, fuse_backward=True)
+            if fuse_ffn_residual_norm_backward else ffn_residual_norm
+        )
 
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = model._embed(tokens)

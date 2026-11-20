@@ -516,6 +516,8 @@ class TrainerTest(unittest.TestCase):
     def test_ffn_residual_fusion_requires_supported_width_and_packed_qkv(self) -> None:
         with self.assertRaisesRegex(ValueError, "cuda-graph-fused-norm"):
             replace(self.config, fuse_ffn_residual_norm=True)
+        with self.assertRaisesRegex(ValueError, "backward requires fuse_ffn_residual_norm"):
+            replace(self.config, fuse_ffn_residual_norm_backward=True)
         config = replace(
             self.config, device="cuda", precision="bf16", fused_optimizer=True,
             execution="cuda-graph-fused-norm", fuse_ffn_residual_norm=True,
@@ -693,12 +695,21 @@ class TrainerTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_ffn_residual_fused_backward_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", fuse_norm_cast=True, fuse_ffn_residual_norm=True,
+            fuse_ffn_residual_norm_backward=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=224, heads=7, ffn_width=512, packed_qkv=True),
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_ffn_residual_fusion_matches_native(self) -> None:
         for width in (128, 192, 224, 256):
-            with self.subTest(width=width):
-                self.check_ffn_residual_fusion(width)
+            for fuse_backward in (False, True):
+                with self.subTest(width=width, fuse_backward=fuse_backward):
+                    self.check_ffn_residual_fusion(width, fuse_backward)
 
-    def check_ffn_residual_fusion(self, width: int) -> None:
+    def check_ffn_residual_fusion(self, width: int, fuse_backward: bool) -> None:
         from rshogi_dl._ffn_residual_norm import ffn_residual_norm
 
         rng = torch.Generator(device="cuda").manual_seed(111)
@@ -711,7 +722,7 @@ class TrainerTest(unittest.TestCase):
         params = residual, update, weight, bias
         added = residual + update
         reference = added, torch.nn.functional.layer_norm(added, (width,), weight, bias).bfloat16()
-        candidate = ffn_residual_norm(*params, 1e-5)
+        candidate = ffn_residual_norm(*params, 1e-5, fuse_backward=fuse_backward)
         for expected, actual in zip(reference, candidate, strict=True):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         upstream = tuple(torch.randn(x.shape, dtype=x.dtype, device="cuda", generator=rng) for x in reference)
@@ -724,6 +735,7 @@ class TrainerTest(unittest.TestCase):
     def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *,
                                 compile_ffn: bool = False, compile_attention: bool = False, fuse_norm_cast: bool = False,
                                 prefetch_input: bool = False, fuse_ffn_residual_norm: bool = False,
+                                fuse_ffn_residual_norm_backward: bool = False,
                                 fuse_packed_attention: bool = False, fuse_packed_attention_backward: bool = False,
                                 model_config=TEST_CONFIG) -> None:
         records = synthetic_records(seed=29, count=19)
@@ -742,6 +754,7 @@ class TrainerTest(unittest.TestCase):
             fuse_norm_cast=fuse_norm_cast,
             prefetch_input=prefetch_input,
             fuse_ffn_residual_norm=fuse_ffn_residual_norm,
+            fuse_ffn_residual_norm_backward=fuse_ffn_residual_norm_backward,
             fuse_packed_attention=fuse_packed_attention,
             fuse_packed_attention_backward=fuse_packed_attention_backward,
         )
@@ -758,6 +771,12 @@ class TrainerTest(unittest.TestCase):
             resumed = self.run_training(f"graph-resumed-{step}", config, model_config=model_config, resume=path)
             self.assertEqual(resumed["progress"], full["progress"])
             self.assertGreater(resumed["cuda_graph_replayed_steps"], 0)
+        if fuse_ffn_residual_norm_backward:
+            with self.assertRaisesRegex(ResumeError, "configuration differs"):
+                self.run_training(
+                    "resume-without-fused-backward", replace(config, fuse_ffn_residual_norm_backward=False),
+                    model_config=model_config, resume=self.root / "graph/resume-0000000008.pt",
+                )
         runs = ["graph", "graph-resumed-4", "graph-resumed-8"]
         if prefetch_input:
             synchronous = replace(config, prefetch_input=False)
