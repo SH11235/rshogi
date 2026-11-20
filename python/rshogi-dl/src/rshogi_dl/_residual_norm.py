@@ -13,12 +13,19 @@ def _add_normalize(residual, update, weight, bias, epsilon):
     return residual, functional.layer_norm(residual, (residual.shape[-1],), weight, bias, epsilon)
 
 
+def _add_normalize_bf16(residual, update, weight, bias, epsilon):
+    residual, normalized = _add_normalize(residual, update, weight, bias, epsilon)
+    return residual, normalized.to(torch.bfloat16)
+
+
 def compiled_residual_forward(
     model: SquareTransformer,
     *,
     run_ffn: Callable[[FeedForward, torch.Tensor], torch.Tensor] | None = None,
+    cast_output: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-    add_normalize = torch.compile(_add_normalize, fullgraph=True, dynamic=True)
+    normalize = _add_normalize_bf16 if cast_output else _add_normalize
+    add_normalize = torch.compile(normalize, fullgraph=True, dynamic=True)
 
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = model._embed(tokens)

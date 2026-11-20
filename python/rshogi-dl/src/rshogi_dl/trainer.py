@@ -74,6 +74,7 @@ class TrainerConfig:
     optimizer: str = "adamw"
     muon_learning_rate: float | None = None
     compile_ffn: bool = False
+    fuse_norm_cast: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -85,7 +86,7 @@ class TrainerConfig:
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer in {low}..{high}")
-        for name in ("fused_optimizer", "deterministic", "validation_only", "compile_ffn"):
+        for name in ("fused_optimizer", "deterministic", "validation_only", "compile_ffn", "fuse_norm_cast"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
         for name, choices in {
@@ -116,6 +117,8 @@ class TrainerConfig:
             raise ValueError("non-default compile_mode requires compiled execution")
         if self.compile_ffn and self.execution not in _STEP_GRAPH_EXECUTIONS:
             raise ValueError("compile_ffn requires whole-step CUDA Graph execution")
+        if self.fuse_norm_cast and self.execution != "cuda-graph-fused-norm":
+            raise ValueError("fuse_norm_cast requires cuda-graph-fused-norm execution")
         if self.execution in _STEP_GRAPH_EXECUTIONS and (
             self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer
         ):
@@ -132,6 +135,8 @@ def _config_dict(config: TrainerConfig) -> dict:
         del payload["optimizer"], payload["muon_learning_rate"]
     if not config.compile_ffn:
         del payload["compile_ffn"]
+    if not config.fuse_norm_cast:
+        del payload["fuse_norm_cast"]
     return payload
 
 
@@ -237,7 +242,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
     try:
         expected = {field.name for field in fields(TrainerConfig)}
         optimizer_fields = {"optimizer", "muon_learning_rate"}
-        required = expected - optimizer_fields - {"compile_ffn"}
+        required = expected - optimizer_fields - {"compile_ffn", "fuse_norm_cast"}
         saved_config = payload["trainer_config"]
         if (
             type(saved_config) is not dict or not required <= saved_config.keys() <= expected
@@ -428,9 +433,12 @@ def run_training(
         if config.execution == "compile":
             execution = torch.compile(model, backend="inductor", mode=config.compile_mode)
         elif config.compile_ffn:
-            execution = tuned_ffn_forward(model, config.batch_size, fused_norm=config.execution == "cuda-graph-fused-norm")
+            execution = tuned_ffn_forward(
+                model, config.batch_size, fused_norm=config.execution == "cuda-graph-fused-norm",
+                cast_norm=config.fuse_norm_cast,
+            )
         elif config.execution == "cuda-graph-fused-norm":
-            execution = compiled_residual_forward(model)
+            execution = compiled_residual_forward(model, cast_output=config.fuse_norm_cast)
         else:
             execution = model
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -584,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execution", choices=_EXECUTIONS, default="eager")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--compile-ffn", action="store_true")
+    parser.add_argument("--fuse-norm-cast", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
     parser.add_argument("--optimizer", choices=_OPTIMIZERS, default="adamw")

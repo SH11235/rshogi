@@ -463,6 +463,25 @@ class TrainerTest(unittest.TestCase):
                         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                 self.assertEqual(compiled_batches, [2] * (2 * len(model.blocks)))
 
+    def test_fused_norm_cast_moves_the_bf16_conversion(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cuda-graph-fused-norm"):
+            replace(self.config, fuse_norm_cast=True)
+        model = SquareTransformer(replace(TEST_CONFIG, packed_qkv=True))
+        tokens = next(iter_batches(self.train, 2)).tokens
+        inputs = []
+
+        def run_ffn(layer, value):
+            inputs.append(value.dtype)
+            return layer(value)
+
+        with mock.patch("torch.compile", side_effect=lambda operation, **kwargs: operation):
+            native = compiled_residual_forward(model)
+            cast = compiled_residual_forward(model, run_ffn=run_ffn, cast_output=True)
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                for expected, actual in zip(native(tokens), cast(tokens), strict=True):
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertEqual(inputs, [torch.bfloat16] * len(model.blocks))
+
     def test_muon_config_and_checkpoint_parameter_partition(self) -> None:
         for options in ({"optimizer": "muon", "muon_learning_rate": 0.002},
                         {"muon_learning_rate": 0.002},
@@ -540,7 +559,14 @@ class TrainerTest(unittest.TestCase):
     def test_cuda_graph_tuned_ffn_resume_after_eager_fallback(self) -> None:
         self.check_cuda_graph_resume("cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True)
 
-    def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *, compile_ffn: bool = False) -> None:
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_norm_cast_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", optimizer="batched-muon", compile_ffn=True, fuse_norm_cast=True,
+        )
+
+    def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *,
+                                compile_ffn: bool = False, fuse_norm_cast: bool = False) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
             record["policy"] = None if index in (10, 11, 12) else [[record["legal_labels"][0], 1]]
@@ -553,6 +579,7 @@ class TrainerTest(unittest.TestCase):
             attention_backend="sdpa", optimizer=optimizer,
             muon_learning_rate=0.002 if optimizer != "adamw" else None,
             compile_ffn=compile_ffn,
+            fuse_norm_cast=fuse_norm_cast,
         )
         full = self.run_training("graph", config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)
