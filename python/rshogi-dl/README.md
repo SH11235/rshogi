@@ -211,7 +211,7 @@ python -m rshogi_dl.trainer \
 | `--config` | モデルのプリセット。`initial` または `test` |
 | `--model-config` | `layers`、`width`、`heads`、`ffn_width` を含む JSON object。`"packed_qkv": true` で Q・K・V の射影を1回の線形演算にまとめる |
 | `--attention-backend` | `explicit` / `sdpa`。既定explicit |
-| `--execution` | `eager` / `compile`。既定eager。compile初回費用も学習時間に含む |
+| `--execution` | `eager` / `compile` / `cuda-graph`。既定eager。compileとgraph記録の初回費用も学習時間に含む |
 | `--compile-mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs`。既定default。非defaultはcompile時だけ指定可 |
 | `--precision` | `fp32` / `tf32` / `fp16` / `bf16`。既定fp32。FP16はGradScalerを使用 |
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
@@ -223,7 +223,9 @@ python -m rshogi_dl.trainer \
 
 順序は dataset の行順で、暗黙の shuffle はしません。epoch 末尾から先頭に戻り、一定 learning rate の AdamW で更新します。`metrics.jsonl` には loss、実 optimizer 更新数、policy head の更新数、AMP skip 数、epoch と sample cursor を記録します。policy のない batch では policy head の更新数は増えません。毎 step の全 parameter コピーや CPU への loss 同期は行いません。出力先は最初から `$SHOGI_DATA/runs/rshogi-dl/` 配下の新規 directory で、既存 run や checkpoint を上書き・削除しません。
 
-`reduce-overhead`と`max-autotune`はCUDA graphを要求するmodeで、CPUでは拒否します。この2つをCUDAで使うときは更新試行の境界をcompilerへ通知します。`default`と`max-autotune-no-cudagraphs`はCPU compileでも使えます。reportの`cudagraphs_requested`は要求した設定を示すだけで、実際にgraphが使用されたことの保証ではありません。modelだけをcompileし、lossやoptimizer更新は通常の実行経路です。
+`reduce-overhead`と`max-autotune`はCUDA graphを要求するcompile modeで、CPUでは拒否します。この2つをCUDAで使うときは更新試行の境界をcompilerへ通知します。`default`と`max-autotune-no-cudagraphs`はCPU compileでも使えます。compile時はmodelだけをcompileし、lossやoptimizer更新は通常の実行経路です。
+
+`--execution cuda-graph` は `--device cuda --precision bf16 --fused-optimizer` と併用します。全行に方策教師があり、設定batchサイズを満たし、合法手列が512以下のbatchを固定幅に揃え、準備4更新を経て学習更新全体を記録します。ほかのbatchは通常更新を使います。記録は実行開始・再開ごとに作り直します。reportの`cudagraphs_requested`は要求した設定を示し、`cuda_graph_replayed_steps`はこの実行区間でgraphを使用した更新数を示します。
 
 最終`report.json`の学習時間・samples/sはデータ供給、転送、更新と途中の記録・checkpoint保存を含み、setupと最終held-out評価は別時間です。held-outのpolicy CEはpolicyがある行、value BCEとBrierは全行で重み付き集計します。全行policyなしなら`policy_ce=null`です。有限windowを使った値はその先頭windowの評価であり、全datasetの品質を代表するとは限りません。
 
