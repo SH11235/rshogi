@@ -8,6 +8,9 @@ from .trainer_checkpoint import ResumeError
 
 
 class BatchedMuon(torch.optim.Muon):
+    def __init__(self, params, *, lr, weight_decay):
+        super().__init__(params, lr=lr, weight_decay=weight_decay, nesterov=True, adjust_lr_fn="match_rms_adamw")
+
     @torch.no_grad()
     def step(self, closure=None):
         if closure is not None:
@@ -110,10 +113,12 @@ class MuonAdamW:
         self._adamw = torch.optim.AdamW(
             self.adamw_parameters, lr=lr, weight_decay=weight_decay, fused=True, capturable=capturable,
         )
-        constructor = BatchedMuon if batched else torch.optim.Muon
-        self._muon = constructor(
-            self._muon_parameters, lr=muon_lr, weight_decay=weight_decay, adjust_lr_fn="match_rms_adamw",
-        )
+        if batched:
+            self._muon = BatchedMuon(self._muon_parameters, lr=muon_lr, weight_decay=weight_decay)
+        else:
+            self._muon = torch.optim.Muon(
+                self._muon_parameters, lr=muon_lr, weight_decay=weight_decay, adjust_lr_fn="match_rms_adamw",
+            )
 
     @property
     def state(self):

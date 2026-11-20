@@ -491,8 +491,9 @@ class TrainerTest(unittest.TestCase):
         random = torch.Generator(device="cuda").manual_seed(91)
         reference = [torch.nn.Parameter(torch.randn(256, 128, device="cuda", generator=random)) for _ in range(3)]
         candidate = [torch.nn.Parameter(p.detach().clone()) for p in reference]
-        options = {"lr": 0.002, "weight_decay": 0.01, "adjust_lr_fn": "match_rms_adamw"}
-        standard, batched = torch.optim.Muon(reference, **options), BatchedMuon(candidate, **options)
+        options = {"lr": 0.002, "weight_decay": 0.01}
+        standard = torch.optim.Muon(reference, **options, adjust_lr_fn="match_rms_adamw")
+        batched = BatchedMuon(candidate, **options)
         for _ in range(3):
             before = [p.detach().clone() for p in reference]
             for p, q in zip(reference, candidate, strict=True):
