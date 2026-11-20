@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from rshogi_dl.checkpoint import load_checkpoint
+from rshogi_dl._residual_norm import compiled_residual_forward
 from rshogi_dl.export import export_onnx
 from rshogi_dl.model import TEST_CONFIG, SquareTransformer
 from rshogi_dl.paths import ArtifactPathError
@@ -410,16 +411,38 @@ class TrainerTest(unittest.TestCase):
         self.assertFalse((self.root / "cuda").exists())
 
     def test_cuda_graph_requires_cuda_bf16_fused_eager(self) -> None:
-        options = {"device": "cuda", "precision": "bf16", "fused_optimizer": True, "execution": "cuda-graph"}
-        replace(self.config, **options)
-        for invalid in ({"device": "cpu", "precision": "fp32", "fused_optimizer": False},
-                        {"precision": "fp16"}, {"fused_optimizer": False},
-                        {"compile_mode": "reduce-overhead"}):
-            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                replace(self.config, **(options | invalid))
+        for execution in ("cuda-graph", "cuda-graph-fused-norm"):
+            options = {"device": "cuda", "precision": "bf16", "fused_optimizer": True, "execution": execution}
+            replace(self.config, **options)
+            for invalid in ({"device": "cpu", "precision": "fp32", "fused_optimizer": False},
+                            {"precision": "fp16"}, {"fused_optimizer": False},
+                            {"compile_mode": "reduce-overhead"}):
+                with self.subTest(execution=execution, invalid=invalid), self.assertRaises(ValueError):
+                    replace(self.config, **(options | invalid))
+
+    def test_residual_norm_forward_matches_native_without_compiler(self) -> None:
+        model = SquareTransformer(replace(TEST_CONFIG, packed_qkv=True))
+        tokens = next(iter_batches(self.train, 2)).tokens
+        with mock.patch("rshogi_dl._residual_norm.torch.compile", side_effect=lambda fn, **_: fn):
+            fused = compiled_residual_forward(model)
+        native_outputs, fused_outputs = model(tokens), fused(tokens)
+        for native, actual in zip(native_outputs, fused_outputs, strict=True):
+            torch.testing.assert_close(actual, native, rtol=0, atol=0)
+        parameters = tuple(model.parameters())
+        native_grads = torch.autograd.grad(sum(out.sum() for out in native_outputs), parameters)
+        fused_grads = torch.autograd.grad(sum(out.sum() for out in fused_outputs), parameters)
+        for native, actual in zip(native_grads, fused_grads, strict=True):
+            torch.testing.assert_close(actual, native)
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume("cuda-graph")
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_fused_norm_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume("cuda-graph-fused-norm")
+
+    def check_cuda_graph_resume(self, execution: str) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
             record["policy"] = None if index in (10, 11, 12) else [[record["legal_labels"][0], 1]]
@@ -428,7 +451,7 @@ class TrainerTest(unittest.TestCase):
         self.train = self.make_dataset("mixed-policy", records)
         config = replace(
             self.config, max_steps=19, batch_size=2, checkpoint_every=4, weight_decay=0.01,
-            device="cuda", precision="bf16", fused_optimizer=True, execution="cuda-graph",
+            device="cuda", precision="bf16", fused_optimizer=True, execution=execution,
             attention_backend="sdpa",
         )
         full = self.run_training("graph", config)

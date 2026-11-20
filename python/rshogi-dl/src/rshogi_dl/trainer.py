@@ -24,6 +24,7 @@ from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact, shogi_data_root
 from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
+from ._residual_norm import compiled_residual_forward
 from ._step_graph import StepGraph
 from .sharded import DatasetError, dataset_info, iter_batches
 from .trainer_checkpoint import (
@@ -35,6 +36,8 @@ from .trainer_checkpoint import (
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
 _CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
+_STEP_GRAPH_EXECUTIONS = ("cuda-graph", "cuda-graph-fused-norm")
+_EXECUTIONS = ("eager", "compile", *_STEP_GRAPH_EXECUTIONS)
 
 
 class TrainingError(RuntimeError):
@@ -81,7 +84,7 @@ class TrainerConfig:
                 raise ValueError(f"{name} must be boolean")
         for name, choices in {
             "device": ("cpu", "cuda"), "attention_backend": ATTENTION_BACKENDS,
-            "execution": ("eager", "compile", "cuda-graph"), "precision": ("fp32", "tf32", "fp16", "bf16"),
+            "execution": _EXECUTIONS, "precision": ("fp32", "tf32", "fp16", "bf16"),
             "compile_mode": COMPILE_MODES,
         }.items():
             if getattr(self, name) not in choices:
@@ -96,10 +99,10 @@ class TrainerConfig:
             raise ValueError("CPU requires fp32 and an unfused optimizer")
         if self.execution != "compile" and self.compile_mode != "default":
             raise ValueError("non-default compile_mode requires compiled execution")
-        if self.execution == "cuda-graph" and (
+        if self.execution in _STEP_GRAPH_EXECUTIONS and (
             self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer
         ):
-            raise ValueError("cuda-graph execution requires CUDA, BF16 and fused AdamW")
+            raise ValueError("CUDA Graph execution requires CUDA, BF16 and fused AdamW")
         if self.device == "cpu" and self.compile_mode in _CUDAGRAPH_MODES:
             raise ValueError("CUDA graph compile modes require a CUDA device")
         if self.checkpoint_every and self.max_steps // self.checkpoint_every > 8:
@@ -376,10 +379,11 @@ def run_training(
     initial_step = progress["step"]
     initial_updates = progress["optimizer_updates"]
     with _settings(config) as device:
+        uses_step_graph = config.execution in _STEP_GRAPH_EXECUTIONS
         model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
-            fused=config.fused_optimizer, capturable=config.execution == "cuda-graph",
+            fused=config.fused_optimizer, capturable=uses_step_graph,
         )
         scaler = torch.amp.GradScaler(
             "cuda", enabled=config.precision == "fp16",
@@ -405,10 +409,12 @@ def run_training(
                 raise ResumeError(f"invalid training state: {error}") from error
         if any(not bool(torch.isfinite(parameter).all()) for parameter in model.parameters()):
             raise TrainingError("model parameters are non-finite")
-        execution = (
-            torch.compile(model, backend="inductor", mode=config.compile_mode)
-            if config.execution == "compile" else model
-        )
+        if config.execution == "compile":
+            execution = torch.compile(model, backend="inductor", mode=config.compile_mode)
+        elif config.execution == "cuda-graph-fused-norm":
+            execution = compiled_residual_forward(model)
+        else:
+            execution = model
         output.parent.mkdir(parents=True, exist_ok=True)
         output.mkdir()
         parent = output.parent
@@ -445,7 +451,7 @@ def run_training(
 
         graph = (
             StepGraph(config.batch_size, device, update, _transfer, tuple(model.parameters()))
-            if config.execution == "cuda-graph" else None
+            if uses_step_graph else None
         )
         _sync(device)
         started = time.perf_counter()
@@ -522,7 +528,7 @@ def run_training(
         report = {
             "training_status": TRAINING_STATUS, "dataset_validation_only": config.validation_only,
             "cudagraphs_requested": (
-                config.execution == "cuda-graph"
+                uses_step_graph
                 or (config.execution == "compile" and config.compile_mode in _CUDAGRAPH_MODES)
             ),
             "trainer_config": asdict(config), "model_config": model_config.to_dict(),
@@ -534,7 +540,7 @@ def run_training(
             "validation": validation, "resume_checkpoint": "resume-final.pt",
             "export_checkpoint": "checkpoint.pt",
         }
-        if config.execution == "cuda-graph":
+        if uses_step_graph:
             report["cuda_graph_replayed_steps"] = graph_replays
         _write_json(output / "report.json", report)
         return report
@@ -557,7 +563,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--attention-backend", choices=ATTENTION_BACKENDS, default="explicit")
-    parser.add_argument("--execution", choices=("eager", "compile", "cuda-graph"), default="eager")
+    parser.add_argument("--execution", choices=_EXECUTIONS, default="eager")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
