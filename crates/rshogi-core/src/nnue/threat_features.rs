@@ -2564,6 +2564,29 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_diff_removes_one_slider_edge_when_multiple_squares_are_filled() {
+        // 上の局面を逆にたどり、飛車の利きが空いた升を 2 つ通る辺が消える側を確かめる
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/R1S1S1p2/9/9/9/4K4 b - 1").unwrap();
+        for text in ["7e6d", "5a4a", "5e4d"] {
+            let mv = pos.to_move(Move::from_usi(text).unwrap()).unwrap();
+            pos.do_move(mv, pos.gives_check(mv));
+        }
+        let mut old = Position::new();
+        old.set_sfen(&pos.to_sfen()).unwrap();
+        let dirty = ["4a5a", "6d7e", "5a4a", "4d5e"].map(|text| {
+            let mv = pos.to_move(Move::from_usi(text).unwrap()).unwrap();
+            assert!(pos.is_legal(mv));
+            pos.do_move(mv, pos.gives_check(mv))
+        });
+        let mut ancestor = ThreatAncestor::new(&pos);
+        for entry in dirty.iter().rev() {
+            ancestor.undo(entry);
+        }
+        assert_endpoint_diff_matches_full(&old, &ancestor);
+    }
+
+    #[test]
     fn endpoint_diff_skips_squares_restored_by_later_moves() {
         let mut pos = Position::new();
         pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
