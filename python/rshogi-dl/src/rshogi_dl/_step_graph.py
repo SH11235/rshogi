@@ -22,6 +22,8 @@ class StepGraph:
         update: Callable[[Batch, bool], None],
         transfer: Callable[[Batch, torch.device], Batch],
         parameters: tuple[torch.nn.Parameter, ...],
+        *,
+        prefetch_input: bool = False,
     ) -> None:
         self._batch_size = batch_size
         self._device = device
@@ -33,6 +35,8 @@ class StepGraph:
         self._graph: torch.cuda.CUDAGraph | None = None
         self._static: Batch | None = None
         self._gradients: tuple[torch.Tensor | None, ...] = ()
+        self._prefetch_input = prefetch_input
+        self._input_frames: list[tuple[dict[str, torch.Tensor], torch.cuda.Event]] = []
         self.replays = 0
 
     def try_update(self, batch: Batch) -> bool:
@@ -67,8 +71,27 @@ class StepGraph:
                 # Eager fallback can replace .grad while replay still uses its captured buffers.
                 self._gradients = tuple(parameter.grad for parameter in self._parameters)
             else:
-                for field in fields(Batch):
-                    getattr(self._static, field.name).copy_(getattr(batch, field.name))
+                self._copy_inputs(batch)
             self._graph.replay()
             self.replays += 1
         return True
+
+    def _copy_inputs(self, batch: Batch) -> None:
+        if not self._prefetch_input:
+            for field in fields(Batch):
+                getattr(self._static, field.name).copy_(getattr(batch, field.name))
+            return
+        if not self._input_frames:
+            self._input_frames = [
+                ({field.name: torch.empty_like(getattr(batch, field.name), pin_memory=True)
+                  for field in fields(Batch)}, torch.cuda.Event())
+                for _ in range(2)
+            ]
+        frame, copied = self._input_frames[(self.replays - 1) % len(self._input_frames)]
+        # A host buffer can be refilled only after its previous device copy completes.
+        if self.replays > len(self._input_frames):
+            copied.synchronize()
+        for name, host in frame.items():
+            host.copy_(getattr(batch, name))
+            getattr(self._static, name).copy_(host, non_blocking=True)
+        copied.record(torch.cuda.current_stream(self._device))
