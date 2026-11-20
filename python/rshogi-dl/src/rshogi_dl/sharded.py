@@ -1,4 +1,4 @@
-"""検証済み JSONL を ragged 配列の shard に変換し、read-only mmap で逐次読む。"""
+"""検証済み JSONL を ragged 配列の shard に変換し、逐次読む。"""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from .data import Batch, Record, RecordError, iter_records, validate_record
 from .paths import ArtifactPathError, shogi_data_root
 
 FORMAT = "rshogi-dl-sharded-v1"
+ZSTD_FORMAT = "rshogi-dl-sharded-zstd-v1"
 MAX_SHARD_RECORDS = 65536
 MAX_BATCH_SIZE = 16384
 _MAX_METADATA_BYTES = 65536
@@ -254,15 +255,7 @@ def _convert_records(
     training_status: str,
     check_source: Callable[[], None] | None = None,
 ) -> dict:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.mkdir()
-    parent = output.parent
-    data_root = shogi_data_root()
-    while parent.is_relative_to(data_root):
-        _sync_directory(parent)
-        if parent == data_root:
-            break
-        parent = parent.parent
+    _initialize_output(output)
     columns = {
         "tokens": np.empty((shard_records, TOKEN_COUNT), dtype=np.uint8),
         "values": np.empty(shard_records, dtype="<f4"),
@@ -314,6 +307,23 @@ def _convert_records(
         "split": split,
         "training_status": training_status,
     }
+    _publish_manifest(output, manifest, check_source)
+    return manifest
+
+
+def _initialize_output(output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.mkdir()
+    parent = output.parent
+    data_root = shogi_data_root()
+    while parent.is_relative_to(data_root):
+        _sync_directory(parent)
+        if parent == data_root:
+            break
+        parent = parent.parent
+
+
+def _publish_manifest(output: Path, manifest: dict, check_source: Callable[[], None] | None = None) -> None:
     temporary = output / "manifest.tmp"
     _write_json(temporary, manifest)
     _sync_directory(output)
@@ -321,7 +331,6 @@ def _convert_records(
         check_source()
     temporary.rename(output / "manifest.json")
     _sync_directory(output)
-    return manifest
 
 
 def _manifest(root: Path) -> dict:
@@ -330,8 +339,8 @@ def _manifest(root: Path) -> dict:
         *_CONTRACT, "source_name", "source_size", "dataset_content_sha256", "source_records", "shard_records", "shard_count",
         "teacher_kind", "split", "training_status",
     }
-    if set(manifest) != expected or any(
-        manifest.get(key) != value for key, value in _CONTRACT.items()
+    if set(manifest) != expected or manifest["format"] not in (FORMAT, ZSTD_FORMAT) or any(
+        manifest.get(key) != value for key, value in _CONTRACT.items() if key != "format"
     ):
         raise DatasetError("unexpected dataset manifest contract")
     digest = manifest["dataset_content_sha256"]
@@ -355,23 +364,28 @@ def _manifest(root: Path) -> dict:
     return manifest
 
 
+def _read_array_offset(stream, size: int, dtype: np.dtype, shape: tuple[int, ...]) -> int:
+    if np.lib.format.read_magic(stream) != (1, 0):
+        raise DatasetError("only converter-generated NPY 1.0 arrays are supported")
+    size_bytes = stream.read(2)
+    if len(size_bytes) != 2 or int.from_bytes(size_bytes, "little") > _MAX_ARRAY_HEADER_BYTES:
+        raise DatasetError("array header exceeds supported size")
+    stream.seek(-2, os.SEEK_CUR)
+    actual_shape, fortran_order, actual_dtype = np.lib.format.read_array_header_1_0(
+        stream, max_header_size=_MAX_ARRAY_HEADER_BYTES
+    )
+    offset = stream.tell()
+    if actual_dtype != dtype or actual_shape != shape or fortran_order:
+        raise DatasetError("unexpected array layout")
+    if size != offset + math.prod(shape) * dtype.itemsize:
+        raise DatasetError("unexpected array length")
+    return offset
+
+
 def _read_array(path: Path, dtype: np.dtype, shape: tuple[int, ...]) -> np.ndarray:
     try:
         with path.open("rb") as stream:
-            if np.lib.format.read_magic(stream) != (1, 0):
-                raise DatasetError("only converter-generated NPY 1.0 arrays are supported")
-            size_bytes = stream.read(2)
-            if len(size_bytes) != 2 or int.from_bytes(size_bytes, "little") > _MAX_ARRAY_HEADER_BYTES:
-                raise DatasetError("array header exceeds supported size")
-            stream.seek(-2, os.SEEK_CUR)
-            actual_shape, fortran_order, actual_dtype = np.lib.format.read_array_header_1_0(
-                stream, max_header_size=_MAX_ARRAY_HEADER_BYTES
-            )
-            offset = stream.tell()
-            if actual_dtype != dtype or actual_shape != shape or fortran_order:
-                raise DatasetError("unexpected array layout")
-            if os.fstat(stream.fileno()).st_size != offset + math.prod(shape) * dtype.itemsize:
-                raise DatasetError("unexpected array length")
+            offset = _read_array_offset(stream, os.fstat(stream.fileno()).st_size, dtype, shape)
         if not all(shape):
             return np.empty(shape, dtype=dtype)
         return np.memmap(path, dtype=dtype, mode="r", offset=offset, shape=shape, order="C")
@@ -416,27 +430,44 @@ class _Shard:
             root / "manifest.json": _signature(root / "manifest.json"),
             directory / "metadata.json": _signature(directory / "metadata.json"),
         }
-        self.arrays = {}
+        files = metadata["files"]
         for name, (dtype, shape) in layouts.items():
-            path = directory / f"{name}.npy"
-            info = metadata["files"][name]
+            info = files[name]
+            array_bytes = math.prod(shape) * dtype.itemsize
             if (
                 type(info) is not dict
                 or set(info) != {"size", "sha256"}
                 or type(info["size"]) is not int
+                or not array_bytes + 10 <= info["size"] <= array_bytes + 10 + _MAX_ARRAY_HEADER_BYTES
                 or type(info["sha256"]) is not str
                 or len(info["sha256"]) != 64
                 or any(char not in "0123456789abcdef" for char in info["sha256"])
             ):
                 raise DatasetError("unexpected array metadata")
-            if path.is_symlink() or not path.is_file() or path.stat().st_size != info["size"]:
-                raise DatasetError(f"missing or resized array: {name}")
-            self.signatures[path] = _signature(path)
-            values = _read_array(path, dtype, shape)
+        self.files = files
+        if manifest["format"] == ZSTD_FORMAT:
+            payload = directory / "arrays.zst"
+            try:
+                signature = _signature(payload, follow_symlinks=False)
+            except OSError as error:
+                raise DatasetError("missing compressed shard") from error
+            if not stat.S_ISREG(signature[-1]):
+                raise DatasetError("missing or symlinked compressed shard")
+            self.signatures[payload] = signature
+            self.arrays = _read_compressed_arrays(payload, signature[2], layouts, files, verify_hashes)
+        else:
+            self.arrays = {}
+            for name, (dtype, shape) in layouts.items():
+                path = directory / f"{name}.npy"
+                info = files[name]
+                if path.is_symlink() or not path.is_file() or path.stat().st_size != info["size"]:
+                    raise DatasetError(f"missing or resized array: {name}")
+                self.signatures[path] = _signature(path)
+                self.arrays[name] = _read_array(path, dtype, shape)
+                if verify_hashes and _hash(path) != info["sha256"]:
+                    raise DatasetError(f"array checksum mismatch: {name}")
+        for values in self.arrays.values():
             values.flags.writeable = False
-            self.arrays[name] = values
-            if verify_hashes and _hash(path) != info["sha256"]:
-                raise DatasetError(f"array checksum mismatch: {name}")
         offsets = self.arrays["legal_offsets"]
         if offsets[0] != 0 or offsets[-1] != entries:
             raise DatasetError("invalid legal offset endpoints")
@@ -451,6 +482,105 @@ class _Shard:
                 raise DatasetError("dataset changed while reading") from error
             if not unchanged:
                 raise DatasetError("dataset changed while reading")
+
+
+def _zstandard():
+    try:
+        import zstandard
+    except ImportError as error:
+        raise DatasetError("compressed shards require the rshogi-dl[compression] extra") from error
+    return zstandard
+
+
+def _read_compressed_arrays(path: Path, size: int, layouts: dict, files: dict, verify_hashes: bool) -> dict:
+    zstandard = _zstandard()
+    raw_size = sum(file["size"] for file in files.values())
+    if not 0 < size <= raw_size * 2:
+        raise DatasetError("unexpected compressed shard length")
+    try:
+        with path.open("rb") as stream:
+            encoded = stream.read(size + 1)
+        if len(encoded) != size:
+            raise DatasetError("compressed shard changed while reading")
+        frame = zstandard.get_frame_parameters(encoded)
+        if frame.content_size != raw_size or frame.window_size > raw_size or not frame.has_checksum:
+            raise DatasetError("unexpected compressed shard frame")
+        raw = memoryview(zstandard.ZstdDecompressor().decompress(
+            encoded, max_output_size=raw_size, allow_extra_data=False,
+        ))
+        if len(raw) != raw_size:
+            raise DatasetError("unexpected decompressed shard length")
+    except zstandard.ZstdError as error:
+        raise DatasetError(f"invalid compressed shard: {path.name}") from error
+    arrays = {}
+    cursor = 0
+    for name, (dtype, shape) in layouts.items():
+        info = files[name]
+        column = raw[cursor:cursor + info["size"]]
+        cursor += len(column)
+        try:
+            offset = _read_array_offset(BytesIO(column[:10 + _MAX_ARRAY_HEADER_BYTES]), len(column), dtype, shape)
+            if verify_hashes and hashlib.sha256(column).hexdigest() != info["sha256"]:
+                raise DatasetError(f"array checksum mismatch: {name}")
+            arrays[name] = np.frombuffer(column[offset:], dtype=dtype).reshape(shape)
+        except (ValueError, EOFError) as error:
+            raise DatasetError(f"invalid array {name}: {error}") from error
+    return arrays
+
+
+def compress_dataset(source: str | Path, destination: str | Path, *, level: int = 3) -> dict:
+    """生成済みの NPY shard を検証し、配列と論理 digest を保った圧縮 dataset を公開する。"""
+    if type(level) is not int or not 1 <= level <= 19:
+        raise DatasetError("compression level must be an integer in 1..19")
+    zstandard = _zstandard()
+    root = _dataset_path(source, new=False)
+    output = _dataset_path(destination, new=True)
+    if output.is_relative_to(root):
+        raise ArtifactPathError("compressed dataset must be outside the source dataset")
+    signature = _signature(root / "manifest.json")
+    manifest = _manifest(root)
+    if manifest["format"] != FORMAT:
+        raise DatasetError("compression source must be an NPY dataset")
+    compressor = zstandard.ZstdCompressor(level=level, write_checksum=True)
+    _initialize_output(output)
+    content_digest = hashlib.sha256()
+
+    def check_source() -> None:
+        if _signature(root / "manifest.json") != signature:
+            raise DatasetError("dataset manifest changed during compression")
+
+    for index in range(manifest["shard_count"]):
+        check_source()
+        shard = _Shard(root, index, manifest, verify_hashes=False)
+        directory = _shard_dir(root, index)
+        metadata = (directory / "metadata.json").read_bytes()
+        content_digest.update(hashlib.sha256(metadata).digest())
+        target = _shard_dir(output, index)
+        target.mkdir()
+        raw_size = sum(file["size"] for file in shard.files.values())
+        encoder = compressor.compressobj(size=raw_size)
+        with (target / "arrays.zst").open("xb") as stream:
+            for name in _ARRAY_NAMES:
+                info = shard.files[name]
+                with (directory / f"{name}.npy").open("rb") as array_file:
+                    payload = array_file.read(info["size"] + 1)
+                if len(payload) != info["size"] or hashlib.sha256(payload).hexdigest() != info["sha256"]:
+                    raise DatasetError(f"array checksum mismatch: {name}")
+                stream.write(encoder.compress(payload))
+            stream.write(encoder.flush())
+            stream.flush()
+            os.fsync(stream.fileno())
+        with (target / "metadata.json").open("xb") as stream:
+            stream.write(metadata)
+            stream.flush()
+            os.fsync(stream.fileno())
+        shard.check_unchanged()
+        _sync_directory(target)
+    if content_digest.hexdigest() != manifest["dataset_content_sha256"]:
+        raise DatasetError("dataset content digest mismatch")
+    result = {**manifest, "format": ZSTD_FORMAT}
+    _publish_manifest(output, result, check_source)
+    return result
 
 
 def _scratch(size: int) -> dict[str, np.ndarray]:
@@ -583,7 +713,7 @@ def verify_dataset(path: str | Path) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="JSONL → ragged numpy shards、または生成済み dataset の checksum 検査。"
+        description="教師 shard の生成・可逆圧縮・checksum 検査。"
     )
     commands = parser.add_subparsers(dest="command", required=True)
     convert = commands.add_parser("convert")
@@ -595,6 +725,10 @@ def main(argv: list[str] | None = None) -> int:
     convert.add_argument(
         "--training-status", choices=("unknown", "validation-only"), default="unknown"
     )
+    compress = commands.add_parser("compress")
+    compress.add_argument("--source", required=True)
+    compress.add_argument("--output", required=True)
+    compress.add_argument("--level", type=int, default=3)
     verify = commands.add_parser("verify")
     verify.add_argument("--data", required=True)
     args = parser.parse_args(argv)
@@ -608,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
                 split=args.split,
                 training_status=args.training_status,
             )
+        elif args.command == "compress":
+            result = compress_dataset(args.source, args.output, level=args.level)
         else:
             result = verify_dataset(args.data)
         print(json.dumps(result, ensure_ascii=False, allow_nan=False, sort_keys=True))

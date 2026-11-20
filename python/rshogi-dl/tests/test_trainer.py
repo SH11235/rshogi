@@ -20,7 +20,7 @@ from rshogi_dl._tuned_blocks import tuned_training_forward
 from rshogi_dl.export import export_onnx
 from rshogi_dl.model import TEST_CONFIG, FeedForward, SelfAttention, SquareTransformer
 from rshogi_dl.paths import ArtifactPathError
-from rshogi_dl.sharded import DatasetError, convert_jsonl, dataset_info, iter_batches
+from rshogi_dl.sharded import DatasetError, compress_dataset, convert_jsonl, dataset_info, iter_batches
 from rshogi_dl.trainer import TrainerConfig, TrainingError, evaluate, run_training
 from rshogi_dl.trainer_checkpoint import (
     ResumeError, capture_rng, load_resume, restore_rng, validate_scaler_state,
@@ -96,6 +96,28 @@ class TrainerTest(unittest.TestCase):
         canonical = load_checkpoint(self.root / "resumed" / "checkpoint.pt")
         self.assert_nested_equal(canonical.model.state_dict(), resumed["model_state"])
         self.assertEqual(canonical.training_status, "validation-only")
+
+    def test_compressed_input_resume_matches_npy_training(self) -> None:
+        train = self.root / "compressed-train"
+        validation = self.root / "compressed-validation"
+        compress_dataset(self.train, train)
+        compress_dataset(self.validation, validation)
+        self.run_training("npy-full")
+        run_training(train, validation, self.root / "compressed-full", TEST_CONFIG, self.config)
+        first = self.root / "compressed-first"
+        run_training(train, validation, first, TEST_CONFIG, replace(self.config, max_steps=3))
+        checkpoint = first / "resume-final.pt"
+        run_training(train, validation, self.root / "compressed-resumed", TEST_CONFIG, self.config,
+                     resume=checkpoint)
+        npy = load_resume(self.root / "npy-full" / "resume-final.pt")
+        for name in ("compressed-full", "compressed-resumed"):
+            result = load_resume(self.root / name / "resume-final.pt")
+            for field in ("model_state", "optimizer_state", "scaler_state", "progress", "rng"):
+                self.assert_nested_equal(npy[field], result[field])
+        with self.assertRaises(ResumeError):
+            self.run_training("switch-format", resume=checkpoint)
+        with self.assertRaisesRegex(TrainingError, "distinct datasets"):
+            run_training(self.train, train, self.root / "duplicate", TEST_CONFIG, self.config)
 
     def test_packed_projection_resume_and_export(self) -> None:
         packed = replace(TEST_CONFIG, packed_qkv=True)
