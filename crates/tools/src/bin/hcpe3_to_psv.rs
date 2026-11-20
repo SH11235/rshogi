@@ -9,21 +9,12 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
-use rshogi_core::position::Position;
 use tools::common::dedup::collect_input_paths;
 use tools::game_record_psv::{ConversionStats, ConvertedGame, GameRecordFormat};
+use tools::hcpe3::{read_game_header, read_move_header, skip_candidates, start_position};
 use tools::packed_sfen::{
     PackedSfenValue, hcpe_move16_to_psv, hcpe_result_to_stm, move_to_hcpe_move16, pack_position,
 };
-
-/// hcp(32) + moveNum(u16) + result(u8) + opponent(u8)。
-const GAME_HEADER_SIZE: usize = 36;
-/// selectedMove16(u16) + eval(i16) + candidateNum(u16)。
-const MOVE_INFO_SIZE: usize = 6;
-/// move16(u16) + visitNum(u16)。
-const MOVE_VISITS_SIZE: u64 = 4;
-/// result の下位 2 bit が勝敗。上位 bit は千日手・入玉・最大手数などの終局理由。
-const RESULT_MASK: u8 = 0b11;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -68,71 +59,25 @@ fn invalid_data(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-/// 対局の境界での EOF だけを正常終了とし、途中で切れた対局は `UnexpectedEof` にする。
-fn read_header(reader: &mut impl Read) -> io::Result<Option<[u8; GAME_HEADER_SIZE]>> {
-    let mut header = [0u8; GAME_HEADER_SIZE];
-    let mut filled = 0;
-    while filled < GAME_HEADER_SIZE {
-        match reader.read(&mut header[filled..]) {
-            Ok(0) if filled == 0 => return Ok(None),
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!("対局ヘッダが途中で終わっています ({filled}/{GAME_HEADER_SIZE} byte)"),
-                ));
-            }
-            Ok(n) => filled += n,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(Some(header))
-}
-
 fn read_game(reader: &mut impl Read) -> io::Result<Option<Hcpe3Game>> {
-    let Some(header) = read_header(reader)? else {
+    let Some(header) = read_game_header(reader)? else {
         return Ok(None);
     };
-    let mut hcp = [0u8; 32];
-    hcp.copy_from_slice(&header[..32]);
-    let move_num = u16::from_le_bytes([header[32], header[33]]);
-    let result = header[34] & RESULT_MASK;
-    if result > 2 {
-        return Err(invalid_data(format!("不正な勝敗値: result={:#04x}", header[34])));
-    }
-
-    let mut moves = Vec::with_capacity(usize::from(move_num));
-    for _ in 0..move_num {
-        let mut info = [0u8; MOVE_INFO_SIZE];
-        reader.read_exact(&mut info)?;
-        let candidate_num = u16::from_le_bytes([info[4], info[5]]);
-        // 候補手の訪問数 (policy) は PSV に載せないので読み飛ばす。
-        let skip = u64::from(candidate_num) * MOVE_VISITS_SIZE;
-        let skipped = io::copy(&mut reader.by_ref().take(skip), &mut io::sink())?;
-        if skipped != skip {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "候補手の列が途中で終わっています",
-            ));
-        }
+    let mut moves = Vec::with_capacity(usize::from(header.move_count));
+    for _ in 0..header.move_count {
+        let record = read_move_header(reader)?;
+        skip_candidates(reader, record.candidate_count)?;
         moves.push(MoveRecord {
-            move16: u16::from_le_bytes([info[0], info[1]]),
-            eval: i16::from_le_bytes([info[2], info[3]]),
-            searched: candidate_num > 0,
+            move16: record.move16,
+            eval: record.eval,
+            searched: record.candidate_count > 0,
         });
     }
-    Ok(Some(Hcpe3Game { hcp, result, moves }))
-}
-
-fn start_position(hcp: &[u8; 32]) -> io::Result<Position> {
-    let sfen = tools::packed_sfen::unpack_hcp(hcp)
-        .map_err(|error| invalid_data(format!("HuffmanCodedPos デコード失敗: {error}")))?;
-    // hcpe3 は開始局面の手数を持たないので、開始局面を 1 手目とする。
-    let sfen = format!("{} 1", sfen.rsplit_once(' ').map(|(prefix, _)| prefix).unwrap_or(&sfen));
-    let mut pos = Position::new();
-    pos.set_sfen(&sfen)
-        .map_err(|error| invalid_data(format!("SFEN パース失敗 ({sfen}): {error}")))?;
-    Ok(pos)
+    Ok(Some(Hcpe3Game {
+        hcp: header.hcp,
+        result: header.result,
+        moves,
+    }))
 }
 
 fn convert_game(game: &Hcpe3Game) -> io::Result<ConvertedGame> {
@@ -233,6 +178,7 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rshogi_core::position::Position;
     use rshogi_core::types::Move;
     use std::io::Cursor;
     use tempfile::TempDir;

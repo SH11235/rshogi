@@ -8,6 +8,7 @@ import json
 import math
 import os
 import stat
+import subprocess
 import sys
 from array import array
 from collections.abc import Callable, Iterable, Iterator
@@ -20,6 +21,7 @@ import torch
 
 from .contract import INPUT_FORMAT, MAX_LEGAL_LABELS, POLICY_FORMAT, TOKEN_COUNT, VALUE_FORMAT
 from .data import Batch, Record, RecordError, iter_records, validate_record
+from .hcpe3_rows import Hcpe3RowsError, PolicyFrame, iter_frames
 from .paths import ArtifactPathError, shogi_data_root
 
 FORMAT = "rshogi-dl-sharded-v1"
@@ -241,6 +243,57 @@ def convert_records(
         _positive_int(source_size, "source_size"), shard_records, teacher_kind, split, training_status,
         compression_level=compression_level,
     )
+
+
+def convert_hcpe3(
+    sources: Iterable[str | Path],
+    destination: str | Path,
+    *,
+    encoder: str | Path,
+    shard_records: int = 4096,
+    teacher_kind: str = "unknown",
+    split: str = "unknown",
+    training_status: str = "unknown",
+    compression_level: int | None = None,
+) -> dict:
+    """HCPE3 を順番に再生し、訪問数付き学習行から教師 shard を作る。"""
+    output = _conversion_output(destination, shard_records, teacher_kind, split, training_status)
+    paths = tuple(Path(path).resolve(strict=True) for path in sources)
+    signatures = {path: _signature(path) for path in paths}
+    if not paths or any(not stat.S_ISREG(sig[-1]) for sig in signatures.values()):
+        raise DatasetError("HCPE3 sources must be immutable regular files")
+    size = _positive_int(sum(signatures[path][2] for path in paths), "source_size")
+    name = _text(", ".join(path.name for path in paths), "source_name")
+
+    def check_sources() -> None:
+        try:
+            unchanged = all(_signature(path) == signature for path, signature in signatures.items())
+        except OSError as error:
+            raise DatasetError("HCPE3 source changed during conversion") from error
+        if not unchanged:
+            raise DatasetError("HCPE3 source changed during conversion")
+
+    with subprocess.Popen([encoder, *paths], stdout=subprocess.PIPE) as child:
+        def records():
+            assert child.stdout is not None
+            try:
+                for frame in iter_frames(child.stdout):
+                    if isinstance(frame, PolicyFrame):
+                        yield validate_record(frame.to_record())
+            except Hcpe3RowsError as error:
+                raise DatasetError(str(error)) from error
+            status = child.wait()
+            if status != 0:
+                raise DatasetError(f"HCPE3 encoder exited with status {status}")
+
+        try:
+            return _convert_records(
+                records(), output, name, size, shard_records, teacher_kind, split, training_status,
+                check_sources, compression_level,
+            )
+        finally:
+            if child.poll() is None:
+                child.terminate()
 
 
 def _conversion_output(
@@ -747,14 +800,18 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     convert = commands.add_parser("convert")
     convert.add_argument("--source", required=True)
-    convert.add_argument("--output", required=True)
-    convert.add_argument("--shard-records", type=int, default=4096)
-    convert.add_argument("--teacher-kind", default="unknown")
-    convert.add_argument("--split", default="unknown")
-    convert.add_argument("--compression-level", type=int)
-    convert.add_argument(
-        "--training-status", choices=("unknown", "validation-only"), default="unknown"
-    )
+    hcpe3 = commands.add_parser("convert-hcpe3")
+    hcpe3.add_argument("--source", action="append", required=True)
+    hcpe3.add_argument("--encoder", required=True)
+    for conversion in (convert, hcpe3):
+        conversion.add_argument("--output", required=True)
+        conversion.add_argument("--shard-records", type=int, default=4096)
+        conversion.add_argument("--teacher-kind", default="unknown")
+        conversion.add_argument("--split", default="unknown")
+        conversion.add_argument("--compression-level", type=int)
+        conversion.add_argument(
+            "--training-status", choices=("unknown", "validation-only"), default="unknown"
+        )
     compress = commands.add_parser("compress")
     compress.add_argument("--source", required=True)
     compress.add_argument("--output", required=True)
@@ -763,16 +820,18 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--data", required=True)
     args = parser.parse_args(argv)
     try:
-        if args.command == "convert":
-            result = convert_jsonl(
-                args.source,
-                args.output,
+        if args.command in ("convert", "convert-hcpe3"):
+            options = dict(
                 shard_records=args.shard_records,
                 teacher_kind=args.teacher_kind,
                 split=args.split,
                 training_status=args.training_status,
                 compression_level=args.compression_level,
             )
+            if args.command == "convert":
+                result = convert_jsonl(args.source, args.output, **options)
+            else:
+                result = convert_hcpe3(args.source, args.output, encoder=args.encoder, **options)
         elif args.command == "compress":
             result = compress_dataset(args.source, args.output, level=args.level)
         else:
