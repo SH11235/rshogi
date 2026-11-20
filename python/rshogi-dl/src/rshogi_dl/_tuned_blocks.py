@@ -11,6 +11,7 @@ from ._residual_norm import compiled_residual_forward
 def tuned_training_forward(
     model: SquareTransformer, batch_size: int, *, fused_norm: bool, cast_norm: bool = False,
     compile_ffn: bool = False, compile_attention: bool = False, fuse_ffn_residual_norm: bool = False,
+    fuse_packed_attention: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     def select_forward(operation, enabled):
         if not enabled:
@@ -25,7 +26,16 @@ def tuned_training_forward(
         return execute
 
     run_ffn = select_forward(FeedForward.forward, compile_ffn)
-    run_attention = select_forward(SelfAttention.forward, compile_attention)
+    attention_operation = SelfAttention.forward
+    if fuse_packed_attention:
+        try:
+            from ._packed_attention import packed_attention_forward
+        except ImportError as error:
+            raise ValueError("fuse_packed_attention requires CUDA Triton") from error
+        attention_operation = packed_attention_forward
+    run_attention = select_forward(attention_operation, compile_attention)
+    if run_attention is None and fuse_packed_attention:
+        run_attention = attention_operation
 
     if fused_norm:
         return compiled_residual_forward(
