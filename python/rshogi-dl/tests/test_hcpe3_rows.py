@@ -43,6 +43,21 @@ class Hcpe3RowsTest(unittest.TestCase):
         with self.assertRaisesRegex(Hcpe3RowsError, "truncated"):
             list(iter_frames(io.BytesIO(source_stream()[:-1])))
 
+    def test_many_source_names_fit_the_manifest(self):
+        with artifact_tempdir() as temporary:
+            root = Path(temporary)
+            sources = [root / f"games-{index:04}.hcpe3" for index in range(20)]
+            for source in sources:
+                source.write_bytes(b"game")
+            with mock.patch("rshogi_dl.sharded.subprocess.Popen") as popen:
+                child = popen.return_value.__enter__.return_value
+                child.stdout = io.BytesIO(source_stream())
+                child.wait.return_value = child.poll.return_value = 0
+                result = convert_hcpe3(sources, root / "dataset", encoder="tool")
+                popen.assert_called_once_with(["tool", *sources], stdout=subprocess.PIPE)
+            self.assertEqual(result["source_name"], "HCPE3 (20 files)")
+            self.assertEqual(result["source_size"], 80)
+
     def test_rejects_illegal_played_labels_and_zero_visits(self):
         for arguments, message in (
             ({"played": 22}, "played label is not legal"),

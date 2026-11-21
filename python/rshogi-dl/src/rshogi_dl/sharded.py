@@ -264,7 +264,9 @@ def convert_hcpe3(
     if not paths or any(not stat.S_ISREG(sig[-1]) for sig in signatures.values()):
         raise DatasetError("HCPE3 sources must be immutable regular files")
     size = _positive_int(sum(signatures[path][2] for path in paths), "source_size")
-    name = _text(", ".join(path.name for path in paths), "source_name")
+    name = ", ".join(path.name for path in paths)
+    if len(name) > 256:
+        name = f"HCPE3 ({len(paths)} files)"
 
     def check_sources() -> None:
         try:
