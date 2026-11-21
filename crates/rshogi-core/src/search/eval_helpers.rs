@@ -270,6 +270,32 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
         inc_stat_by_depth!(st, tt_hit_by_depth, depth);
     }
 
+    // 宣言勝ち判定（置換表カットオフより前に、置換表の内容によらず毎回実施する）
+    // - 置換表の値・手は宣言判定を経ずに書かれうる（宣言できる局面を Root として探索した後の
+    //   エントリ、ルールを切り替える前のエントリ、キーの一部だけが一致する別局面のエントリ）。
+    //   それらで宣言を隠さないよう、カットオフより前に判定する。玉が敵陣にいない局面は
+    //   declaration_win の先頭で弾かれるので負担は小さい。
+    // - Root は engine.rs 側で root_moves に宣言手を加える形で扱うため、ここでは実施しない。
+    // - 王手の有無は問わない（点数法は declaration_win 内で王手を弾く。トライルールは
+    //   王手回避しながら入玉する手がありうる）。
+    // - 置換表には書き込まない。Move::WIN を ttMove として保持すると probe 側の
+    //   扱いが煩雑になるため、訪れるたびに判定する。
+    // - excludedMove は条件へ入れない。singular 検証探索は「ttMove 以外の最善」を
+    //   問うもので、宣言勝ち（Move::WIN）は ttMove と別の手なので詰みスコアを返すのが正しい。
+    //   ただしトライルールでは宣言手が通常の玉移動で、それ自体が除外手になりうるため、
+    //   宣言手 == excludedMove のときだけは採用しない。
+    if NT != NodeType::Root as u8 {
+        let decl_move = pos.declaration_win(ctx.entering_king_rule);
+        if decl_move.is_some() && decl_move != excluded_move {
+            // 1手詰めと同様、次の node で指し手がなくなって詰むという解釈
+            return ProbeOutcome::Cutoff {
+                value: Value::mate_in(ply + 1),
+                tt_move: Move::NONE,
+                tt_capture: false,
+            };
+        }
+    }
+
     // TTカットオフ条件
     // - fail-high時は tt_data.depth > depth を要求（fail-low時は >= depth）
     // - depth<=5ではcutNodeとTT値の方向が一致する場合のみカットオフ許可
@@ -375,31 +401,6 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
             // 1手詰めカットオフではヒストリ更新不要（mate_moveは特殊）
             return ProbeOutcome::Cutoff {
                 value,
-                tt_move: Move::NONE,
-                tt_capture: false,
-            };
-        }
-    }
-
-    // 宣言勝ち判定（置換表の手の有無によらず毎回実施する）
-    // - 置換表に手があっても宣言判定済みとは限らない。静止探索は宣言判定をせずに
-    //   手を書き込むので、それを理由に省くと宣言できる局面を通常の手で評価してしまう。
-    //   玉が敵陣にいない局面は declaration_win の先頭で弾かれるので負担は小さい。
-    // - Root は engine.rs 側で root_moves に宣言手を加える形で扱うため、ここでは実施しない。
-    // - 王手の有無は問わない（点数法は declaration_win 内で王手を弾く。トライルールは
-    //   王手回避しながら入玉する手がありうる）。
-    // - 置換表には書き込まない。Move::WIN を ttMove として保持すると probe 側の
-    //   扱いが煩雑になるため、再訪問時に再判定する。
-    // - excludedMove は条件へ入れない。singular 検証探索は「ttMove 以外の最善」を
-    //   問うもので、宣言勝ち（Move::WIN）は ttMove と別の手なので詰みスコアを返すのが正しい。
-    //   ただしトライルールでは宣言手が通常の玉移動で、それ自体が除外手になりうるため、
-    //   宣言手 == excludedMove のときだけは採用しない。
-    if NT != NodeType::Root as u8 {
-        let decl_move = pos.declaration_win(ctx.entering_king_rule);
-        if decl_move.is_some() && decl_move != excluded_move {
-            // 1手詰めと同様、次の node で指し手がなくなって詰むという解釈
-            return ProbeOutcome::Cutoff {
-                value: Value::mate_in(ply + 1),
                 tt_move: Move::NONE,
                 tt_capture: false,
             };
