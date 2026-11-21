@@ -276,6 +276,7 @@ python -m rshogi_dl.trainer \
 | `--fuse-packed-attention` | 連結QKV・ヘッド幅32・SDPAで、CUDA Graph学習のAttentionを融合する。NVIDIA CUDAとTritonが必要。既定は無効 |
 | `--fuse-packed-attention-backward` | Q・K・Vの勾配でAttentionのスコアを共有します。`--fuse-packed-attention`、Ampere以降、ブロック当たり64 KiB以上の共有メモリが必要。既定は無効 |
 | `--tile-packed-attention-backward` | 逆伝播で96トークンを64行と32行に分けてパディングを省きます。`--fuse-packed-attention-backward` が必要。丸め順が変わる場合があります。既定は無効 |
+| `--tile-packed-attention-forward` | 順伝播で96トークンを64行と32行に分けてパディングを省きます。`--fuse-packed-attention` が必要。丸め順が変わる場合があります。既定は無効 |
 | `--prefetch-input` | CUDA Graph学習で次のbatchをCPUで先読みし、固定バッファ経由でGPUへ非同期転送する。既定は無効 |
 | `--precision` | `fp32` / `tf32` / `fp16` / `bf16`。既定fp32。FP16はGradScalerを使用 |
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
