@@ -903,6 +903,10 @@ class TrainerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fuse_ffn_expand_bias_gradient requires compile_ffn and fuse_norm_cast"):
             replace(self.config, fuse_ffn_expand_bias_gradient=True)
 
+    def test_ffn_gelu_derivative_lookup_requires_fused_bias_gradient(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lookup_ffn_gelu_derivative requires fuse_ffn_expand_bias_gradient"):
+            replace(self.config, lookup_ffn_gelu_derivative=True)
+
     def test_ffn_expand_bias_gradient_rejects_unsupported_shape(self) -> None:
         config = replace(
             self.config, device="cuda", precision="bf16", fused_optimizer=True, batch_size=256,
@@ -942,6 +946,37 @@ class TrainerTest(unittest.TestCase):
             self.packed_qkv_bias_config(), compile_ffn=True, fuse_ffn_expand_bias_gradient=True,
         )
         self.check_fixed_shape_graph_resume(config, model, "fuse_ffn_expand_bias_gradient")
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_ffn_gelu_derivative_lookup_matches_inline(self) -> None:
+        from rshogi_dl._ffn_expand_bias import _gelu_bias_gradient, gelu_derivative_table
+
+        device = torch.device("cuda")
+        rng = torch.Generator(device=device).manual_seed(629)
+        inputs = torch.randn((24_576, 256), device=device, dtype=torch.bfloat16, generator=rng)
+        weights = torch.randn((256, 1024), device=device, dtype=torch.bfloat16, generator=rng) * 0.04
+        bits = torch.arange(65_536, device=device, dtype=torch.int32).to(torch.int16)
+        values = bits.view(torch.bfloat16).repeat(384).reshape(24_576, 1024)
+        derivative_table = gelu_derivative_table(device)
+        results = []
+        for table in (None, derivative_table):
+            gradient = torch.empty_like(values)
+            partials = torch.empty((192, 1024), device=device)
+            _gelu_bias_gradient[(192 * 16,)](
+                inputs, weights, values, gradient, partials, table, num_warps=4, num_stages=3,
+            )
+            results.append((gradient, partials))
+        for inline, lookup in zip(*results, strict=True):
+            torch.testing.assert_close(lookup, inline, rtol=0, atol=0, equal_nan=True)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_ffn_gelu_derivative_lookup_resume(self) -> None:
+        model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=1024, packed_qkv=True)
+        config = replace(
+            self.packed_qkv_bias_config(), compile_ffn=True, fuse_ffn_expand_bias_gradient=True,
+            lookup_ffn_gelu_derivative=True,
+        )
+        self.check_fixed_shape_graph_resume(config, model, "lookup_ffn_gelu_derivative")
 
     def test_final_residual_norm_rejects_unsupported_width(self) -> None:
         config = replace(
