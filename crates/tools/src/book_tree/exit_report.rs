@@ -1,4 +1,4 @@
-//! 版ごとの出口の報告。walk の止まりと伝播の切れ目を分類し、有望な出口は一本道の決着を確かめる。
+//! 版ごとの出口の報告。walk の止まりと伝播の切れ目を分類し、出口から元データの一本道を辿る。
 
 use super::audit::reject_same_file;
 use super::master_index::MasterIndex;
@@ -15,6 +15,7 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -150,6 +151,17 @@ struct Item {
     moves: Option<Vec<String>>,
     /// 分類ごとの追加の欄 (名前, 値)。
     extra: Vec<(&'static str, String)>,
+    settle: Option<SettleLine>,
+}
+
+impl Item {
+    fn continuation_root(&self, cp: u32) -> Option<&SettleLine> {
+        self.settle.as_ref().filter(|line| {
+            matches!(line.end, SettleEnd::Missing { has_rows: false })
+                && line.plies > 0
+                && !line.end.settled(line.value_black, cp)
+        })
+    }
 }
 
 pub(super) fn read_tsv(
@@ -297,7 +309,7 @@ fn last_own_value(
 }
 
 enum SettleEnd {
-    Missing,
+    Missing { has_rows: bool },
     Repetition,
     Mate,
     Max,
@@ -306,7 +318,7 @@ enum SettleEnd {
 impl SettleEnd {
     fn name(&self) -> &'static str {
         match self {
-            Self::Missing => "missing",
+            Self::Missing { .. } => "missing",
             Self::Repetition => "repetition",
             Self::Mate => "mate",
             Self::Max => "max",
@@ -315,11 +327,18 @@ impl SettleEnd {
 
     fn settled(&self, value: Option<i64>, cp: u32) -> bool {
         match self {
-            Self::Missing => value.is_some_and(|v| v.unsigned_abs() >= u64::from(cp)),
+            Self::Missing { .. } => value.is_some_and(|v| v.unsigned_abs() >= u64::from(cp)),
             Self::Repetition | Self::Mate => true,
             Self::Max => false,
         }
     }
+}
+
+struct SettleLine {
+    key: String,
+    plies: usize,
+    value_black: Option<i64>,
+    end: SettleEnd,
 }
 
 fn settle_line(
@@ -327,17 +346,18 @@ fn settle_line(
     mut key: String,
     fallback: Option<i64>,
     max_plies: usize,
-) -> Result<(usize, Option<i64>, SettleEnd)> {
+) -> Result<SettleLine> {
     let mut seen = BTreeSet::new();
     let mut value_black = None;
     for plies in 0..max_plies {
         let rows = index.rows(&key)?;
         if rows.is_empty() {
-            return Ok((
+            return Ok(SettleLine {
+                key,
                 plies,
-                if plies == 0 { fallback } else { value_black },
-                SettleEnd::Missing,
-            ));
+                value_black: if plies == 0 { fallback } else { value_black },
+                end: SettleEnd::Missing { has_rows: false },
+            });
         }
         let next = if let Some(main) = rows.iter().find(|r| r.get("role") == "main") {
             Some((main, mean_eval(main.get("evals"))?))
@@ -352,7 +372,12 @@ fn settle_line(
             best
         };
         let Some((row, value)) = next else {
-            return Ok((plies, value_black, SettleEnd::Missing));
+            return Ok(SettleLine {
+                key,
+                plies,
+                value_black,
+                end: SettleEnd::Missing { has_rows: true },
+            });
         };
         let sign = if side(&key) == "b" { 1 } else { -1 };
         value_black = value.map(|v| i64::from(v) * sign);
@@ -360,16 +385,31 @@ fn settle_line(
         let next_key = strip_ply(&child.to_sfen()).to_owned();
         seen.insert(key);
         if seen.contains(&next_key) {
-            return Ok((plies + 1, value_black, SettleEnd::Repetition));
+            return Ok(SettleLine {
+                key: next_key,
+                plies: plies + 1,
+                value_black,
+                end: SettleEnd::Repetition,
+            });
         }
         let mut legal = MoveList::new();
         generate_legal_all(&child, &mut legal);
         if legal.is_empty() {
-            return Ok((plies + 1, value_black, SettleEnd::Mate));
+            return Ok(SettleLine {
+                key: next_key,
+                plies: plies + 1,
+                value_black,
+                end: SettleEnd::Mate,
+            });
         }
         key = next_key;
     }
-    Ok((max_plies, value_black, SettleEnd::Max))
+    Ok(SettleLine {
+        key,
+        plies: max_plies,
+        value_black,
+        end: SettleEnd::Max,
+    })
 }
 
 /// 何手目が 1 以上で、局面の手番と偶奇が合う (先手番は奇数、後手番は偶数) ことを確かめる。
@@ -457,6 +497,7 @@ fn rejoin_rows(args: &ExitReportArgs, path: &Path) -> Result<Vec<RejoinRow>> {
                 kind: String::new(),
                 key: key.to_owned(),
                 moves: None,
+                settle: None,
                 extra: vec![
                     ("move", column(row, "move")?.to_owned()),
                     ("expected_black", column(row, "expected_black")?.to_owned()),
@@ -543,29 +584,24 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     })?;
     for (side, stop, weight, key, moves, keys, end_key) in walk_rows {
         let (value, kind) = last_own_value(&mut index, &moves, &keys, &side)?;
-        let mut extra = vec![("stop", stop.clone())];
-        let class = if stop == "own" {
-            Class::Shallow
-        } else if kind.starts_with("tree") {
-            if args.meets(value, &side) == Some(true) {
-                ensure!(key == end_key, "walk の key が手順の末尾の局面と合いません: {key}");
-                let (plies, terminal, end) =
-                    settle_line(&mut index, end_key, value, args.settle_max_plies)?;
-                extra.extend([
-                    ("settle_plies", plies.to_string()),
-                    ("settle_black", fmt_value(terminal)),
-                    ("settle_end", end.name().to_owned()),
-                ]);
-                if end.settled(terminal, args.settle_cp) {
-                    Class::Good
-                } else {
-                    Class::Unsettled
-                }
-            } else {
+        let settle = if stop == "own" {
+            None
+        } else {
+            ensure!(key == end_key, "walk の key が手順の末尾の局面と合いません: {key}");
+            Some(settle_line(&mut index, end_key, value, args.settle_max_plies)?)
+        };
+        let class = if let Some(line) = &settle {
+            if !kind.starts_with("tree") {
+                Class::Weak
+            } else if args.meets(value, &side) != Some(true) {
                 Class::Bad
+            } else if line.end.settled(line.value_black, args.settle_cp) {
+                Class::Good
+            } else {
+                Class::Unsettled
             }
         } else {
-            Class::Weak
+            Class::Shallow
         };
         items.push(Item {
             class,
@@ -576,7 +612,8 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             kind,
             key,
             moves: Some(moves),
-            extra,
+            extra: vec![("stop", stop)],
+            settle,
         });
     }
     if let (Some(bridge), Some(audit)) = (&args.bridge, &args.bridge_audit) {
@@ -641,6 +678,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
                 key: key.to_owned(),
                 moves: Some(path.clone()),
                 extra,
+                settle: None,
             });
             Ok(())
         })?;
@@ -662,31 +700,26 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     items.sort_by(|a, b| a.class.cmp(&b.class).then_with(|| b.weight.total_cmp(&a.weight)));
     let queued = |item: &Item| -> Result<String> {
         let rejoin = item.extra.iter().find(|(k, v)| *k == "rejoin" && !v.is_empty());
-        let dig = (item.class == Class::Rejoin).then(|| enqueue_root(item)).transpose()?;
+        let dig = (item.class == Class::Rejoin).then(|| dig_root(item)).transpose()?;
         let roots: Vec<&str> = std::iter::once(item.key.as_str())
             .chain(rejoin.map(|(_, v)| v.as_str()))
             .chain(dig.as_deref())
             .collect();
-        let mut text = queued_text(&states, &roots, &item.side);
-        let ids: BTreeSet<_> = roots
-            .iter()
-            .filter_map(|key| excluded.get(&(key.to_string(), item.side.clone())))
-            .flat_map(|ids| ids.iter())
-            .collect();
-        if !ids.is_empty() {
-            if text == "なし" {
-                text.clear();
-            } else {
-                text.push_str("; ");
-            }
-            text.push_str(
-                &ids.into_iter()
-                    .map(|id| format!("{id} (exclude-queue)"))
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            );
+        let mut entries = queued_entries(&states, &excluded, &roots, &item.side, "");
+        if let Some(line) = item.continuation_root(args.settle_cp) {
+            entries.extend(queued_entries(
+                &states,
+                &excluded,
+                &[&line.key],
+                &item.side,
+                " (続きの先)",
+            ));
         }
-        Ok(text)
+        Ok(if entries.is_empty() {
+            "なし".into()
+        } else {
+            entries.join("; ")
+        })
     };
     let enqueue = args
         .enqueue_out
@@ -719,6 +752,17 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             b"class\tside\tturn\tmove_number\tweight\tvalue_black\tkind\ttarget\tqueued\tkey\tmoves\textra\n"
                 .to_vec();
         for item in &items {
+            let mut extra =
+                item.extra.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(";");
+            if let Some(line) = &item.settle {
+                write!(
+                    extra,
+                    ";settle_plies={};settle_black={};settle_end={}",
+                    line.plies,
+                    fmt_value(line.value_black),
+                    line.end.name()
+                )?;
+            }
             writeln!(
                 bytes,
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -733,7 +777,7 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
                 queued(item)?,
                 item.key,
                 item.moves.as_ref().map_or_else(|| UNKNOWN.to_owned(), |m| m.join(" ")),
-                item.extra.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(";")
+                extra
             )?;
         }
         write_atomic(path, &bytes)?;
@@ -746,11 +790,12 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         crate::common::io::write_atomic(path, &super::refutation::format_queue(&lines)?)?;
         writeln!(
             stdout,
-            "積み荷: 出力={} 照合除外={} 手数なし={} まとめた行={}",
+            "積み荷: 出力={} 照合除外={} 手数なし={} まとめた行={} 続きへ移した行={}",
             lines.len(),
             counts.excluded,
             counts.no_number,
-            counts.merged
+            counts.merged,
+            counts.shifted
         )?;
     }
     Ok(())
@@ -765,16 +810,12 @@ fn extra<'a>(item: &'a Item, name: &str) -> Result<&'a str> {
         .with_context(|| format!("{} の {name} がありません", item.class.name()))
 }
 
-fn enqueue_root(item: &Item) -> Result<String> {
-    if item.class == Class::Rejoin {
-        child(&item.key, extra(item, "move")?)
-    } else {
-        Ok(item.key.clone())
-    }
+fn dig_root(item: &Item) -> Result<String> {
+    child(&item.key, extra(item, "move")?)
 }
 
-fn has_tree(states: &[TreeState], key: &str, own: &str) -> bool {
-    states.iter().any(|t| t.depth >= 1 && t.own == own && t.roots.contains(key))
+fn tree_matches(tree: &TreeState, roots: &[&str], own: &str) -> bool {
+    tree.depth >= 1 && tree.own == own && roots.iter().any(|key| tree.roots.contains(*key))
 }
 
 #[derive(Default)]
@@ -782,6 +823,7 @@ struct EnqueueCounts {
     excluded: usize,
     no_number: usize,
     merged: usize,
+    shifted: usize,
 }
 
 fn queue_lines(
@@ -797,9 +839,27 @@ fn queue_lines(
     let mut positions = BTreeMap::new();
     let mut groups: Vec<(String, &Item, Vec<&Item>)> = Vec::new();
     for item in picked {
-        let key = enqueue_root(item)?;
         let own = &item.side;
-        if has_tree(states, &key, own) || excluded.contains_key(&(key.clone(), own.clone())) {
+        let key = if let Some(line) = item.continuation_root(args.settle_cp) {
+            counts.shifted += 1;
+            // 出口の根の木が読み終わっていれば、続きの先は別の局面なので積む。読みかけ・未着手・hold は同じ線を読むので除く。
+            if states
+                .iter()
+                .any(|tree| tree.state != "DONE" && tree_matches(tree, &[&item.key], own))
+                || excluded.contains_key(&(item.key.clone(), own.clone()))
+            {
+                counts.excluded += 1;
+                continue;
+            }
+            line.key.clone()
+        } else if item.class == Class::Rejoin {
+            dig_root(item)?
+        } else {
+            item.key.clone()
+        };
+        if states.iter().any(|tree| tree_matches(tree, &[&key], own))
+            || excluded.contains_key(&(key.clone(), own.clone()))
+        {
             counts.excluded += 1;
             continue;
         }
@@ -823,9 +883,10 @@ fn queue_lines(
             .iter()
             .filter_map(|item| {
                 item.move_number.map(|n| {
-                    n.checked_add(usize::from(item.class == Class::Rejoin))
-                        .context("根の手数が大きすぎます")
-                        .map(|root| (n, root))
+                    let offset = item
+                        .continuation_root(args.settle_cp)
+                        .map_or(usize::from(item.class == Class::Rejoin), |line| line.plies);
+                    n.checked_add(offset).context("根の手数が大きすぎます").map(|root| (n, root))
                 })
             })
             .collect::<Result<Vec<_>>>()?
@@ -860,6 +921,15 @@ fn queue_lines(
         counts.merged += members.len() - 1;
         sizes.push(members.len());
         let number = first.move_number.unwrap_or(number);
+        let continuation = members
+            .iter()
+            .find_map(|item| {
+                let line = item.continuation_root(args.settle_cp)?;
+                Some((line.plies, item.move_number?))
+            })
+            .map_or_else(String::new, |(plies, exit_number)| {
+                format!("、元データの続き {plies} 手の先 ({exit_number} 手目の出口から)")
+            });
         lines.push(Line {
             group: None,
             id: queue_id(&args.tag, root_number, &key, own),
@@ -872,7 +942,7 @@ fn queue_lines(
             game,
             opts: args.queue_opts(),
             memo: Some(format!(
-                "{} {}手目 先手値={} 出所={} 重み={:.5}",
+                "{} {}手目 先手値={} 出所={} 重み={:.5}{continuation}",
                 first.class.name(),
                 number,
                 first.value_black.map_or_else(|| "不明".to_owned(), |v| fmt_value(Some(v))),
@@ -938,18 +1008,27 @@ fn position_text(item: &Item) -> String {
     format!("{} {number} 手目", side_name(side(&item.key)))
 }
 
-/// 同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`)。bw の木は両方の側に数える。
-fn queued_text(states: &[TreeState], roots: &[&str], own: &str) -> String {
+fn queued_entries(
+    states: &[TreeState],
+    excluded: &Excluded,
+    roots: &[&str],
+    own: &str,
+    suffix: &str,
+) -> Vec<String> {
     let found: BTreeSet<_> = states
         .iter()
-        .filter(|t| t.own == own && t.depth >= 1 && roots.iter().any(|key| t.roots.contains(*key)))
-        .map(|t| format!("{} ({}, {})", t.id, t.box_name, t.state))
+        .filter(|tree| tree_matches(tree, roots, own))
+        .map(|t| format!("{} ({}, {}){suffix}", t.id, t.box_name, t.state))
         .collect();
-    if found.is_empty() {
-        "なし".into()
-    } else {
-        found.into_iter().collect::<Vec<_>>().join("; ")
-    }
+    let ids: BTreeSet<_> = roots
+        .iter()
+        .filter_map(|key| excluded.get(&(key.to_string(), own.to_owned())))
+        .flatten()
+        .collect();
+    found
+        .into_iter()
+        .chain(ids.into_iter().map(|id| format!("{id} (exclude-queue){suffix}")))
+        .collect()
 }
 
 pub(super) fn kif(moves: &[String]) -> Result<String> {
@@ -981,7 +1060,7 @@ fn markdown(
     writeln!(out, "# {title}\n")?;
     writeln!(
         out,
-        "重み = その出口に来る割合。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。出口の局面 = 止まった局面の手番と何手目で、かっこの中は手番が RAMU か相手か (own の止まりは RAMU の手番、out・rare は相手の手番、max は辿りの上限の手数による)。値 = RAMU が最後に指した定跡の手の値 (プラス = 先手良し)、出所 = 元データの value_kind。目標: 先手 {:+} 以上・後手 {:+} 未満。受付 = 同じ根・同じ側の段 1 以上の木 (id、台、状態)。\n",
+        "重み = その出口に来る割合。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。出口の局面 = 止まった局面の手番と何手目で、かっこの中は手番が RAMU か相手か (own の止まりは RAMU の手番、out・rare は相手の手番、max は辿りの上限の手数による)。値 = RAMU が最後に指した定跡の手の値 (プラス = 先手良し)、出所 = 元データの value_kind。目標: 先手 {:+} 以上・後手 {:+} 未満。受付 = 同じ根・同じ側の段 1 以上の木 (id、台、状態)。根を移す行は出口と続きの先の両方を照合し、続きの先の一致には「(続きの先)」を添えます。\n",
         args.target_black, args.target_white
     )?;
     let exits = |out: &mut Vec<u8>, title: &str, note: &str, class: Class| -> Result<()> {
@@ -996,12 +1075,17 @@ fn markdown(
                 continue;
             }
             writeln!(out, "### RAMU が{}\n", side_name(side))?;
+            let (heading, separator) = if class == Class::Shallow {
+                ("", "")
+            } else {
+                (" 元データの続き (手数 / 末端の先手値 / 理由) |", "---|")
+            };
             writeln!(
                 out,
-                "| 出口の局面 | 重み | 値 | 出所 | 目標 | 受付 | 手順 |\n|---|---:|---:|---|---|---|---|"
+                "| 出口の局面 | 重み | 値 | 出所 | 目標 | 受付 | 手順 |{heading}\n|---|---:|---:|---|---|---|---|{separator}"
             )?;
             for r in rows {
-                writeln!(
+                write!(
                     out,
                     "| {} ({}) | {:.3} | {} | {} | {} | {} | {} |",
                     position_text(r),
@@ -1017,6 +1101,12 @@ fn markdown(
                     queued(r)?,
                     moves_text(r)?
                 )?;
+                if let Some(line) = &r.settle {
+                    let value =
+                        line.value_black.map_or_else(|| "不明".to_owned(), |v| fmt_value(Some(v)));
+                    write!(out, " {} 手 / {value} / {} |", line.plies, line.end.name())?;
+                }
+                writeln!(out)?;
             }
             writeln!(out)?;
         }

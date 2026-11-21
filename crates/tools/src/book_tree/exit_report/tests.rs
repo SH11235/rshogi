@@ -131,7 +131,11 @@ fn walk_stops_are_classified_by_last_own_value_and_kind() {
         assert!(md.contains(line), "{line}\n{md}");
     }
     assert_eq!(rows[0][11], "stop=rare;settle_plies=0;settle_black=+60;settle_end=missing");
-    assert_eq!(rows[1][11], "stop=out");
+    assert_eq!(rows[1][11], "stop=out;settle_plies=0;settle_black=+40;settle_end=missing");
+    assert_eq!(rows[2][11], "stop=own");
+    assert_eq!(rows[3][11], "stop=max;settle_plies=0;settle_black=-10;settle_end=missing");
+    assert!(md.contains("▲７六歩 △３四歩 ▲２六歩 △８四歩 | 0 手 / +40 / missing |"));
+    assert!(md.contains("▲２六歩 △８四歩 ▲７六歩 | 0 手 / -10 / missing |"));
     assert!(md.contains("## 1b. 決着していない出口"));
     assert!(md.contains("一本道が ±300 まで通っていない"));
 }
@@ -202,9 +206,10 @@ fn settle_counts_mate_on_the_last_allowed_move() {
     let master = d.path().join("moves.tsv");
     std::fs::write(&master, format_master(&[row])).unwrap();
     let mut index = MasterIndex::open(&master, &Schema::default()).unwrap();
-    let (plies, value, end) = settle_line(&mut index, key.to_owned(), None, 1).unwrap();
-    assert_eq!((plies, value, end.name()), (1, Some(60), "mate"));
-    assert!(end.settled(value, 300));
+    let line = settle_line(&mut index, key.to_owned(), None, 1).unwrap();
+    assert_eq!((line.plies, line.value_black, line.end.name()), (1, Some(60), "mate"));
+    assert_eq!(line.key, child(key, "G*5b").unwrap());
+    assert!(line.end.settled(line.value_black, 300));
 }
 
 #[test]
@@ -279,6 +284,7 @@ fn turn_and_move_number_parity_is_enforced() {
         key,
         moves,
         extra: Vec::new(),
+        settle: None,
     };
     let black = key_after(&["7g7f", "3c3d"]);
     let white = key_after(&["7g7f"]);
@@ -926,6 +932,242 @@ fn read_queue(path: &Path) -> Vec<Line> {
 }
 
 #[test]
+fn enqueue_bad_continuation_moves_to_missing_root_only_when_unsettled() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let exit = ["7g7f"];
+    let terminal = ["7g7f", "3c3d", "2g2f"];
+    let exit_key = key_after(&exit);
+    let terminal_key = key_after(&terminal);
+    let walk = [walk_line("b", "out", 0.02, &exit)];
+    for (value, has_record, moved) in [
+        ("299", false, true),
+        ("300", false, false),
+        ("-300", false, false),
+        ("299", true, false),
+    ] {
+        let mut rows = vec![
+            master_row(&[], "7g7f", "40", "tree:3"),
+            master_row(&exit, "3c3d", "20", "single"),
+            master_row(&["7g7f", "3c3d"], "2g2f", value, "single"),
+        ];
+        if has_record {
+            let mut record = master_row(&terminal, "8c8d", "10", "single");
+            record.set("role", "record".into());
+            rows.push(record);
+        }
+        let (stdout, table, md) =
+            run_report_with_rows(&d, &walk, &["--enqueue-out", out.to_str().unwrap()], &rows);
+        let (key, number) = if moved {
+            (&terminal_key, 4)
+        } else {
+            (&exit_key, 2)
+        };
+        let lines = read_queue(&out);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].root, format!("sfen {key} {number}"));
+        assert_eq!(lines[0].id, queue_id("exit-report", number, key, "b"));
+        assert_eq!(lines[0].own, "b");
+        assert_eq!(lines[0].priority, 4);
+        assert_eq!(lines[0].memo.as_ref().unwrap().contains("元データの続き 2 手の先"), moved);
+        assert!(stdout.contains(&format!("続きへ移した行={}", usize::from(moved))), "{stdout}");
+        let row: Vec<_> = table.lines().nth(1).unwrap().split('\t').collect();
+        let black = fmt_value(Some(value.parse().unwrap()));
+        assert_eq!((row[0], row[3], row[9], row[10]), ("bad", "2", exit_key.as_str(), "7g7f"));
+        assert_eq!(
+            row[11],
+            format!("stop=out;settle_plies=2;settle_black={black};settle_end=missing")
+        );
+        assert!(md.contains(&format!("▲７六歩 | 2 手 / {black} / missing |")), "{md}");
+    }
+}
+
+#[test]
+fn enqueue_weak_continuation_uses_exit_value_and_memo_keeps_its_exit_number() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let terminal = ["7g7f", "3c3d", "2g2f"];
+    let walk = [
+        walk_line("b", "out", 0.02, &terminal[..1]),
+        walk_line("b", "out", 0.02, &terminal),
+    ];
+    let rows = [
+        master_row(&[], "7g7f", "60", "single"),
+        master_row(&terminal[..1], "3c3d", "20", "single"),
+        master_row(&terminal[..2], "2g2f", "20", "tree:2"),
+    ];
+    let options = ["--enqueue-out", out.to_str().unwrap()];
+    let (_, table, _) = run_report_with_rows(&d, &walk[..1], &options, &rows);
+    assert!(table.lines().nth(1).unwrap().starts_with("weak\t"));
+    let root = format!("sfen {} 4", key_after(&terminal));
+    let lines = read_queue(&out);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].root, root);
+    assert_eq!(lines[0].priority, 7);
+
+    let (stdout, _, _) = run_report_with_rows(&d, &walk, &options, &rows);
+    let lines = read_queue(&out);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].root, root);
+    assert!(stdout.contains("まとめた行=1"), "{stdout}");
+    let memo = lines[0].memo.as_deref().unwrap();
+    assert!(memo.starts_with("bad 4手目 "), "{memo}");
+    assert!(memo.contains("元データの続き 2 手の先 (2 手目の出口から)"), "{memo}");
+}
+
+#[test]
+fn enqueue_continuation_checks_box_at_both_roots_and_reports_without_enqueue() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let terminal = ["7g7f", "3c3d"];
+    let walk = [walk_line("b", "out", 0.02, &terminal[..1])];
+    let rows = [
+        master_row(&[], "7g7f", "40", "tree:3"),
+        master_row(&terminal[..1], "3c3d", "20", "single"),
+    ];
+    let box_dir = d.path().join("box");
+    std::fs::create_dir_all(box_dir.join("enqueue")).unwrap();
+    std::fs::create_dir_all(box_dir.join("fetch")).unwrap();
+    let box_spec = format!("A={}", box_dir.display());
+    let exit_root = format!("sfen {} 2", key_after(&terminal[..1]));
+    let continuation_root = format!("sfen {} 3", key_after(&terminal));
+    for (finished, include_continuation, expected_excluded) in [
+        (false, true, 1),
+        (false, false, 1),
+        (true, false, 0),
+        (true, true, 1),
+    ] {
+        let exit = serde_json::json!({"id": "exit", "root": exit_root, "own": "b", "depth": 2});
+        let mut text = format!("{exit}\n");
+        let mut progress = vec![serde_json::json!({
+            "id": "exit", "own": "b", "priority": 100, "hold": false,
+            "finished": finished, "read": if finished { 92 } else { 40 }, "requested": 92
+        })];
+        if include_continuation {
+            let continuation = serde_json::json!({
+                "id": "next", "root": continuation_root, "own": "b", "depth": 2
+            });
+            text.push_str(&format!("{continuation}\n"));
+            progress.push(serde_json::json!({
+                "id": "next", "own": "b", "priority": 100, "hold": false,
+                "finished": true, "read": 92, "requested": 92
+            }));
+        }
+        std::fs::write(box_dir.join("enqueue/a.jsonl"), &text).unwrap();
+        std::fs::write(
+            box_dir.join("enqueue/a.jsonl.receipt"),
+            serde_json::json!({"start": 0, "end": text.len(), "lines": progress.len()}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            box_dir.join("fetch/progress.json"),
+            serde_json::json!({"trees": progress, "workers": []}).to_string(),
+        )
+        .unwrap();
+
+        let (_, table, md) = run_report_with_rows(&d, &walk, &["--box", &box_spec], &rows);
+        let state = if finished { "DONE" } else { "40/92" };
+        let mut queued = format!("exit (A, {state})");
+        if include_continuation {
+            queued.push_str("; next (A, DONE) (続きの先)");
+        }
+        assert!(table.contains(&format!("\t{queued}\t")), "{table}");
+        assert!(md.contains(&format!("| {queued} |")), "{md}");
+        assert!(md.contains("出口と続きの先の両方を照合"), "{md}");
+
+        let (stdout, with_enqueue_table, with_enqueue_md) = run_report_with_rows(
+            &d,
+            &walk,
+            &["--box", &box_spec, "--enqueue-out", out.to_str().unwrap()],
+            &rows,
+        );
+        assert_eq!(with_enqueue_table, table);
+        assert_eq!(with_enqueue_md, md);
+        assert!(stdout.contains(&format!("照合除外={expected_excluded} ")), "{stdout}");
+        let lines = read_queue(&out);
+        assert_eq!(lines.len(), 1 - expected_excluded);
+        if let [line] = lines.as_slice() {
+            assert_eq!(line.root, continuation_root);
+        }
+    }
+}
+
+#[test]
+fn enqueue_continuations_merge_and_match_receipts_at_the_new_root() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let exclude = d.path().join("existing.jsonl");
+    let walk = [
+        walk_line("b", "out", 0.03, &["7g7f"]),
+        walk_line("b", "rare", 0.02, &["2g2f"]),
+    ];
+    let rows = [
+        master_row(&[], "7g7f", "20", "tree:2"),
+        master_row(&[], "2g2f", "20", "tree:2"),
+        master_row(&["7g7f"], "3c3d", "20", "single"),
+        master_row(&["2g2f"], "3c3d", "20", "single"),
+        master_row(&["7g7f", "3c3d"], "2g2f", "20", "single"),
+        master_row(&["2g2f", "3c3d"], "7g7f", "20", "single"),
+    ];
+    let root = format!("sfen {} 4", key_after(&["7g7f", "3c3d", "2g2f"]));
+    for (existing_root, own, expected_excluded) in [
+        (format!("sfen {} 2", key_after(&["7g7f"])), "b", 1),
+        (root.clone(), "w", 0),
+        (root.clone(), "b", 2),
+    ] {
+        let existing = serde_json::json!({
+            "id": "existing", "root": existing_root, "own": own, "depth": 2
+        });
+        std::fs::write(&exclude, format!("{existing}\n")).unwrap();
+        let (stdout, table, _) = run_report_with_rows(
+            &d,
+            &walk,
+            &[
+                "--enqueue-out",
+                out.to_str().unwrap(),
+                "--exclude-queue",
+                exclude.to_str().unwrap(),
+            ],
+            &rows,
+        );
+        let lines = read_queue(&out);
+        assert_eq!(lines.len(), usize::from(expected_excluded < 2));
+        assert!(stdout.contains(&format!("照合除外={expected_excluded} ")), "{stdout}");
+        assert!(stdout.contains("続きへ移した行=2"), "{stdout}");
+        if let [line] = lines.as_slice() {
+            assert_eq!(line.root, root);
+            assert!(
+                line.memo
+                    .as_ref()
+                    .unwrap()
+                    .contains("元データの続き 2 手の先 (2 手目の出口から)")
+            );
+            assert!(stdout.contains(&format!("まとめた行={}", 1 - expected_excluded)), "{stdout}");
+        }
+        assert_eq!(table.matches("existing (exclude-queue)").count(), expected_excluded);
+        assert_eq!(
+            table.matches("existing (exclude-queue) (続きの先)").count(),
+            if expected_excluded == 2 { 2 } else { 0 }
+        );
+        if expected_excluded == 1 {
+            let (_, table, _) = run_report_with_rows(
+                &d,
+                &walk[..1],
+                &[
+                    "--enqueue-out",
+                    out.to_str().unwrap(),
+                    "--exclude-queue",
+                    exclude.to_str().unwrap(),
+                ],
+                &rows,
+            );
+            assert!(read_queue(&out).is_empty());
+            assert!(table.contains("\texisting (exclude-queue)\t"));
+        }
+    }
+}
+
+#[test]
 fn enqueue_walk_classes_use_exit_roots_and_three_priority_levels() {
     let d = TempDir::new().unwrap();
     let out = d.path().join("plan.jsonl");
@@ -1128,6 +1370,7 @@ fn enqueue_merge_keeps_earlier_class_heavier_representative_and_minimum_priority
         key: HIRATE_KEY.into(),
         moves: Some(Vec::new()),
         extra: vec![("main", mv.into())],
+        settle: None,
     };
     let items = [
         item(Class::Shallow, 0.1, Some(60), ""),
