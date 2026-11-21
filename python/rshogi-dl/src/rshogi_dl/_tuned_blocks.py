@@ -16,6 +16,7 @@ def tuned_training_forward(
     fuse_packed_attention: bool = False,
     fuse_packed_attention_backward: bool = False,
     tile_packed_attention_backward: bool = False,
+    tile_packed_attention_forward: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     def select_forward(operation, enabled):
         if not enabled:
@@ -36,9 +37,11 @@ def tuned_training_forward(
             from ._packed_attention import packed_attention_forward
         except ImportError as error:
             raise ValueError("fuse_packed_attention requires CUDA Triton") from error
-        attention_operation = (partial(packed_attention_forward, shared_backward=True,
-                                       tiled_backward=tile_packed_attention_backward)
-                               if fuse_packed_attention_backward else packed_attention_forward)
+        attention_operation = packed_attention_forward
+        if fuse_packed_attention_backward or tile_packed_attention_forward:
+            attention_operation = partial(packed_attention_forward, shared_backward=fuse_packed_attention_backward,
+                                          tiled_backward=tile_packed_attention_backward,
+                                          tiled_forward=tile_packed_attention_forward)
     run_attention = select_forward(attention_operation, compile_attention)
     if run_attention is None and fuse_packed_attention:
         run_attention = attention_operation

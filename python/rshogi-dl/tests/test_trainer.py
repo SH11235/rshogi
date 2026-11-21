@@ -708,6 +708,28 @@ class TrainerTest(unittest.TestCase):
             model_config=replace(TEST_CONFIG, layers=2, width=128, heads=4, ffn_width=256, packed_qkv=True),
         )
 
+    def test_tiled_attention_forward_requires_packed_projection(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires fuse_packed_attention"):
+            replace(self.config, tile_packed_attention_forward=True)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_tiled_attention_forward_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", fuse_norm_cast=True, fuse_packed_attention=True,
+            fuse_packed_attention_backward=True, tile_packed_attention_forward=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=128, heads=4, ffn_width=256, packed_qkv=True),
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_tiled_attention_and_ffn_norm_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", fuse_norm_cast=True, fuse_packed_attention=True,
+            fuse_packed_attention_backward=True, tile_packed_attention_backward=True,
+            tile_packed_attention_forward=True, fuse_ffn_residual_norm=True,
+            fuse_ffn_residual_norm_backward=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=224, heads=7, ffn_width=512, packed_qkv=True),
+        )
+
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_packed_attention_matches_native(self) -> None:
         from rshogi_dl._packed_attention import packed_attention_forward
@@ -724,6 +746,11 @@ class TrainerTest(unittest.TestCase):
                     actual = packed_attention_forward(attention, tokens)
                     shared = packed_attention_forward(attention, tokens, shared_backward=True)
                     tiled = packed_attention_forward(attention, tokens, shared_backward=True, tiled_backward=True)
+                    tiled_forward = packed_attention_forward(attention, tokens, tiled_forward=True)
+                    tiled_forward_shared = packed_attention_forward(attention, tokens, shared_backward=True, tiled_forward=True)
+                    both_tiled = packed_attention_forward(
+                        attention, tokens, shared_backward=True, tiled_backward=True, tiled_forward=True,
+                    )
                 params = (tokens, *tuple(attention.parameters()))
                 upstream = torch.randn(expected.shape, device="cuda", dtype=expected.dtype, generator=rng)
                 reference_grads = torch.autograd.grad(expected, params, upstream)
@@ -739,6 +766,11 @@ class TrainerTest(unittest.TestCase):
                 for left, right in zip((expected, *reference_grads), (actual, *candidate_grads), strict=True):
                     relative = (left.float() - right.float()).norm() / left.float().norm().clamp_min(1e-24)
                     self.assertLessEqual(float(relative), 0.01)
+                for output in (tiled_forward, tiled_forward_shared, both_tiled):
+                    gradients = torch.autograd.grad(output, params, upstream)
+                    for left, right in zip((expected, *reference_grads), (output, *gradients), strict=True):
+                        relative = (left.float() - right.float()).norm() / left.float().norm().clamp_min(1e-24)
+                        self.assertLessEqual(float(relative), 0.01)
                 with mock.patch.object(attention.qkv, "forward", wraps=attention.qkv.forward) as projection:
                     fallback = packed_attention_forward(attention, tokens)
                 projection.assert_called_once()
@@ -796,6 +828,7 @@ class TrainerTest(unittest.TestCase):
                                 fuse_packed_attention: bool = False, fuse_packed_attention_backward: bool = False,
                                 tile_packed_attention_backward: bool = False,
                                 fuse_muon_symmetric_polynomial: bool = False,
+                                tile_packed_attention_forward: bool = False,
                                 model_config=TEST_CONFIG) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
@@ -818,6 +851,7 @@ class TrainerTest(unittest.TestCase):
             fuse_packed_attention_backward=fuse_packed_attention_backward,
             tile_packed_attention_backward=tile_packed_attention_backward,
             fuse_muon_symmetric_polynomial=fuse_muon_symmetric_polynomial,
+            tile_packed_attention_forward=tile_packed_attention_forward,
         )
         full = self.run_training("graph", config, model_config=model_config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)

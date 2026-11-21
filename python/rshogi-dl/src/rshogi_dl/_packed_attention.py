@@ -51,6 +51,44 @@ def _forward(packed, output, normalizer, heads: tl.constexpr, tile: tl.constexpr
 
 
 @triton.jit
+def _tile_normalize(q, k0, k1, v0, v1):
+    logits0 = tl.dot(q, tl.trans(k0)) * _SCALE_LOG2
+    logits1 = tl.dot(q, tl.trans(k1)) * _SCALE_LOG2
+    maximum = tl.maximum(tl.max(logits0, 1), tl.max(logits1, 1))
+    exponential0 = tl.exp2(logits0 - maximum[:, None])
+    exponential1 = tl.exp2(logits1 - maximum[:, None])
+    denominator = tl.sum(exponential0, 1) + tl.sum(exponential1, 1)
+    prob0 = (exponential0 / denominator[:, None]).to(tl.bfloat16)
+    prob1 = (exponential1 / denominator[:, None]).to(tl.bfloat16)
+    y = tl.dot(prob1, v1, tl.dot(prob0, v0))
+    return y, maximum + tl.log2(denominator)
+
+
+@triton.jit
+def _tiled_forward(packed, output, normalizer, heads: tl.constexpr):
+    group = tl.program_id(0)
+    batch, head = group // heads, group % heads
+    base = batch * _TOKENS * heads * _PACKED_HEAD_WIDTH + head * 32
+    r0 = tl.arange(0, 64)
+    r1 = 64 + tl.arange(0, 32)
+    col = tl.arange(0, 32)
+    k0 = _vectors(packed, base, r0, col, heads, 1)
+    v0 = _vectors(packed, base, r0, col, heads, 2)
+    k1 = _vectors(packed, base, r1, col, heads, 1)
+    v1 = _vectors(packed, base, r1, col, heads, 2)
+    q0 = _vectors(packed, base, r0, col, heads, 0)
+    y0, lse0 = _tile_normalize(q0, k0, k1, v0, v1)
+    a0 = (batch * _TOKENS + r0[:, None]) * heads * 32 + head * 32 + col[None, :]
+    tl.store(output + a0, y0)
+    tl.store(normalizer + group * _TOKENS + r0, lse0)
+    q1 = _vectors(packed, base, r1, col, heads, 0)
+    y1, lse1 = _tile_normalize(q1, k0, k1, v0, v1)
+    a1 = (batch * _TOKENS + r1[:, None]) * heads * 32 + head * 32 + col[None, :]
+    tl.store(output + a1, y1)
+    tl.store(normalizer + group * _TOKENS + r1, lse1)
+
+
+@triton.jit
 def _row_delta(output, grad, delta, heads: tl.constexpr,
                batch_stride: tl.constexpr, head_stride: tl.constexpr, row_stride: tl.constexpr,
                feature_stride: tl.constexpr):
@@ -190,13 +228,16 @@ def _tiled_backward(packed, output, grad, normalizer, result, heads: tl.constexp
 
 class _PackedAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, packed, heads, shared_backward, tiled_backward):
+    def forward(ctx, packed, heads, shared_backward, tiled_backward, tiled_forward):
         batch = packed.shape[0]
         groups = batch * heads
         tile = 64
         output = torch.empty((batch, TOKEN_COUNT, heads, 32), device=packed.device, dtype=packed.dtype)
         normalizer = torch.empty((groups, TOKEN_COUNT), device=packed.device, dtype=torch.float32)
-        _forward[(groups, triton.cdiv(TOKEN_COUNT, tile))](packed, output, normalizer, heads, tile, num_warps=4)
+        if tiled_forward:
+            _tiled_forward[(groups,)](packed, output, normalizer, heads, num_warps=4)
+        else:
+            _forward[(groups, triton.cdiv(TOKEN_COUNT, tile))](packed, output, normalizer, heads, tile, num_warps=4)
         ctx.save_for_backward(packed, output, normalizer)
         ctx.heads = heads
         ctx.shared_backward = shared_backward
@@ -214,17 +255,17 @@ class _PackedAttention(torch.autograd.Function):
             kernel = _tiled_backward if ctx.tiled_backward else _shared_backward
             kernel[(groups,)](packed, output, grad, normalizer, gradient, heads, *strides,
                               num_warps=4 if ctx.tiled_backward else 8)
-            return gradient, None, None, None
+            return gradient, None, None, None, None
         delta = torch.empty_like(normalizer)
         _row_delta[(groups, TOKEN_COUNT // 32)](output, grad, delta, heads, *strides, num_warps=4)
         for query in (True, False):
             _backward[(groups, triton.cdiv(TOKEN_COUNT, tile))](
                 packed, grad, normalizer, delta, gradient, heads, tile, query, *strides, num_warps=4,
             )
-        return gradient, None, None, None
+        return gradient, None, None, None, None
 
 
-def packed_attention_forward(layer, inputs, *, shared_backward=False, tiled_backward=False):
+def packed_attention_forward(layer, inputs, *, shared_backward=False, tiled_backward=False, tiled_forward=False):
     packed = layer.qkv(inputs)
     if not packed.is_cuda or packed.dtype != torch.bfloat16 or not packed.is_contiguous() or packed.numel() >= 2**31:
         query, key, value = (layer._split_heads(projection) for projection in packed.chunk(3, dim=-1))
@@ -232,6 +273,6 @@ def packed_attention_forward(layer, inputs, *, shared_backward=False, tiled_back
             query, key, value, dropout_p=0.0, is_causal=False, scale=layer.scale,
         )
     else:
-        attended = _PackedAttention.apply(packed, layer.heads, shared_backward, tiled_backward)
+        attended = _PackedAttention.apply(packed, layer.heads, shared_backward, tiled_backward, tiled_forward)
     mixed = attended.transpose(1, 2)
     return layer.output(mixed.reshape(-1, TOKEN_COUNT, layer.heads * 32))
