@@ -57,6 +57,15 @@ class Hcpe3RowsTest(unittest.TestCase):
                 popen.assert_called_once_with(["tool", *sources], stdout=subprocess.PIPE)
             self.assertEqual(result["source_name"], "HCPE3 (20 files)")
             self.assertEqual(result["source_size"], 80)
+            if os.name == "posix":
+                unnamed = root / " "
+                unnamed.write_bytes(b"game")
+                with mock.patch("rshogi_dl.sharded.subprocess.Popen") as popen:
+                    child = popen.return_value.__enter__.return_value
+                    child.stdout = io.BytesIO(source_stream())
+                    child.wait.return_value = child.poll.return_value = 0
+                    result = convert_hcpe3([unnamed], root / "unnamed", encoder="tool")
+                self.assertEqual(verify_dataset(root / "unnamed"), result)
 
     def test_rejects_illegal_played_labels_and_zero_visits(self):
         for arguments, message in (
