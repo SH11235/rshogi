@@ -34,7 +34,7 @@
 | 対局の抜け・受付の被覆を調べ、抜けをつなぐ木や実戦の線を両側で舗装する木を局ごとの優先度つきで出す | [book_mine master game-gaps](docs/book_mine.md#master-game-gaps-対局の手順と元データの抜け) |
 | 負けた局の崩れと伝播後の実戦手の値を照合し、崩れまでの抜けをつなぐ木を出す | [book_mine master game-pave](docs/book_mine.md#master-game-pave-負けた局の崩れまでを定跡につなぐ) |
 | 初期局面から先手と後手の main を交互に直接キーで辿り、定跡が切れる局面 (局面なし・反転キーでだけある・main なし・循環) と理由、そこを根にした own=bw の木の行を出す | [book_mine master main-line](docs/book_mine.md#master-main-line-main-対-main-で定跡が切れる所) |
-| walk の止まりと伝播の切れ目・定跡に戻る手の表を合わせ、出口を有望・塞ぎたい・浅い・値の出所が弱いに分けた表と Markdown の報告を出し、good 以外の未受付の出口を木の計画にする (`--enqueue-out`、`--exclude-queue` で既存キューも照合。局面の番号は全部の節で「何手目」= その局面で次に指す手の番号、先手番は奇数・後手番は偶数。表は局面の手番 `turn` と `move_number` の列を持ち、偶奇が合わなければエラー) | [book_mine master exit-report](docs/book_mine.md#master-exit-report-版ごとの出口の報告) |
+| walk の止まりと伝播の切れ目・定跡に戻る手の表を合わせ、出口を有望・塞ぎたい・浅い・値の出所が弱いに分けた表と Markdown の報告を出し、good 以外の出口を木の計画にする (元データの行が無い未決着の末端まで続く場合はそこを根にする。`--enqueue-out`、`--exclude-queue` で既存キューも照合。局面の番号は全部の節で「何手目」= その局面で次に指す手の番号、先手番は奇数・後手番は偶数。表は局面の手番 `turn` と `move_number` の列を持ち、偶奇が合わなければエラー) | [book_mine master exit-report](docs/book_mine.md#master-exit-report-版ごとの出口の報告) |
 | 戦型の候補ごとに、RAMU の手番の決めた局面で main の代わりに決めた手を指して辿り、出口の値・確度・強い対局の実績・危ない局面を通る重み・分岐の後の相手の手を比べる表と Markdown の報告を出す (報告の局面の番号は「何手目」= その局面で次に指す手の番号) | [book_mine master opening-report](docs/book_mine.md#master-opening-report-戦型の候補を比べる表) |
 | walk と同じ辿りで RAMU の手番の局面の main の伝播の値と外部定跡の値を比べ、食い違う局面の表と Markdown の報告、定跡が切れた所を根にした木のキューの行を出す (受付の木の照合つき) | [book_mine master opp-book-diff](docs/book_mine.md#master-opp-book-diff-外部定跡と食い違う局面) |
 | 自分は main、相手は main・alt を指して辿れる出口を層ごとの外部ソート・到達済みキーのマージで分類し、既存の木との重複を除いてキューにする | [book_mine master exits](docs/book_mine.md#master-exits-元データを辿って出口を列挙する) |

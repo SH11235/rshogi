@@ -2445,9 +2445,9 @@ walk の止まり (stop が own・out・rare・max、重み `--min-weight` 以�
 | `gap` | bridge の表の局面のうち、walk の重みが `--gap-min-weight` 以上で、補った値 (bridged_black) が目標に届かないか、audit の gap が `--gap-line` 以上 |
 | `rejoin` | rejoin の表の行のうち、戻った先の値が目標に届かず、来る割合 (weight × rejoin_games / dig_games) が `--gap-min-weight` 以上 |
 
-一本道は walk の手順の末尾から、先手番・後手番とも元データの main を辿ります。main が無ければ、手番側から見た evals の平均が最も高い alt を選びます (値なしは値ありの後、同値なら表で先の行)。bench・record は辿りません。
+stop が out・rare・max の行は、出口から元データの一本道を辿ります。先手番・後手番とも main を選びます。stop が own の行は出口で止めます。main が無ければ、手番側から見た evals の平均が最も高い alt を選びます (値なしは値ありの後、同値なら表で先の行)。bench・record は辿りません。
 辿れる手がなくなったら、直前に指した手の値を先手から見た値に直し、その絶対値が `--settle-cp` 以上なら決着とします。出口の局面自体が元データに無いときは RAMU の最後の手の値を使います。
-同じ局面 (盤・手番・持ち駒が一致) に戻るか、合法手の無い局面に着いた場合も決着とします。上限の手で千日手の筋や詰みに着けば決着とし、それ以外で上限に達した場合は打ち切ります。
+同じ局面 (盤・手番・持ち駒が一致) に戻るか、合法手の無い局面に着いた場合も決着とします。上限の手で千日手の筋や詰みに着けば決着とし、それ以外で上限に達した場合は打ち切ります。決着の判定で分類が分かれるのは、目標に届いた `tree` の出口 (good / unsettled) です。
 
 gap は RAMU の側 (walk の side) が局面の手番と一致する組だけを判定します。bridge の値は、その局面の手番側を RAMU としたグラフの値だからです。重みは、その側の行のうち、その局面を通るか止まりの局面とする行の重みの和 (1 行で同じ局面は 1 回) で、手順もその側の最初の行から取ります。手番でない側の辿りの重みや経路は使いません。目標と audit の main と 1 位の差は、どちらも局面の手番側で判定します。audit の表は、重みの下限以上で gap が `--gap-line` 以上の局面の行だけを持ちます。
 rejoin の表は手順を持たないので、手順は walk の表でその局面を通る行 (RAMU の側の行を優先、同じ側の中では最初の行) から取ります。walk が通らない局面は手順なしです。
@@ -2461,10 +2461,11 @@ bridge・rejoin の表の ply は空でもよく (元データの ply が空の�
 
 表は `class side turn move_number weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
 side は RAMU の側、turn は key の局面の手番 (b / w)、move_number は上の何手目 (不明なら `-`) です。moves は初期局面から key の局面までの手順 (USI) で、手順なしの行は `-` (空は初期局面) です。
-queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。rejoin の行は、局面・RAMU の手の後の dig の局面・戻った先の局面を根にした木です。`--exclude-queue` の一致も id を表示します。
+queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。積み荷の根が元データの続きの先に移る行は、移った先の根で照合します。rejoin の行は、局面・RAMU の手の後の dig の局面・戻った先の局面を根にした木です。`--exclude-queue` の一致も id を表示します。
 extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move・rejoin_main・rejoin (戻った先の局面)) です。
-good・unsettled には `settle_plies` (出口から辿った手数)、`settle_black` (末端の値、先手から見た値。値なしは空欄)、`settle_end` (止まった理由。辿れる手が無い `missing`、千日手の筋 `repetition`、詰み `mate`、手数上限 `max`) も出します。
+stop が out・rare・max の行には `settle_plies` (出口から辿った手数)、`settle_black` (末端の値、先手から見た値。値なしは空欄)、`settle_end` (止まった理由。辿れる手が無い `missing`、千日手の筋 `repetition`、詰み `mate`、手数上限 `max`) も出します。
 報告は 1 (good)・1b (unsettled)・2a (bad)・2b (gap、`--bridge` のときだけ)・2c (rejoin、`--rejoin` のときだけ)・3 (shallow)・4 (weak) の節で、手順を漢字の棋譜で書きます。
+1・1b・2a・4 の「元データの続き」欄には、辿った手数・末端の先手値・止まった理由を出します。
 walk の止まりの節は「出口の局面」の列に手番と何手目と手番の側を (`後手 14 手目 (RAMU)`、`先手 15 手目 (相手)`)、2b・2c は「局面 (RAMU の手番)」の列に手番と何手目を書きます。
 2c は RAMU の手・相手の手・戻った先の main も漢字の棋譜で書き、手順なしの行は手順の欄に「手順なし」と書いて手を USI のまま載せます。
 標準出力には class ごとの行の数を出します。
@@ -2486,9 +2487,12 @@ book_mine tree enqueue --state /path/to/state --from exits.jsonl
 
 | 分類 | 根 | 根の手数 | game |
 | --- | --- | --- | --- |
-| unsettled / bad / shallow / weak | 報告の key | move_number | 空 |
+| unsettled / bad / weak | 元データの行が無い局面まで 1 手以上辿り、そこで未決着なら、その局面。それ以外は出口 | 根を移した場合は move_number + settle_plies。出口なら move_number | 空 |
+| shallow | 報告の key | move_number | 空 |
 | gap | 報告の key | move_number | `[[main]]` (best があっても main) |
 | rejoin | key から RAMU の move を指した後の dig の局面 (相手の手番) | move_number + 1 | `[[rejoin_move]]` |
+
+積み荷の根が移るのは、`settle_end=missing`、`settle_plies` が 1 以上、末端の値が不明か絶対値が `--settle-cp` 未満で、末端の局面に元データの行が無いときです。末端に bench・record だけがある場合、決着した場合、上限で打ち切った場合、続きが 0 手の場合は出口を根にします。表と Markdown の局面・手順は walk の出口を示します。
 
 出す根と同じ局面・同じ own の段 1 以上の木が `--box` の受付にあれば除きます。
 `--exclude-queue` は `master walk` と同じ照合で、段 1 以上の木の根に加え、game の途中の局面 (depth + 1 手まで、その木の own の手番の局面) も受付ありと数えます。bw の木は両側に数えます。
@@ -2502,12 +2506,12 @@ priority は次の順で決めます。
 3. その他 (値なしも含む) は `--enqueue-priority-other`。
 
 同じ (根の局面, own) は 1 行にまとめ、game は初出順で重複なく合併し、priority は最小、根の手数は最小にします。手数の分からない行も、同じ根の行があればそこにまとめます (手数なしに数えるのは、まとめる先も無い行だけです)。
-memo は先の分類 (unsettled → bad → gap → rejoin → shallow → weak)、同じ分類なら重い行を代表にし、分類・何手目・先手から見た値・出所・重みと、まとめた件数を短く記します。
-根の手数も代表の行を使います。id は `master walk` と同じ `queue_id(tag, 根の手数, 根の key, own)` で、`<tag>_<手数>_<key の SHA-256 先頭16桁>_<own>` です。
+memo は先の分類 (unsettled → bad → gap → rejoin → shallow → weak)、同じ分類なら重い行を代表にし、分類・何手目・先手から見た値・出所・重みと、まとめた件数を短く記します。続きの先へ移した行があれば、最初の該当行の「元データの続き N 手の先」も記します。
+id は `master walk` と同じ `queue_id(tag, 根の手数, 根の key, own)` で、`<tag>_<手数>_<key の SHA-256 先頭16桁>_<own>` です。
 出力は代表の分類順、同じ分類では重みの大きい順 (同じ重みは入力順) です。
 
 全行を `tree enqueue` と同じ検査に通してから一時ファイル経由で書きます。出力先どうし、および master・walk・rejoin・bridge・bridge-audit・schema・box の入力・exclude-queue と出力先が同じファイルなら拒否します。
-標準出力には出した行数・照合で除いた元の行数・手数不明で出せなかった行数・統合で減った行数を 1 行で追加します。
+標準出力には出した行数・照合で除いた元の行数・手数不明で出せなかった行数・統合で減った行数・続きの先に根を移した元の行数 (照合・統合の前に集計) を 1 行で追加します。
 
 `master audit --bridge-enqueue-out` は伝播の切れ目から計画を作り、gap の計画は重なります。版ごとの出口の報告から good 以外をまとめて積むときは `exit-report --enqueue-out` を使います。
 
