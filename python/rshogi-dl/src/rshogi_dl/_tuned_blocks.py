@@ -12,6 +12,7 @@ from ._residual_norm import compiled_residual_forward
 def tuned_training_forward(
     model: SquareTransformer, batch_size: int, *, fused_norm: bool, cast_norm: bool = False,
     compile_ffn: bool = False, compile_attention: bool = False, fuse_ffn_residual_norm: bool = False,
+    fuse_ffn_residual_norm_backward: bool = False,
     fuse_packed_attention: bool = False,
     fuse_packed_attention_backward: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
@@ -44,6 +45,7 @@ def tuned_training_forward(
         return compiled_residual_forward(
             model, run_ffn=run_ffn, run_attention=run_attention, cast_output=cast_norm,
             fuse_ffn_residual_norm=fuse_ffn_residual_norm,
+            fuse_ffn_residual_norm_backward=fuse_ffn_residual_norm_backward,
         )
 
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
