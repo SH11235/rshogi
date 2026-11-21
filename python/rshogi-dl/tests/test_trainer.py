@@ -646,6 +646,14 @@ class TrainerTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_shared_attention_backward_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", fuse_norm_cast=True, fuse_packed_attention=True,
+            fuse_packed_attention_backward=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=128, heads=4, ffn_width=256, packed_qkv=True),
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_packed_attention_matches_native(self) -> None:
         from rshogi_dl._packed_attention import packed_attention_forward
         from rshogi_dl.contract import TOKEN_COUNT
@@ -659,10 +667,16 @@ class TrainerTest(unittest.TestCase):
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     expected = attention(tokens)
                     actual = packed_attention_forward(attention, tokens)
+                    shared = packed_attention_forward(attention, tokens, shared_backward=True)
                 params = (tokens, *tuple(attention.parameters()))
                 upstream = torch.randn(expected.shape, device="cuda", dtype=expected.dtype, generator=rng)
                 reference_grads = torch.autograd.grad(expected, params, upstream)
                 candidate_grads = torch.autograd.grad(actual, params, upstream)
+                shared_grads = torch.autograd.grad(shared, params, upstream)
+                torch.testing.assert_close(shared, actual, atol=0, rtol=0)
+                for want, got in zip(reference_grads, shared_grads, strict=True):
+                    relative = (want.float() - got.float()).norm() / want.float().norm().clamp_min(1e-24)
+                    self.assertLessEqual(float(relative), 0.01)
                 for left, right in zip((expected, *reference_grads), (actual, *candidate_grads), strict=True):
                     relative = (left.float() - right.float()).norm() / left.float().norm().clamp_min(1e-24)
                     self.assertLessEqual(float(relative), 0.01)
@@ -710,7 +724,7 @@ class TrainerTest(unittest.TestCase):
     def check_cuda_graph_resume(self, execution: str, optimizer: str = "adamw", *,
                                 compile_ffn: bool = False, compile_attention: bool = False, fuse_norm_cast: bool = False,
                                 prefetch_input: bool = False, fuse_ffn_residual_norm: bool = False,
-                                fuse_packed_attention: bool = False,
+                                fuse_packed_attention: bool = False, fuse_packed_attention_backward: bool = False,
                                 model_config=TEST_CONFIG) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
@@ -729,6 +743,7 @@ class TrainerTest(unittest.TestCase):
             prefetch_input=prefetch_input,
             fuse_ffn_residual_norm=fuse_ffn_residual_norm,
             fuse_packed_attention=fuse_packed_attention,
+            fuse_packed_attention_backward=fuse_packed_attention_backward,
         )
         full = self.run_training("graph", config, model_config=model_config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)

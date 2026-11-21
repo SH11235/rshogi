@@ -99,9 +99,38 @@ def _backward(packed, grad, normalizer, delta, packed_gradient,
         tl.store(packed_gradient + address + heads * 64, d_value, tile_row[:, None] < _TOKENS)
 
 
+@triton.jit
+def _shared_backward(packed, output, grad, normalizer, result, heads: tl.constexpr,
+                    batch_stride: tl.constexpr, head_stride: tl.constexpr, row_stride: tl.constexpr,
+                    feature_stride: tl.constexpr):
+    group = tl.program_id(0)
+    batch, head = group // heads, group % heads
+    base = batch * _TOKENS * heads * _PACKED_HEAD_WIDTH + head * 32
+    row = tl.arange(0, 128)
+    col = tl.arange(0, 32)
+    mask = row < _TOKENS
+    q = _vectors(packed, base, row, col, heads, 0)
+    k = _vectors(packed, base, row, col, heads, 1)
+    v = _vectors(packed, base, row, col, heads, 2)
+    y = _output_vectors(output, batch, head, row, col, _TOKENS * heads * 32, 32, heads * 32, 1)
+    dy = _output_vectors(grad, batch, head, row, col, batch_stride, head_stride, row_stride, feature_stride)
+    lse = tl.load(normalizer + group * _TOKENS + row, mask, 0)
+    row_delta = tl.sum(y.to(tl.float32) * dy.to(tl.float32), 1)
+    logits = tl.dot(q, tl.trans(k)) * _SCALE_LOG2
+    prob = tl.where(mask[:, None] & mask[None, :], tl.exp2(logits - lse[:, None]), 0.0)
+    change = (prob * (tl.dot(dy, tl.trans(v)) - row_delta[:, None]) * _SCALE).to(tl.bfloat16)
+    dq = tl.dot(change, k)
+    dk = tl.dot(tl.trans(change), q)
+    dv = tl.dot(tl.trans(prob.to(tl.bfloat16)), dy)
+    address = base + row[:, None] * heads * _PACKED_HEAD_WIDTH + col[None, :]
+    tl.store(result + address, dq, mask[:, None])
+    tl.store(result + address + heads * 32, dk, mask[:, None])
+    tl.store(result + address + heads * 64, dv, mask[:, None])
+
+
 class _PackedAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, packed, heads):
+    def forward(ctx, packed, heads, shared_backward):
         batch = packed.shape[0]
         groups = batch * heads
         tile = 64
@@ -110,6 +139,7 @@ class _PackedAttention(torch.autograd.Function):
         _forward[(groups, triton.cdiv(TOKEN_COUNT, tile))](packed, output, normalizer, heads, tile, num_warps=4)
         ctx.save_for_backward(packed, output, normalizer)
         ctx.heads = heads
+        ctx.shared_backward = shared_backward
         return output.transpose(1, 2)
 
     @staticmethod
@@ -117,18 +147,21 @@ class _PackedAttention(torch.autograd.Function):
         packed, output, normalizer = ctx.saved_tensors
         heads, tile = ctx.heads, 64
         groups = packed.shape[0] * heads
-        delta = torch.empty_like(normalizer)
         gradient = torch.empty_like(packed)
         strides = grad.stride()
+        if ctx.shared_backward:
+            _shared_backward[(groups,)](packed, output, grad, normalizer, gradient, heads, *strides, num_warps=8)
+            return gradient, None, None
+        delta = torch.empty_like(normalizer)
         _row_delta[(groups, TOKEN_COUNT // 32)](output, grad, delta, heads, *strides, num_warps=4)
         for query in (True, False):
             _backward[(groups, triton.cdiv(TOKEN_COUNT, tile))](
                 packed, grad, normalizer, delta, gradient, heads, tile, query, *strides, num_warps=4,
             )
-        return gradient, None
+        return gradient, None, None
 
 
-def packed_attention_forward(layer, inputs):
+def packed_attention_forward(layer, inputs, *, shared_backward=False):
     packed = layer.qkv(inputs)
     if not packed.is_cuda or packed.dtype != torch.bfloat16 or not packed.is_contiguous() or packed.numel() >= 2**31:
         query, key, value = (layer._split_heads(projection) for projection in packed.chunk(3, dim=-1))
@@ -136,6 +169,6 @@ def packed_attention_forward(layer, inputs):
             query, key, value, dropout_p=0.0, is_causal=False, scale=layer.scale,
         )
     else:
-        attended = _PackedAttention.apply(packed, layer.heads)
+        attended = _PackedAttention.apply(packed, layer.heads, shared_backward)
     mixed = attended.transpose(1, 2)
     return layer.output(mixed.reshape(-1, TOKEN_COUNT, layer.heads * 32))
