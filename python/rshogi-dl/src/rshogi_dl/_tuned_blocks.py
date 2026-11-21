@@ -20,6 +20,7 @@ def tuned_training_forward(
     fuse_attention_residual_norm: bool = False,
     fuse_final_residual_norm: bool = False,
     fuse_packed_qkv_bias_gradient: bool = False,
+    fuse_ffn_expand_bias_gradient: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     def select_forward(operation, enabled):
         if not enabled:
@@ -33,7 +34,14 @@ def tuned_training_forward(
 
         return execute
 
-    run_ffn = select_forward(FeedForward.forward, compile_ffn)
+    ffn_forward = FeedForward.forward
+    if fuse_ffn_expand_bias_gradient:
+        try:
+            from ._ffn_expand_bias import fused_ffn_forward
+        except ImportError as error:
+            raise ValueError("fuse_ffn_expand_bias_gradient requires CUDA Triton") from error
+        ffn_forward = fused_ffn_forward
+    run_ffn = select_forward(ffn_forward, compile_ffn)
     attention_operation = SelfAttention.forward
     if fuse_packed_attention:
         try:

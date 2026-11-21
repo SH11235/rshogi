@@ -757,24 +757,27 @@ class TrainerTest(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_packed_qkv_bias_gradient_resume(self) -> None:
+        model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True)
+        self.check_fixed_shape_graph_resume(self.packed_qkv_bias_config(), model, "fuse_packed_qkv_bias_gradient")
+
+    def check_fixed_shape_graph_resume(self, config, model, option) -> None:
         records = synthetic_records(seed=29, count=6 * 256 + 1)
         for record in records:
             record["policy"] = [[record["legal_labels"][0], 1]]
         self.train = self.make_dataset("full-policy", records, shard_records=512)
-        model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True)
-        config = replace(self.packed_qkv_bias_config(), max_steps=12, checkpoint_every=6)
-        full = self.run_training("qkv-graph", config, model_config=model)
+        config = replace(config, max_steps=12, checkpoint_every=6)
+        full = self.run_training("fixed-graph", config, model_config=model)
         self.assertEqual(full["cuda_graph_replayed_steps"], 7)
-        checkpoint = self.root / "qkv-graph" / "resume-0000000006.pt"
+        checkpoint = self.root / "fixed-graph" / "resume-0000000006.pt"
         with self.assertRaisesRegex(ResumeError, "configuration differs"):
             self.run_training(
-                "qkv-without-fusion", replace(config, fuse_packed_qkv_bias_gradient=False),
+                "fixed-without-fusion", replace(config, **{option: False}),
                 model_config=model, resume=checkpoint,
             )
-        resumed = self.run_training("qkv-resumed", config, model_config=model, resume=checkpoint)
+        resumed = self.run_training("fixed-resumed", config, model_config=model, resume=checkpoint)
         self.assertEqual(resumed["cuda_graph_replayed_steps"], 1)
-        want = load_resume(self.root / "qkv-graph" / "resume-final.pt")
-        got = load_resume(self.root / "qkv-resumed" / "resume-final.pt")
+        want = load_resume(self.root / "fixed-graph" / "resume-final.pt")
+        got = load_resume(self.root / "fixed-resumed" / "resume-final.pt")
         for name in ("model_state", "optimizer_state", "progress", "rng"):
             self.assert_nested_equal(want[name], got[name])
 
@@ -879,6 +882,50 @@ class TrainerTest(unittest.TestCase):
     def test_final_residual_norm_requires_norm_cast(self) -> None:
         with self.assertRaisesRegex(ValueError, "fuse_final_residual_norm requires fuse_norm_cast"):
             replace(self.config, fuse_final_residual_norm=True)
+
+    def test_ffn_expand_bias_gradient_requires_compiled_bf16_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fuse_ffn_expand_bias_gradient requires compile_ffn and fuse_norm_cast"):
+            replace(self.config, fuse_ffn_expand_bias_gradient=True)
+
+    def test_ffn_expand_bias_gradient_rejects_unsupported_shape(self) -> None:
+        config = replace(
+            self.config, device="cuda", precision="bf16", fused_optimizer=True, batch_size=256,
+            execution="cuda-graph-fused-norm", fuse_norm_cast=True, compile_ffn=True,
+            fuse_ffn_expand_bias_gradient=True,
+        )
+        model = replace(TEST_CONFIG, width=256, heads=8, ffn_width=512)
+        with self.assertRaisesRegex(TrainingError, "fuse_ffn_expand_bias_gradient requires width 256"):
+            self.run_training("unsupported-ffn-width", config, model_config=model)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_ffn_expand_bias_gradient_matches_unfused(self) -> None:
+        from rshogi_dl._ffn_expand_bias import fused_ffn_forward
+        from rshogi_dl.contract import TOKEN_COUNT
+
+        rng = torch.Generator(device="cuda").manual_seed(577)
+        layer = FeedForward(256, 1024).cuda()
+        inputs = torch.randn((256, TOKEN_COUNT, 256), device="cuda", dtype=torch.bfloat16, generator=rng)
+        inputs.requires_grad_()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            baseline = layer(inputs)
+            fused = fused_ffn_forward(layer, inputs)
+        torch.testing.assert_close(baseline, fused, rtol=0, atol=0)
+        upstream = torch.randn(baseline.shape, device="cuda", dtype=baseline.dtype, generator=rng)
+        parameters = inputs, *layer.parameters()
+        want = torch.autograd.grad(baseline, parameters, upstream)
+        got = torch.autograd.grad(fused, parameters, upstream)
+        for left, right in zip(want, got, strict=True):
+            reference = left.float()
+            relative = (reference - right.float()).norm() / reference.norm().clamp_min(1e-24)
+            self.assertLessEqual(float(relative), 0.01)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_ffn_expand_bias_gradient_resume(self) -> None:
+        model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=1024, packed_qkv=True)
+        config = replace(
+            self.packed_qkv_bias_config(), compile_ffn=True, fuse_ffn_expand_bias_gradient=True,
+        )
+        self.check_fixed_shape_graph_resume(config, model, "fuse_ffn_expand_bias_gradient")
 
     def test_final_residual_norm_rejects_unsupported_width(self) -> None:
         config = replace(

@@ -88,6 +88,7 @@ class TrainerConfig:
     fuse_attention_residual_norm: bool = False
     fuse_final_residual_norm: bool = False
     fuse_packed_qkv_bias_gradient: bool = False
+    fuse_ffn_expand_bias_gradient: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -106,7 +107,7 @@ class TrainerConfig:
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
             "fuse_muon_symmetric_polynomial",
             "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
-            "fuse_packed_qkv_bias_gradient",
+            "fuse_packed_qkv_bias_gradient", "fuse_ffn_expand_bias_gradient",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -166,6 +167,8 @@ class TrainerConfig:
             raise ValueError("fuse_attention_residual_norm requires fuse_norm_cast")
         if self.fuse_final_residual_norm and not self.fuse_norm_cast:
             raise ValueError("fuse_final_residual_norm requires fuse_norm_cast")
+        if self.fuse_ffn_expand_bias_gradient and not (self.compile_ffn and self.fuse_norm_cast):
+            raise ValueError("fuse_ffn_expand_bias_gradient requires compile_ffn and fuse_norm_cast")
         if self.execution in _STEP_GRAPH_EXECUTIONS and (
             self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer
         ):
@@ -184,7 +187,7 @@ def _config_dict(config: TrainerConfig) -> dict:
                  "fuse_packed_attention", "fuse_packed_attention_backward",
                  "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
                  "fuse_muon_symmetric_polynomial", "tile_packed_attention_forward", "fuse_attention_residual_norm",
-                 "fuse_final_residual_norm", "fuse_packed_qkv_bias_gradient"):
+                 "fuse_final_residual_norm", "fuse_packed_qkv_bias_gradient", "fuse_ffn_expand_bias_gradient"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -310,7 +313,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
             "fuse_muon_symmetric_polynomial",
             "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
-            "fuse_packed_qkv_bias_gradient",
+            "fuse_packed_qkv_bias_gradient", "fuse_ffn_expand_bias_gradient",
         }
         saved_config = payload["trainer_config"]
         if (
@@ -454,6 +457,11 @@ def run_training(
         model_config.width != 256 or config.batch_size != 256 or model_config.layers < 2
     ):
         raise TrainingError("fuse_packed_qkv_bias_gradient requires width 256, batch size 256 and at least two layers")
+    if config.fuse_ffn_expand_bias_gradient:
+        if model_config.width != 256 or model_config.ffn_width != 1024 or config.batch_size != 256:
+            raise TrainingError("fuse_ffn_expand_bias_gradient requires width 256, FFN width 1024 and batch size 256")
+        if torch.version.cuda is None:
+            raise TrainingError("fuse_ffn_expand_bias_gradient requires NVIDIA CUDA")
     if config.fuse_ffn_residual_norm:
         if model_config.width not in (128, 192, 224, 256) or not model_config.packed_qkv:
             raise TrainingError("fuse_ffn_residual_norm requires width 128, 192, 224 or 256 and packed QKV")
@@ -490,6 +498,8 @@ def run_training(
     initial_step = progress["step"]
     initial_updates = progress["optimizer_updates"]
     with _settings(config) as device:
+        if config.fuse_ffn_expand_bias_gradient and torch.cuda.get_device_capability(device)[0] < 8:
+            raise TrainingError("fuse_ffn_expand_bias_gradient requires NVIDIA CUDA compute capability 8.0 or later")
         if config.fuse_packed_attention_backward:
             properties = torch.cuda.get_device_properties(device)
             if properties.major < 8 or properties.shared_memory_per_block_optin < 64 * 1024:
@@ -547,6 +557,7 @@ def run_training(
                 fuse_attention_residual_norm=config.fuse_attention_residual_norm,
                 fuse_final_residual_norm=config.fuse_final_residual_norm,
                 fuse_packed_qkv_bias_gradient=config.fuse_packed_qkv_bias_gradient,
+                fuse_ffn_expand_bias_gradient=config.fuse_ffn_expand_bias_gradient,
             )
         elif config.execution == "cuda-graph-fused-norm":
             execution = compiled_residual_forward(
@@ -714,6 +725,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execution", choices=_EXECUTIONS, default="eager")
     parser.add_argument("--compile-mode", choices=COMPILE_MODES, default="default")
     parser.add_argument("--compile-ffn", action="store_true")
+    parser.add_argument("--fuse-ffn-expand-bias-gradient", action="store_true")
     parser.add_argument("--compile-attention", action="store_true")
     parser.add_argument("--fuse-norm-cast", action="store_true")
     parser.add_argument("--fuse-ffn-residual-norm", action="store_true")
