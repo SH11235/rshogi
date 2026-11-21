@@ -251,7 +251,7 @@ pub(super) fn load(
                 } else {
                     conflicting += 1;
                 }
-                // 合流した台帳を先に渡しても、元の台帳がある局面ではその読みの深さを保つ。
+                // 合流した台帳のパスが辞書順で先でも、engine の読みの深さを保つ。
                 if rec.engine && !previous_is_engine {
                     entry.insert((reading, true));
                 }

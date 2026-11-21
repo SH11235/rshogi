@@ -483,6 +483,9 @@ fn journal_depths_export_imported_readings_once_and_prefer_engine() {
     ));
     let mut conflicting = imported.clone();
     conflicting["reading"]["multipv"][0]["depth"] = serde_json::json!(90);
+    let mut resumed = imported.clone();
+    resumed["provenance"] =
+        serde_json::json!(format!("{}:offset=4096", imported["provenance"].as_str().unwrap()));
     let mut other = engine.clone();
     other["provenance"] = serde_json::json!("fixture-import");
 
@@ -492,6 +495,7 @@ fn journal_depths_export_imported_readings_once_and_prefer_engine() {
     let journal = dir.path().join("journal.jsonl");
     for (records, expected) in [
         (vec![&imported], Some(30)),
+        (vec![&resumed], Some(30)),
         (vec![&imported, &engine], Some(30)),
         (vec![&conflicting, &engine], Some(30)),
         (vec![&engine, &conflicting], Some(30)),
@@ -509,6 +513,82 @@ fn journal_depths_export_imported_readings_once_and_prefer_engine() {
                 .unwrap();
         let depths = annotation["positions"][HIRATE_KEY]["moves"]["7g7f"].get("depths");
         assert_eq!(depths.cloned(), expected.map(|depth| serde_json::json!([depth])), "{contents}");
+    }
+}
+
+#[test]
+fn journal_depths_export_from_original_and_merged_journals() {
+    use crate::book_tree::{TreeArgs, reply_graph::HIRATE_KEY};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: TreeArgs,
+    }
+
+    for merged_depth in [30, 90] {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let model = dir.path().join("model.bin");
+        std::fs::write(&engine, "engine").unwrap();
+        std::fs::write(&model, "model").unwrap();
+
+        let first_engine = dir.path().join("b-engine.jsonl");
+        let second_engine = dir.path().join("c-engine.jsonl");
+        let merged = dir.path().join("a-merged.jsonl");
+        let conflicts = dir.path().join("conflicts.tsv");
+        let first = journal_record(30);
+        std::fs::write(&first_engine, format!("{first}\n")).unwrap();
+        std::fs::write(&second_engine, format!("{}\n", journal_record(merged_depth))).unwrap();
+
+        let cli = Cli::try_parse_from([
+            "tree",
+            "import-journal",
+            "--engine",
+            engine.to_str().unwrap(),
+            "--engine-option",
+            &format!("EvalFile={}", model.display()),
+            "--nodes",
+            "1000",
+            "--from-journal",
+            second_engine.to_str().unwrap(),
+            "--from-journal",
+            first_engine.to_str().unwrap(),
+            "--journal",
+            merged.to_str().unwrap(),
+            "--on-conflict",
+            "keep-existing",
+            "--conflicts-out",
+            conflicts.to_str().unwrap(),
+        ])
+        .unwrap();
+        crate::book_tree::run(cli.tree).unwrap();
+        let conflict_list = std::fs::read_to_string(&conflicts).unwrap();
+        assert_eq!(conflict_list.lines().skip(1).count(), usize::from(merged_depth != 30));
+
+        let fp = first["settings"]["fingerprint"].as_str().unwrap();
+        let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
+        r.set("cond", fp[..8].into());
+        std::fs::write(dir.path().join("moves.tsv"), master_table::format_master(&[r])).unwrap();
+        for (journals, expected) in [
+            (vec![second_engine.clone(), first_engine.clone()], 30),
+            (vec![merged.clone()], merged_depth),
+            (vec![merged, second_engine, first_engine], 30),
+        ] {
+            let mut a = args(dir.path());
+            a.journal = journals;
+            a.force = true;
+            run_to(a, &mut Vec::new()).unwrap();
+            let annotation: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("book.annot.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                annotation["positions"][HIRATE_KEY]["moves"]["7g7f"]["depths"],
+                serde_json::json!([expected]),
+                "merged depth: {merged_depth}",
+            );
+        }
     }
 }
 

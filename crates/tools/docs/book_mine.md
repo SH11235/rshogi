@@ -1702,6 +1702,16 @@ schema 未指定時だけ台帳の指紋の先頭 8 桁から解決し、先頭�
 台帳は `tree serve` の形式を使います (`kind` は形式の版)。
 `provenance=engine` の行と、`provenance` が `journal:` で始まる行を照合します。
 `tree import-journal` や `tree serve` で取り込んだ読みは、合流した台帳を `--journal` に渡せば照合できます。
+`tree serve --imported-journal <PATH>` で取り込んだ行は別ファイルに入るため、そのファイルも export の `--journal` に渡してください。
+
+合流した台帳だけを渡すと、各台の台帳を渡したときと `depths` が異なる場合があります。
+`tree import-journal --on-conflict keep-existing` では、複数の台帳で同じ指紋・局面の読みの値が違うと、
+先に取り込んだ読みが残り、後から来た読みは `--conflicts-out` の一覧に出ます。
+各台の台帳を直接渡すと、正規化したパスの辞書順で最初の有効な engine の行が選ばれます。
+取り込み時は元の `provenance` にかかわらず `journal:…` に書き換わるため、
+各台の台帳にある engine 以外の由来の行も、合流した台帳では `depths` の根拠になり得ます。
+各台の台帳を合流した台帳で置き換えて削除する前に、両方の入力で export し、注釈が一致することを確かめてください。
+
 最初の確定行が JSON でない、`kind` が無い、または `kind` が `book-tree-` で始まらないファイルと、
 確定行の無いファイル (空ファイルを含む) は丸ごと飛ばし、
 `journal: skipped (not a tree journal): <path>` を stderr に出します。
