@@ -283,7 +283,12 @@ class _PackedAttention(torch.autograd.Function):
         return gradient, None, None, None, None
 
 
-def packed_attention_forward(layer, inputs, *, shared_backward=False, tiled_backward=False, tiled_forward=False):
+def packed_attention_forward(layer, inputs, *, shared_backward=False, tiled_backward=False, tiled_forward=False,
+                             fuse_qkv_bias_gradient=False):
+    if (fuse_qkv_bias_gradient and shared_backward and tiled_backward and tiled_forward
+            and inputs.is_cuda and inputs.dtype == torch.bfloat16 and inputs.is_contiguous()
+            and inputs.shape == (256, TOKEN_COUNT, 256) and layer.heads == 8):
+        return _packed_attention_with_bias_gradient(layer, inputs)
     packed = layer.qkv(inputs)
     if not packed.is_cuda or packed.dtype != torch.bfloat16 or not packed.is_contiguous() or packed.numel() >= 2**31:
         query, key, value = (layer._split_heads(projection) for projection in packed.chunk(3, dim=-1))
@@ -325,7 +330,7 @@ class _ProjectionWithBiasGradient(torch.autograd.Function):
         return grad_inputs, grad_weight, grad_bias, None
 
 
-def packed_attention_with_bias_gradient(layer, inputs):
+def _packed_attention_with_bias_gradient(layer, inputs):
     projection = layer.qkv
     weight = projection.weight.to(inputs.dtype)
     bias = projection.bias.to(inputs.dtype)

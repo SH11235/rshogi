@@ -41,12 +41,12 @@ class TrainerTest(unittest.TestCase):
             deterministic=True, validation_only=True, validation_batches=0,
         )
 
-    def make_dataset(self, name, records) -> Path:
+    def make_dataset(self, name, records, *, shard_records=2) -> Path:
         source = self.root / f"{name}.jsonl"
         write_jsonl(source, records)
         output = self.root / name
         convert_jsonl(
-            source, output, shard_records=2,
+            source, output, shard_records=shard_records,
             teacher_kind="synthetic-validation-targets", split=name, training_status="validation-only",
         )
         return output
@@ -711,6 +711,72 @@ class TrainerTest(unittest.TestCase):
     def test_tiled_attention_forward_requires_packed_projection(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires fuse_packed_attention"):
             replace(self.config, tile_packed_attention_forward=True)
+
+    def packed_qkv_bias_config(self) -> TrainerConfig:
+        return replace(
+            self.config, device="cuda", precision="bf16", fused_optimizer=True, batch_size=256,
+            execution="cuda-graph-fused-norm", attention_backend="sdpa", compile_attention=True,
+            fuse_ffn_residual_norm=True, fuse_norm_cast=True, fuse_packed_attention=True,
+            fuse_packed_attention_backward=True, tile_packed_attention_backward=True,
+            tile_packed_attention_forward=True, fuse_packed_qkv_bias_gradient=True,
+        )
+
+    def test_packed_qkv_bias_gradient_requires_tiled_attention(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fuse_packed_qkv_bias_gradient requires tiled attention"):
+            replace(self.config, fuse_packed_qkv_bias_gradient=True)
+
+    def test_packed_qkv_bias_gradient_rejects_unsupported_batch_size(self) -> None:
+        config = replace(self.packed_qkv_bias_config(), batch_size=128)
+        model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True)
+        with self.assertRaisesRegex(TrainingError, "fuse_packed_qkv_bias_gradient requires width 256"):
+            self.run_training("unsupported-batch", config, model_config=model)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_packed_qkv_bias_gradient_matches_unfused(self) -> None:
+        from rshogi_dl._packed_attention import packed_attention_forward
+        from rshogi_dl.contract import TOKEN_COUNT
+
+        rng = torch.Generator(device="cuda").manual_seed(937)
+        attention = SelfAttention(256, 8, "sdpa").cuda()
+        attention.pack_qkv()
+        inputs = torch.randn((256, TOKEN_COUNT, 256), device="cuda", dtype=torch.bfloat16, generator=rng)
+        inputs.requires_grad_()
+        flags = dict(shared_backward=True, tiled_backward=True, tiled_forward=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            baseline = packed_attention_forward(attention, inputs, **flags)
+            fused = packed_attention_forward(attention, inputs, **flags, fuse_qkv_bias_gradient=True)
+        torch.testing.assert_close(baseline, fused, rtol=0, atol=0)
+        upstream = torch.randn(baseline.shape, device="cuda", dtype=baseline.dtype, generator=rng)
+        parameters = inputs, *attention.parameters()
+        base_grads = torch.autograd.grad(baseline, parameters, upstream)
+        fused_grads = torch.autograd.grad(fused, parameters, upstream)
+        for want, got in zip(base_grads, fused_grads, strict=True):
+            reference = want.float()
+            relative = (reference - got.float()).norm() / reference.norm().clamp_min(1e-24)
+            self.assertLessEqual(float(relative), 0.01)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_packed_qkv_bias_gradient_resume(self) -> None:
+        records = synthetic_records(seed=29, count=6 * 256 + 1)
+        for record in records:
+            record["policy"] = [[record["legal_labels"][0], 1]]
+        self.train = self.make_dataset("full-policy", records, shard_records=512)
+        model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True)
+        config = replace(self.packed_qkv_bias_config(), max_steps=12, checkpoint_every=6)
+        full = self.run_training("qkv-graph", config, model_config=model)
+        self.assertEqual(full["cuda_graph_replayed_steps"], 7)
+        checkpoint = self.root / "qkv-graph" / "resume-0000000006.pt"
+        with self.assertRaisesRegex(ResumeError, "configuration differs"):
+            self.run_training(
+                "qkv-without-fusion", replace(config, fuse_packed_qkv_bias_gradient=False),
+                model_config=model, resume=checkpoint,
+            )
+        resumed = self.run_training("qkv-resumed", config, model_config=model, resume=checkpoint)
+        self.assertEqual(resumed["cuda_graph_replayed_steps"], 1)
+        want = load_resume(self.root / "qkv-graph" / "resume-final.pt")
+        got = load_resume(self.root / "qkv-resumed" / "resume-final.pt")
+        for name in ("model_state", "optimizer_state", "progress", "rng"):
+            self.assert_nested_equal(want[name], got[name])
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_tiled_attention_forward_resume_after_eager_fallback(self) -> None:

@@ -87,6 +87,7 @@ class TrainerConfig:
     tile_packed_attention_forward: bool = False
     fuse_attention_residual_norm: bool = False
     fuse_final_residual_norm: bool = False
+    fuse_packed_qkv_bias_gradient: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -105,6 +106,7 @@ class TrainerConfig:
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
             "fuse_muon_symmetric_polynomial",
             "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
+            "fuse_packed_qkv_bias_gradient",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -147,6 +149,14 @@ class TrainerConfig:
             raise ValueError("tile_packed_attention_backward requires fuse_packed_attention_backward")
         if self.tile_packed_attention_forward and not self.fuse_packed_attention:
             raise ValueError("tile_packed_attention_forward requires fuse_packed_attention")
+        if self.fuse_packed_qkv_bias_gradient and not (
+            self.tile_packed_attention_forward and self.tile_packed_attention_backward
+            and self.fuse_ffn_residual_norm and self.compile_attention
+        ):
+            raise ValueError(
+                "fuse_packed_qkv_bias_gradient requires tiled attention forward and backward, "
+                "fuse_ffn_residual_norm and compile_attention"
+            )
         for name in ("fuse_norm_cast", "fuse_ffn_residual_norm"):
             if getattr(self, name) and self.execution != "cuda-graph-fused-norm":
                 raise ValueError(f"{name} requires cuda-graph-fused-norm execution")
@@ -174,7 +184,7 @@ def _config_dict(config: TrainerConfig) -> dict:
                  "fuse_packed_attention", "fuse_packed_attention_backward",
                  "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
                  "fuse_muon_symmetric_polynomial", "tile_packed_attention_forward", "fuse_attention_residual_norm",
-                 "fuse_final_residual_norm"):
+                 "fuse_final_residual_norm", "fuse_packed_qkv_bias_gradient"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -300,6 +310,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
             "fuse_muon_symmetric_polynomial",
             "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
+            "fuse_packed_qkv_bias_gradient",
         }
         saved_config = payload["trainer_config"]
         if (
@@ -439,6 +450,10 @@ def run_training(
     resume: str | Path | None = None,
 ) -> dict:
     """有限回だけ更新し、再開状態・v1 export checkpoint・held-out report を新規 run に保存する。"""
+    if config.fuse_packed_qkv_bias_gradient and (
+        model_config.width != 256 or config.batch_size != 256 or model_config.layers < 2
+    ):
+        raise TrainingError("fuse_packed_qkv_bias_gradient requires width 256, batch size 256 and at least two layers")
     if config.fuse_ffn_residual_norm:
         if model_config.width not in (128, 192, 224, 256) or not model_config.packed_qkv:
             raise TrainingError("fuse_ffn_residual_norm requires width 128, 192, 224 or 256 and packed QKV")
@@ -531,6 +546,7 @@ def run_training(
                 tile_packed_attention_forward=config.tile_packed_attention_forward,
                 fuse_attention_residual_norm=config.fuse_attention_residual_norm,
                 fuse_final_residual_norm=config.fuse_final_residual_norm,
+                fuse_packed_qkv_bias_gradient=config.fuse_packed_qkv_bias_gradient,
             )
         elif config.execution == "cuda-graph-fused-norm":
             execution = compiled_residual_forward(
@@ -708,6 +724,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fuse-packed-attention-backward", action="store_true")
     parser.add_argument("--tile-packed-attention-backward", action="store_true")
     parser.add_argument("--tile-packed-attention-forward", action="store_true")
+    parser.add_argument("--fuse-packed-qkv-bias-gradient", action="store_true")
     parser.add_argument("--prefetch-input", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
