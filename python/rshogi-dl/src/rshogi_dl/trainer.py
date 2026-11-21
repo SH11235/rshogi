@@ -80,6 +80,7 @@ class TrainerConfig:
     compile_attention: bool = False
     fuse_ffn_residual_norm: bool = False
     fuse_packed_attention: bool = False
+    fuse_packed_attention_backward: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -94,7 +95,7 @@ class TrainerConfig:
         for name in (
             "fused_optimizer", "deterministic", "validation_only",
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
-            "fuse_packed_attention",
+            "fuse_packed_attention", "fuse_packed_attention_backward",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -129,6 +130,8 @@ class TrainerConfig:
                 raise ValueError(f"{name} requires whole-step CUDA Graph execution")
         if self.fuse_packed_attention and self.attention_backend != "sdpa":
             raise ValueError("fuse_packed_attention requires the sdpa attention backend")
+        if self.fuse_packed_attention_backward and not self.fuse_packed_attention:
+            raise ValueError("fuse_packed_attention_backward requires fuse_packed_attention")
         for name in ("fuse_norm_cast", "fuse_ffn_residual_norm"):
             if getattr(self, name) and self.execution != "cuda-graph-fused-norm":
                 raise ValueError(f"{name} requires cuda-graph-fused-norm execution")
@@ -147,7 +150,7 @@ def _config_dict(config: TrainerConfig) -> dict:
     if config.optimizer == "adamw":
         del payload["optimizer"], payload["muon_learning_rate"]
     for name in ("compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
-                 "fuse_packed_attention"):
+                 "fuse_packed_attention", "fuse_packed_attention_backward"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -269,7 +272,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
         optimizer_fields = {"optimizer", "muon_learning_rate"}
         required = expected - optimizer_fields - {
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
-            "fuse_packed_attention",
+            "fuse_packed_attention", "fuse_packed_attention_backward",
         }
         saved_config = payload["trainer_config"]
         if (
@@ -435,6 +438,10 @@ def run_training(
     initial_step = progress["step"]
     initial_updates = progress["optimizer_updates"]
     with _settings(config) as device:
+        if config.fuse_packed_attention_backward:
+            properties = torch.cuda.get_device_properties(device)
+            if properties.major < 8 or properties.shared_memory_per_block_optin < 64 * 1024:
+                raise TrainingError("fuse_packed_attention_backward requires Ampere or newer and 64 KiB shared memory per block")
         uses_step_graph = config.execution in _STEP_GRAPH_EXECUTIONS
         model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
         if config.optimizer == "adamw":
@@ -476,6 +483,7 @@ def run_training(
                 cast_norm=config.fuse_norm_cast, compile_ffn=config.compile_ffn, compile_attention=config.compile_attention,
                 fuse_ffn_residual_norm=config.fuse_ffn_residual_norm,
                 fuse_packed_attention=config.fuse_packed_attention,
+                fuse_packed_attention_backward=config.fuse_packed_attention_backward,
             )
         elif config.execution == "cuda-graph-fused-norm":
             execution = compiled_residual_forward(
@@ -644,6 +652,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fuse-norm-cast", action="store_true")
     parser.add_argument("--fuse-ffn-residual-norm", action="store_true")
     parser.add_argument("--fuse-packed-attention", action="store_true")
+    parser.add_argument("--fuse-packed-attention-backward", action="store_true")
     parser.add_argument("--prefetch-input", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
