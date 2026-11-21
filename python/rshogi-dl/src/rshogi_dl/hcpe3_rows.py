@@ -130,23 +130,23 @@ def _assemble(rows):
     row_keys = np.arange(len(rows), dtype=np.int32) * POLICY_SIZE
     legal_keys = np.repeat(row_keys, legal_lengths) + legal
     visit_keys = np.repeat(row_keys, visit_lengths) + visits[:, 0]
-    order = np.argsort(legal_keys)
-    legal_sorted = legal_keys[order]
+    ranks = np.arange(1, legal.size + 1, dtype=np.int32)
+    legal_by_row_label = np.zeros(len(rows) * POLICY_SIZE, dtype=np.int32)
+    legal_by_row_label[legal_keys] = ranks
     played_keys = row_keys + np.fromiter((row.played for row in rows), dtype="<u2", count=len(rows))
-    played = np.searchsorted(legal_sorted, played_keys)
-    if np.any(played == legal.size) or np.any(legal_sorted[played] != played_keys):
+    if np.any(legal_by_row_label[played_keys] == 0):
         raise Hcpe3RowsError("HCPE3 played label is not legal")
-    found = np.searchsorted(legal_sorted, visit_keys)
-    if np.any(found == legal.size) or np.any(legal_sorted[found] != visit_keys):
+    positions = legal_by_row_label[visit_keys]
+    if np.any(positions == 0):
         raise Hcpe3RowsError("HCPE3 candidate is not legal")
-    if np.any(legal_sorted[1:] == legal_sorted[:-1]) or np.unique(visit_keys).size != visit_keys.size:
+    if np.any(legal_by_row_label[legal_keys] != ranks) or np.unique(visit_keys).size != visit_keys.size:
         raise Hcpe3RowsError("HCPE3 labels contain duplicates")
     weights = visits[:, 1]
     if np.any(weights == 0):
         raise Hcpe3RowsError("HCPE3 policy visit counts must be positive")
     totals = np.add.reduceat(weights.astype(np.uint64), _offsets(visit_lengths)[:-1].astype(np.intp))
     target = np.zeros(legal.size, dtype="<f4")
-    target[order[found]] = weights.astype(np.float64) / np.repeat(totals, visit_lengths)
+    target[positions - 1] = weights.astype(np.float64) / np.repeat(totals, visit_lengths)
     return {
         "tokens": tokens,
         "values": np.fromiter((row.value for row in rows), dtype="<f4", count=len(rows)),
