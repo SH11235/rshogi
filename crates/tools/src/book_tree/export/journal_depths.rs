@@ -15,7 +15,7 @@ use std::{
 #[derive(Default)]
 pub(super) struct Depths {
     fingerprints: BTreeSet<String>,
-    readings: BTreeMap<(String, String), journal::Reading>,
+    readings: BTreeMap<(String, String), (journal::Reading, bool)>,
 }
 
 impl Depths {
@@ -41,7 +41,7 @@ impl Depths {
             .readings
             .get(&(fingerprint.to_owned(), row.get("key").to_owned()))
             .into_iter()
-            .filter_map(|reading| reading.multipv.iter().find(|pv| pv.mv == row.get("move")))
+            .filter_map(|(reading, _)| reading.multipv.iter().find(|pv| pv.mv == row.get("move")))
             .map(|pv| pv.depth)
             .collect();
         depths.sort_unstable();
@@ -52,6 +52,7 @@ impl Depths {
 struct ValidatedReading {
     fingerprint: String,
     reading: journal::Reading,
+    engine: bool,
 }
 
 fn validate_record(rec: journal::Record) -> Result<ValidatedReading> {
@@ -67,13 +68,15 @@ fn validate_record(rec: journal::Record) -> Result<ValidatedReading> {
     Ok(ValidatedReading {
         fingerprint: rec.settings.fingerprint,
         reading,
+        engine: rec.provenance == "engine",
     })
 }
 
 enum Batch {
     Records {
         records: Vec<ValidatedReading>,
-        non_engine: usize,
+        engine: usize,
+        other: usize,
         invalid: usize,
     },
     Finished(Result<Option<bool>>),
@@ -81,11 +84,12 @@ enum Batch {
 
 fn send_records(
     records: Vec<journal::Record>,
-    non_engine: usize,
+    engine: usize,
+    other: usize,
     sender: &SyncSender<Batch>,
     pool: &rayon::ThreadPool,
 ) -> Result<()> {
-    let engine = records.len();
+    let candidates = records.len();
     // 後続ファイルが送信待ちでも、先頭ファイルの検証を複数スレッドで進める。
     let records: Vec<_> = pool.install(|| {
         records
@@ -94,11 +98,12 @@ fn send_records(
             .filter_map(|rec| validate_record(rec).ok())
             .collect()
     });
-    let invalid = engine - records.len();
+    let invalid = candidates - records.len();
     sender
         .send(Batch::Records {
             records,
-            non_engine,
+            engine,
+            other,
             invalid,
         })
         .map_err(|_| anyhow::anyhow!("台帳の読み込みを中断しました"))
@@ -111,26 +116,30 @@ fn read_batches(
     pool: &rayon::ThreadPool,
 ) {
     let mut records = Vec::new();
-    let mut non_engine = 0;
+    let mut engine = 0;
+    let mut other = 0;
     let scanned = journal::visit_records(path, |record| {
         anyhow::ensure!(!cancelled.load(Ordering::Relaxed), "台帳の読み込みを中断しました");
-        if record.provenance == "engine" {
+        let is_engine = record.provenance == "engine";
+        if is_engine || record.provenance.starts_with("journal:") {
+            engine += usize::from(is_engine);
             records.push(record);
         } else {
-            non_engine += 1;
+            other += 1;
         }
         if records.len() == 64 {
             send_records(
                 std::mem::take(&mut records),
-                std::mem::take(&mut non_engine),
+                std::mem::take(&mut engine),
+                std::mem::take(&mut other),
                 sender,
                 pool,
             )?;
         }
         Ok(())
     });
-    if (!records.is_empty() || non_engine > 0)
-        && send_records(records, non_engine, sender, pool).is_err()
+    if (!records.is_empty() || other > 0)
+        && send_records(records, engine, other, sender, pool).is_err()
     {
         return;
     }
@@ -140,7 +149,7 @@ fn read_batches(
 fn visit_files(
     paths: &[PathBuf],
     pool: &rayon::ThreadPool,
-    mut visit: impl FnMut(Vec<ValidatedReading>, usize, usize),
+    mut visit: impl FnMut(Vec<ValidatedReading>, usize, usize, usize),
     mut finished: impl FnMut(&Path, Option<bool>),
 ) -> Result<()> {
     let workers = pool.current_num_threads().min(paths.len());
@@ -184,10 +193,11 @@ fn visit_files(
                     match receivers[worker].recv().map_err(|_| stopped())? {
                         Batch::Records {
                             records,
-                            non_engine,
+                            engine,
+                            other,
                             invalid,
                         } => {
-                            visit(records, non_engine, invalid);
+                            visit(records, engine, other, invalid);
                         }
                         Batch::Finished(scanned) => {
                             finished(path, scanned?);
@@ -217,6 +227,7 @@ pub(super) fn load(
 ) -> Result<Depths> {
     let mut result = Depths::default();
     let mut engine = 0;
+    let mut imported = 0;
     let mut other = 0;
     let mut duplicates = 0;
     let mut used = 0;
@@ -233,15 +244,20 @@ pub(super) fn load(
             return;
         }
         match result.readings.entry((fp, key)) {
-            std::collections::btree_map::Entry::Occupied(entry) => {
-                if entry.get().same_values(&reading) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let (previous, previous_is_engine) = entry.get();
+                if previous.same_values(&reading) {
                     duplicates += 1;
                 } else {
                     conflicting += 1;
                 }
+                // 合流した台帳のパスが辞書順で先でも、engine の読みの深さを保つ。
+                if rec.engine && !previous_is_engine {
+                    entry.insert((reading, true));
+                }
             }
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(reading);
+                entry.insert((reading, rec.engine));
                 used += 1;
             }
         }
@@ -249,9 +265,10 @@ pub(super) fn load(
     let scan = visit_files(
         paths,
         pool,
-        |records, non_engine, invalid_rows| {
-            engine += records.len() + invalid_rows;
-            other += non_engine;
+        |records, engine_rows, other_rows, invalid_rows| {
+            engine += engine_rows;
+            imported += records.len() + invalid_rows - engine_rows;
+            other += other_rows;
             invalid += invalid_rows;
             for record in records {
                 visit_record(record);
@@ -267,7 +284,7 @@ pub(super) fn load(
         },
     );
     eprintln!(
-        "journal: engine={engine}, non-engine={other}, used={used}, duplicates={duplicates}, invalid={invalid}, conflicting={conflicting}, ignored-tail={tails}, skipped-files={skipped}, errors={}",
+        "journal: engine={engine}, imported={imported}, other={other}, used={used}, duplicates={duplicates}, invalid={invalid}, conflicting={conflicting}, ignored-tail={tails}, skipped-files={skipped}, errors={}",
         usize::from(scan.is_err())
     );
     scan?;

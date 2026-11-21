@@ -399,7 +399,7 @@ fn journal_depths_match_conditions_and_preserve_db() {
     copy["reading"]["key"] = serde_json::json!(format!("{HIRATE_KEY} 99"));
     copy["reading"]["nodes"] = serde_json::json!(900);
     let mut other = journal_record(90);
-    other["provenance"] = serde_json::json!("journal:import");
+    other["provenance"] = serde_json::json!("fixture-import");
     let mut foreign = journal_record(80);
     let mut settings: crate::book_tree::journal::Settings =
         serde_json::from_value(foreign["settings"].clone()).unwrap();
@@ -468,6 +468,128 @@ fn journal_depths_match_conditions_and_preserve_db() {
         serde_json::json!([30])
     );
     assert_eq!(std::fs::read(d.path().join("book.db")).unwrap(), db);
+}
+
+#[test]
+fn journal_depths_export_imported_readings_once_and_prefer_engine() {
+    use crate::book_tree::reply_graph::HIRATE_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = journal_record(30);
+    let fp = engine["settings"]["fingerprint"].as_str().unwrap();
+    let mut imported = engine.clone();
+    imported["provenance"] = serde_json::json!(format!(
+        "journal:sha256={}:fingerprint={fp}:force=false:path=source.jsonl",
+        "a".repeat(64)
+    ));
+    let mut conflicting = imported.clone();
+    conflicting["reading"]["multipv"][0]["depth"] = serde_json::json!(90);
+    let mut resumed = imported.clone();
+    resumed["provenance"] =
+        serde_json::json!(format!("{}:offset=4096", imported["provenance"].as_str().unwrap()));
+    let mut other = engine.clone();
+    other["provenance"] = serde_json::json!("fixture-import");
+
+    let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
+    r.set("cond", fp[..8].into());
+    std::fs::write(dir.path().join("moves.tsv"), master_table::format_master(&[r])).unwrap();
+    let journal = dir.path().join("journal.jsonl");
+    for (records, expected) in [
+        (vec![&imported], Some(30)),
+        (vec![&resumed], Some(30)),
+        (vec![&imported, &engine], Some(30)),
+        (vec![&conflicting, &engine], Some(30)),
+        (vec![&engine, &conflicting], Some(30)),
+        (vec![&imported, &conflicting], Some(30)),
+        (vec![&other], None),
+    ] {
+        let contents: String = records.iter().map(|record| format!("{record}\n")).collect();
+        std::fs::write(&journal, &contents).unwrap();
+        let mut a = args(dir.path());
+        a.journal = vec![journal.clone()];
+        a.force = true;
+        run_to(a, &mut Vec::new()).unwrap();
+        let annotation: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("book.annot.json")).unwrap())
+                .unwrap();
+        let depths = annotation["positions"][HIRATE_KEY]["moves"]["7g7f"].get("depths");
+        assert_eq!(depths.cloned(), expected.map(|depth| serde_json::json!([depth])), "{contents}");
+    }
+}
+
+#[test]
+fn journal_depths_export_from_original_and_merged_journals() {
+    use crate::book_tree::{TreeArgs, reply_graph::HIRATE_KEY};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tree: TreeArgs,
+    }
+
+    for merged_depth in [30, 90] {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let model = dir.path().join("model.bin");
+        std::fs::write(&engine, "engine").unwrap();
+        std::fs::write(&model, "model").unwrap();
+
+        let first_engine = dir.path().join("b-engine.jsonl");
+        let second_engine = dir.path().join("c-engine.jsonl");
+        let merged = dir.path().join("a-merged.jsonl");
+        let conflicts = dir.path().join("conflicts.tsv");
+        let first = journal_record(30);
+        std::fs::write(&first_engine, format!("{first}\n")).unwrap();
+        std::fs::write(&second_engine, format!("{}\n", journal_record(merged_depth))).unwrap();
+
+        let cli = Cli::try_parse_from([
+            "tree",
+            "import-journal",
+            "--engine",
+            engine.to_str().unwrap(),
+            "--engine-option",
+            &format!("EvalFile={}", model.display()),
+            "--nodes",
+            "1000",
+            "--from-journal",
+            second_engine.to_str().unwrap(),
+            "--from-journal",
+            first_engine.to_str().unwrap(),
+            "--journal",
+            merged.to_str().unwrap(),
+            "--on-conflict",
+            "keep-existing",
+            "--conflicts-out",
+            conflicts.to_str().unwrap(),
+        ])
+        .unwrap();
+        crate::book_tree::run(cli.tree).unwrap();
+        let conflict_list = std::fs::read_to_string(&conflicts).unwrap();
+        assert_eq!(conflict_list.lines().skip(1).count(), usize::from(merged_depth != 30));
+
+        let fp = first["settings"]["fingerprint"].as_str().unwrap();
+        let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
+        r.set("cond", fp[..8].into());
+        std::fs::write(dir.path().join("moves.tsv"), master_table::format_master(&[r])).unwrap();
+        for (journals, expected) in [
+            (vec![second_engine.clone(), first_engine.clone()], 30),
+            (vec![merged.clone()], merged_depth),
+            (vec![merged, second_engine, first_engine], 30),
+        ] {
+            let mut a = args(dir.path());
+            a.journal = journals;
+            a.force = true;
+            run_to(a, &mut Vec::new()).unwrap();
+            let annotation: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(dir.path().join("book.annot.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                annotation["positions"][HIRATE_KEY]["moves"]["7g7f"]["depths"],
+                serde_json::json!([expected]),
+                "merged depth: {merged_depth}",
+            );
+        }
+    }
 }
 
 #[test]
