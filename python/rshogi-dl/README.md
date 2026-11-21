@@ -128,6 +128,8 @@ python -m rshogi_dl.sharded convert-hcpe3 \
   --compression-level 3
 ```
 
+`--pipeline-writer` を付けると、専用スレッドが1 shardを書き込む間に次のshardを組み立てます。出力の順序とデータ形式は同じです。
+
 `--source` を繰り返すと、指定順に各ファイルを読みます。訪問数を合法手内の教師分布に正規化し、
 手番から見た勝敗を value 教師とします。対局別の分割や重複排除を行う場合は
 `rshogi_dl.hcpe3_rows.iter_frames` で対局キーを確認してから学習行を選べます。

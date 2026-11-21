@@ -138,6 +138,30 @@ class Hcpe3RowsTest(unittest.TestCase):
                             convert_hcpe3([source], output, encoder="tool", shard_records=1)
                         self.assertFalse((output / "manifest.json").exists())
 
+    def test_pipelined_conversion_preserves_shard_order_and_writer_failure(self):
+        with artifact_tempdir() as temporary:
+            root = Path(temporary)
+            source = root / "game.hcpe3"
+            source.write_bytes(b"immutable")
+            raw = source_stream() + source_stream(visits=(13, 1, 46, 2))[8:]
+
+            def convert(output, pipeline):
+                with mock.patch("rshogi_dl.sharded.subprocess.Popen") as popen:
+                    child = popen.return_value.__enter__.return_value
+                    child.stdout = io.BytesIO(raw)
+                    child.wait.return_value = child.poll.return_value = 0
+                    return convert_hcpe3([source], root / output, encoder="tool", shard_records=1,
+                                         compression_level=3, pipeline_writer=pipeline)
+
+            expected = convert("serial", False)
+            self.assertEqual(expected["shard_count"], 2)
+            self.assertEqual(convert("pipeline", True), expected)
+            self.assertEqual(verify_dataset(root / "pipeline"), expected)
+            with mock.patch("rshogi_dl.sharded._write_shard", side_effect=OSError("write failure")):
+                with self.assertRaisesRegex(OSError, "write failure"):
+                    convert("failed", True)
+            self.assertFalse((root / "failed" / "manifest.json").exists())
+
     @unittest.skipUnless(os.name == "posix", "requires POSIX process signals")
     def test_failed_conversion_reaps_an_encoder_that_ignores_termination(self):
         with artifact_tempdir() as temporary:
