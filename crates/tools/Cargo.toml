@@ -136,6 +136,7 @@ required-features = ["csa-replay"]
 
 [dependencies]
 rshogi-dl = { path = "../rshogi-dl" }
+rshogi-mcts = { path = "../rshogi-mcts" }
 # Workspace dependencies
 anyhow.workspace = true
 clap.workspace = true

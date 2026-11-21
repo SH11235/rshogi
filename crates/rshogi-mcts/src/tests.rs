@@ -44,7 +44,7 @@ fn backups_change_perspective_and_restore_history() -> Result<()> {
     assert_eq!(result.visits, 2);
     assert_eq!(result.evaluations, 2);
     assert!((result.value - 0.5).abs() < 1e-6);
-    assert_eq!(search.edges.iter().map(|e| e.visits).sum::<u64>(), 1);
+    assert_eq!(search.root_move_visits().collect::<Vec<_>>(), [(result.best_move, 1)]);
     assert!((search.edges.iter().map(|e| e.value_sum).sum::<f64>() - 0.8).abs() < 1e-6);
     assert_eq!(pos.to_sfen(), original);
     assert_eq!(history.len(), 1);
@@ -232,6 +232,7 @@ fn mate_is_propagated_and_root_declaration_needs_no_inference() -> Result<()> {
     )?;
     assert_eq!(result.best_move, Move::WIN);
     assert_eq!(result.evaluations, 0);
+    assert_eq!(search.root_move_visits().count(), 0);
     Ok(())
 }
 

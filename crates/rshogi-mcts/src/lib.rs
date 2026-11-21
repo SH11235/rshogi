@@ -182,6 +182,16 @@ impl Search {
         self.batch.as_ref().map_or(0, batch::Workspace::allocated_bytes)
     }
 
+    /// 現在の根で実際に訪問した候補手と完了訪問数を返す。
+    pub fn root_move_visits(&self) -> impl Iterator<Item = (Move, u64)> + '_ {
+        self.nodes.first().into_iter().flat_map(|root| {
+            self.edges[root.first_edge..root.first_edge + root.edge_count]
+                .iter()
+                .filter(|edge| edge.visits > 0)
+                .map(|edge| (edge.mv, edge.visits))
+        })
+    }
+
     /// 履歴を維持して探索し、失敗や中断でも入力局面と履歴を復元する。
     pub fn run(
         &mut self,

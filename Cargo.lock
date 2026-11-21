@@ -3623,6 +3623,7 @@ dependencies = [
  "rshogi-csa",
  "rshogi-csa-client",
  "rshogi-dl",
+ "rshogi-mcts",
  "rustix",
  "rustls",
  "same-file",
