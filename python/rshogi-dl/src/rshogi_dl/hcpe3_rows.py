@@ -15,6 +15,7 @@ _MAGIC = b"RSDLHC01"
 _GAME = Struct("<32sHH")
 _POSITION = Struct(f"<H{TOKEN_COUNT}sHHHB")
 _TOKEN_MINIMUM, _TOKEN_MAXIMUM = np.asarray(TOKEN_ID_RANGES, dtype=np.uint8).T
+_ASSEMBLY_ROWS = 512
 
 
 class Hcpe3RowsError(ValueError):
@@ -135,8 +136,8 @@ def _assemble(rows):
     ranks = np.arange(1, legal.size + 1, dtype=np.int32) - np.repeat(row_starts, legal_lengths)
     legal_by_row_label = np.zeros(len(rows) * POLICY_SIZE, dtype=np.uint16)
     legal_by_row_label[legal_keys] = ranks
-    played_keys = row_keys + np.fromiter((row.played for row in rows), dtype="<u2", count=len(rows))
-    if np.any(legal_by_row_label[played_keys] == 0):
+    played = np.fromiter((row.played for row in rows), dtype="<u2", count=len(rows))
+    if np.any(played >= POLICY_SIZE) or np.any(legal_by_row_label[row_keys + played] == 0):
         raise Hcpe3RowsError("HCPE3 played label is not legal")
     positions = legal_by_row_label[visit_keys]
     if np.any(positions == 0):
@@ -165,7 +166,7 @@ def assemble_shards(frames: Iterator[PackedPolicyFrame], shard_records: int):
     while True:
         blocks, offset, size = [], 0, 0
         while size < shard_records:
-            rows = list(islice(frames, min(512, shard_records - size)))
+            rows = list(islice(frames, min(_ASSEMBLY_ROWS, shard_records - size)))
             if not rows:
                 break
             block = _assemble(rows)
