@@ -14,6 +14,8 @@ mod alpha_beta;
 mod analysis;
 mod engine;
 mod eval_helpers;
+#[cfg(not(target_arch = "wasm32"))]
+mod game_mate;
 mod history;
 mod limits;
 mod movepicker;

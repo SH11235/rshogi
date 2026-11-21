@@ -209,6 +209,8 @@ struct UsiEngine {
     mate_mode: MateMode,
     /// df-pn で 1 局面を解くスレッド数（MateThreadsで変更）
     mate_threads: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    game_mate_threads: usize,
     /// 最短手順モード（MateShortestで変更。None は通常の詰み判定）
     mate_shortest: Option<ShortestMode>,
     /// df-pn ソルバー（置換表を持ち回る。最初の go mate で確保）
@@ -289,6 +291,8 @@ impl UsiEngine {
             mate_hash_mb: DEFAULT_MATE_HASH_MB,
             mate_mode: MateMode::default(),
             mate_threads: 1,
+            #[cfg(not(target_arch = "wasm32"))]
+            game_mate_threads: 0,
             mate_shortest: None,
             mate_solver: None,
             mate_thread: None,
@@ -403,6 +407,8 @@ impl UsiEngine {
             MateMode::default().name()
         ));
         lines.push("option name MateThreads type spin default 1 min 1 max 512".to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        lines.push("option name GameMateThreads type spin default 0 min 0 max 512".to_string());
         lines.push("option name MateShortest type combo default Off var Off var Tsume var All var Estimate".to_string());
         lines.push("option name UseEvalHash type check default true".to_string());
         lines.push("option name EvalHashLargePages type check default true".to_string());
@@ -1163,6 +1169,12 @@ impl UsiEngine {
                     self.mate_threads = threads.min(512);
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            "GameMateThreads" => {
+                if let Ok(threads) = value.parse::<usize>() {
+                    self.game_mate_threads = threads.min(512);
+                }
+            }
             "MateShortest" => {
                 if value.eq_ignore_ascii_case("Off") {
                     self.mate_shortest = None;
@@ -1872,6 +1884,8 @@ impl UsiEngine {
         });
         self.prepare_eval_hash(&mut search);
         search.set_skill_options(self.skill_options);
+        #[cfg(not(target_arch = "wasm32"))]
+        search.set_game_mate_options(self.game_mate_threads, self.mate_hash_mb, self.mate_mode);
         // stop/ponderhitフラグをリセット（スレッド生成前に行い、go()内での競合を防ぐ）
         search.reset_flags();
         let stop_flag = search.stop_flag();
@@ -1950,6 +1964,10 @@ impl UsiEngine {
     /// 問題として解き、詰みなら `checkmate <手順>`、不詰なら `checkmate nomate`、時間切れ・stop なら
     /// `checkmate timeout` を返す。局面以前の対局履歴（千日手の履歴）は見ない。
     fn cmd_go_mate(&mut self, tokens: &[&str]) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(search) = self.search.as_mut() {
+            search.wait_for_game_mate();
+        }
         let time_ms = parse_go_mate_time(tokens);
         let mut pos = self.position.clone();
         let mut solver = self
