@@ -701,33 +701,25 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     let queued = |item: &Item| -> Result<String> {
         let rejoin = item.extra.iter().find(|(k, v)| *k == "rejoin" && !v.is_empty());
         let dig = (item.class == Class::Rejoin).then(|| dig_root(item)).transpose()?;
-        let key = item
-            .continuation_root(args.settle_cp)
-            .map_or(item.key.as_str(), |line| &line.key);
-        let roots: Vec<&str> = std::iter::once(key)
+        let roots: Vec<&str> = std::iter::once(item.key.as_str())
             .chain(rejoin.map(|(_, v)| v.as_str()))
             .chain(dig.as_deref())
             .collect();
-        let mut text = queued_text(&states, &roots, &item.side);
-        let ids: BTreeSet<_> = roots
-            .iter()
-            .filter_map(|key| excluded.get(&(key.to_string(), item.side.clone())))
-            .flat_map(|ids| ids.iter())
-            .collect();
-        if !ids.is_empty() {
-            if text == "なし" {
-                text.clear();
-            } else {
-                text.push_str("; ");
-            }
-            text.push_str(
-                &ids.into_iter()
-                    .map(|id| format!("{id} (exclude-queue)"))
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            );
+        let mut entries = queued_entries(&states, &excluded, &roots, &item.side, "");
+        if let Some(line) = item.continuation_root(args.settle_cp) {
+            entries.extend(queued_entries(
+                &states,
+                &excluded,
+                &[&line.key],
+                &item.side,
+                " (続きの先)",
+            ));
         }
-        Ok(text)
+        Ok(if entries.is_empty() {
+            "なし".into()
+        } else {
+            entries.join("; ")
+        })
     };
     let enqueue = args
         .enqueue_out
@@ -822,8 +814,8 @@ fn dig_root(item: &Item) -> Result<String> {
     child(&item.key, extra(item, "move")?)
 }
 
-fn has_tree(states: &[TreeState], key: &str, own: &str) -> bool {
-    states.iter().any(|t| t.depth >= 1 && t.own == own && t.roots.contains(key))
+fn tree_matches(tree: &TreeState, roots: &[&str], own: &str) -> bool {
+    tree.depth >= 1 && tree.own == own && roots.iter().any(|key| tree.roots.contains(*key))
 }
 
 #[derive(Default)]
@@ -847,16 +839,27 @@ fn queue_lines(
     let mut positions = BTreeMap::new();
     let mut groups: Vec<(String, &Item, Vec<&Item>)> = Vec::new();
     for item in picked {
+        let own = &item.side;
         let key = if let Some(line) = item.continuation_root(args.settle_cp) {
             counts.shifted += 1;
+            // DONE の木の結果は元データの続きに反映されている。
+            if states
+                .iter()
+                .any(|tree| tree.state != "DONE" && tree_matches(tree, &[&item.key], own))
+                || excluded.contains_key(&(item.key.clone(), own.clone()))
+            {
+                counts.excluded += 1;
+                continue;
+            }
             line.key.clone()
         } else if item.class == Class::Rejoin {
             dig_root(item)?
         } else {
             item.key.clone()
         };
-        let own = &item.side;
-        if has_tree(states, &key, own) || excluded.contains_key(&(key.clone(), own.clone())) {
+        if states.iter().any(|tree| tree_matches(tree, &[&key], own))
+            || excluded.contains_key(&(key.clone(), own.clone()))
+        {
             counts.excluded += 1;
             continue;
         }
@@ -920,8 +923,13 @@ fn queue_lines(
         let number = first.move_number.unwrap_or(number);
         let continuation = members
             .iter()
-            .find_map(|item| item.continuation_root(args.settle_cp))
-            .map_or_else(String::new, |line| format!("、元データの続き {} 手の先", line.plies));
+            .find_map(|item| {
+                let line = item.continuation_root(args.settle_cp)?;
+                Some((line.plies, item.move_number?))
+            })
+            .map_or_else(String::new, |(plies, exit_number)| {
+                format!("、元データの続き {plies} 手の先 ({exit_number} 手目の出口から)")
+            });
         lines.push(Line {
             group: None,
             id: queue_id(&args.tag, root_number, &key, own),
@@ -1000,18 +1008,27 @@ fn position_text(item: &Item) -> String {
     format!("{} {number} 手目", side_name(side(&item.key)))
 }
 
-/// 同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`)。bw の木は両方の側に数える。
-fn queued_text(states: &[TreeState], roots: &[&str], own: &str) -> String {
+fn queued_entries(
+    states: &[TreeState],
+    excluded: &Excluded,
+    roots: &[&str],
+    own: &str,
+    suffix: &str,
+) -> Vec<String> {
     let found: BTreeSet<_> = states
         .iter()
-        .filter(|t| t.own == own && t.depth >= 1 && roots.iter().any(|key| t.roots.contains(*key)))
-        .map(|t| format!("{} ({}, {})", t.id, t.box_name, t.state))
+        .filter(|tree| tree_matches(tree, roots, own))
+        .map(|t| format!("{} ({}, {}){suffix}", t.id, t.box_name, t.state))
         .collect();
-    if found.is_empty() {
-        "なし".into()
-    } else {
-        found.into_iter().collect::<Vec<_>>().join("; ")
-    }
+    let ids: BTreeSet<_> = roots
+        .iter()
+        .filter_map(|key| excluded.get(&(key.to_string(), own.to_owned())))
+        .flatten()
+        .collect();
+    found
+        .into_iter()
+        .chain(ids.into_iter().map(|id| format!("{id} (exclude-queue){suffix}")))
+        .collect()
 }
 
 pub(super) fn kif(moves: &[String]) -> Result<String> {
@@ -1043,7 +1060,7 @@ fn markdown(
     writeln!(out, "# {title}\n")?;
     writeln!(
         out,
-        "重み = その出口に来る割合。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。出口の局面 = 止まった局面の手番と何手目で、かっこの中は手番が RAMU か相手か (own の止まりは RAMU の手番、out・rare は相手の手番、max は辿りの上限の手数による)。値 = RAMU が最後に指した定跡の手の値 (プラス = 先手良し)、出所 = 元データの value_kind。目標: 先手 {:+} 以上・後手 {:+} 未満。受付 = 同じ根・同じ側の段 1 以上の木 (id、台、状態)。\n",
+        "重み = その出口に来る割合。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。出口の局面 = 止まった局面の手番と何手目で、かっこの中は手番が RAMU か相手か (own の止まりは RAMU の手番、out・rare は相手の手番、max は辿りの上限の手数による)。値 = RAMU が最後に指した定跡の手の値 (プラス = 先手良し)、出所 = 元データの value_kind。目標: 先手 {:+} 以上・後手 {:+} 未満。受付 = 同じ根・同じ側の段 1 以上の木 (id、台、状態)。根を移す行は出口と続きの先の両方を照合し、続きの先の一致には「(続きの先)」を添えます。\n",
         args.target_black, args.target_white
     )?;
     let exits = |out: &mut Vec<u8>, title: &str, note: &str, class: Class| -> Result<()> {

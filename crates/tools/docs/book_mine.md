@@ -2461,7 +2461,7 @@ bridge・rejoin の表の ply は空でもよく (元データの ply が空の�
 
 表は `class side turn move_number weight value_black kind target queued key moves extra` の列を持ち、class の順に重みの大きい順 (同じ重みは入力の順) です。
 side は RAMU の側、turn は key の局面の手番 (b / w)、move_number は上の何手目 (不明なら `-`) です。moves は初期局面から key の局面までの手順 (USI) で、手順なしの行は `-` (空は初期局面) です。
-queued は同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) で、無ければ「なし」。積み荷の根が元データの続きの先に移る行は、移った先の根で照合します。rejoin の行は、局面・RAMU の手の後の dig の局面・戻った先の局面を根にした木です。`--exclude-queue` の一致も id を表示します。
+queued と Markdown の受付は、同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・failed・hold・read/requested、bw の木は両方の側) を表示します。無ければ「なし」です。根を続きの先へ移す条件を満たす行では、`--enqueue-out` の有無にかかわらず、出口と続きの先の両方の根を照合し、続きの先の一致には「(続きの先)」を添えます。rejoin の行は、局面・RAMU の手の後の dig の局面・戻った先の局面を根にした木です。`--exclude-queue` の一致も id を表示します。
 extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move・rejoin_main・rejoin (戻った先の局面)) です。
 stop が out・rare・max の行には `settle_plies` (出口から辿った手数)、`settle_black` (末端の値、先手から見た値。値なしは空欄)、`settle_end` (止まった理由。辿れる手が無い `missing`、千日手の筋 `repetition`、詰み `mate`、手数上限 `max`) も出します。
 報告は 1 (good)・1b (unsettled)・2a (bad)・2b (gap、`--bridge` のときだけ)・2c (rejoin、`--rejoin` のときだけ)・3 (shallow)・4 (weak) の節で、手順を漢字の棋譜で書きます。
@@ -2496,17 +2496,18 @@ book_mine tree enqueue --state /path/to/state --from exits.jsonl
 
 出す根と同じ局面・同じ own の段 1 以上の木が `--box` の受付にあれば除きます。
 `--exclude-queue` は `master walk` と同じ照合で、段 1 以上の木の根に加え、game の途中の局面 (depth + 1 手まで、その木の own の手番の局面) も受付ありと数えます。bw の木は両側に数えます。
+根を続きの先へ移す行は、出口の根にも同じ条件で照合します。出口に DONE 以外の `--box` の木があるか、`--exclude-queue` が一致すれば除きます。出口の受付が DONE の木だけなら、続きの先に一致がなければ出します。どちらの根で除いた行も「照合除外」に数えます。
 rejoin の積み荷も dig の根と own で照合します。報告の受付欄は元の局面・戻った先も表示の照合に使うので、その木しか無い場合は dig の計画を出します。
 move_number が不明な行は根の手数を作れないので出さず、標準出力で件数を示します。
 
 priority は次の順で決めます。
 
 1. 重みが `--enqueue-heavy-weight` 以上なら `--enqueue-priority-heavy` (目標に届いていても適用)。
-2. それ以外で目標に届かないか未決着なら `--enqueue-priority-miss` (rejoin は戻った先の値で未達)。
+2. それ以外で class が unsettled (未決着) または rejoin (戻った先の値が未達) の行、もしくは値が目標に届かない行は `--enqueue-priority-miss`。weak・bad は出口の値で判定し、根を移した後も同じ規則を使います。
 3. その他 (値なしも含む) は `--enqueue-priority-other`。
 
 同じ (根の局面, own) は 1 行にまとめ、game は初出順で重複なく合併し、priority は最小、根の手数は最小にします。手数の分からない行も、同じ根の行があればそこにまとめます (手数なしに数えるのは、まとめる先も無い行だけです)。
-memo は先の分類 (unsettled → bad → gap → rejoin → shallow → weak)、同じ分類なら重い行を代表にし、分類・何手目・先手から見た値・出所・重みと、まとめた件数を短く記します。続きの先へ移した行があれば、最初の該当行の「元データの続き N 手の先」も記します。
+memo は先の分類 (unsettled → bad → gap → rejoin → shallow → weak)、同じ分類なら重い行を代表にし、分類・何手目・先手から見た値・出所・重みと、まとめた件数を短く記します。続きの先へ移した行があれば、最初の該当行から「元データの続き N 手の先 (M 手目の出口から)」も記します。
 id は `master walk` と同じ `queue_id(tag, 根の手数, 根の key, own)` で、`<tag>_<手数>_<key の SHA-256 先頭16桁>_<own>` です。
 出力は代表の分類順、同じ分類では重みの大きい順 (同じ重みは入力順) です。
 
