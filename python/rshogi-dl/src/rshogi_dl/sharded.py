@@ -21,7 +21,7 @@ import torch
 
 from .contract import INPUT_FORMAT, MAX_LEGAL_LABELS, POLICY_FORMAT, TOKEN_COUNT, VALUE_FORMAT
 from .data import Batch, Record, RecordError, iter_records, validate_record
-from .hcpe3_rows import Hcpe3RowsError, PolicyFrame, iter_frames
+from .hcpe3_rows import Hcpe3RowsError, PolicyFrame, assemble_shards, iter_frames
 from .paths import ArtifactPathError, shogi_data_root
 
 FORMAT = "rshogi-dl-sharded-v1"
@@ -150,9 +150,9 @@ def _write_shard(
     entries = len(columns["legal_indices"])
     arrays = {
         "tokens": columns["tokens"][:count],
-        "values": columns["values"][:count],
+        "values": np.asarray(columns["values"][:count], dtype="<f4"),
         "policy_present": columns["policy_present"][:count],
-        "legal_offsets": columns["legal_offsets"][:count + 1],
+        "legal_offsets": np.asarray(columns["legal_offsets"][:count + 1], dtype="<u8"),
         "legal_indices": np.asarray(columns["legal_indices"], dtype="<u2"),
         "policy_targets": np.asarray(columns["policy_targets"], dtype="<f4"),
     }
@@ -277,14 +277,11 @@ def convert_hcpe3(
             raise DatasetError("HCPE3 source changed during conversion")
 
     with subprocess.Popen([encoder, *paths], stdout=subprocess.PIPE) as child:
-        def records():
+        def frames():
             assert child.stdout is not None
-            try:
-                for frame in iter_frames(child.stdout):
-                    if isinstance(frame, PolicyFrame):
-                        yield validate_record(frame.to_record())
-            except Hcpe3RowsError as error:
-                raise DatasetError(str(error)) from error
+            for frame in iter_frames(child.stdout):
+                if isinstance(frame, PolicyFrame):
+                    yield frame
             try:
                 status = child.wait(timeout=_ENCODER_EXIT_GRACE_SECONDS)
             except subprocess.TimeoutExpired as error:
@@ -293,10 +290,12 @@ def convert_hcpe3(
                 raise DatasetError(f"HCPE3 encoder exited with status {status}")
 
         try:
-            return _convert_records(
-                records(), output, name, size, shard_records, teacher_kind, split, training_status,
-                check_sources, compression_level,
+            return _convert_shards(
+                assemble_shards(frames(), shard_records), output, name, size, shard_records, teacher_kind, split,
+                training_status, check_sources, compression_level,
             )
+        except Hcpe3RowsError as error:
+            raise DatasetError(str(error)) from error
         finally:
             if child.poll() is None:
                 child.terminate()
@@ -334,8 +333,13 @@ def _convert_records(
     check_source: Callable[[], None] | None = None,
     compression_level: int | None = None,
 ) -> dict:
-    compressor = None if compression_level is None else _compressor(compression_level)
-    _initialize_output(output)
+    return _convert_shards(
+        _record_shards(records, shard_records), output, source_name, source_size, shard_records,
+        teacher_kind, split, training_status, check_source, compression_level,
+    )
+
+
+def _record_shards(records: Iterable[Record], shard_records: int):
     columns = {
         "tokens": np.empty((shard_records, TOKEN_COUNT), dtype=np.uint8),
         "values": np.empty(shard_records, dtype="<f4"),
@@ -344,9 +348,6 @@ def _convert_records(
         "legal_indices": array("H"),
         "policy_targets": array("f"),
     }
-    content_digest = hashlib.sha256()
-    total = 0
-    shards = 0
     count = 0
     for record in records:
         columns["tokens"][count] = record.tokens
@@ -361,17 +362,36 @@ def _convert_records(
             weights = {label: weight / weight_sum for label, weight in record.policy}
             targets.extend(map(weights.get, record.legal_labels, repeat(0.0)))
         count += 1
-        total += 1
         columns["legal_offsets"][count] = len(columns["legal_indices"])
         if count == shard_records:
-            content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count, compressor)))
-            shards += 1
+            yield columns, count
             count = 0
             columns["legal_indices"] = array("H")
             columns["policy_targets"] = array("f")
             columns["legal_offsets"][0] = 0
     if count:
+        yield columns, count
+
+
+def _convert_shards(
+    batches,
+    output: Path,
+    source_name: str,
+    source_size: int,
+    shard_records: int,
+    teacher_kind: str,
+    split: str,
+    training_status: str,
+    check_source: Callable[[], None] | None,
+    compression_level: int | None,
+) -> dict:
+    compressor = None if compression_level is None else _compressor(compression_level)
+    _initialize_output(output)
+    content_digest = hashlib.sha256()
+    total = shards = 0
+    for columns, count in batches:
         content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count, compressor)))
+        total += count
         shards += 1
     if not total:
         raise DatasetError("cannot convert an empty dataset")

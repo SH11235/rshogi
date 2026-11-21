@@ -59,6 +59,24 @@ class ShardedTest(unittest.TestCase):
             )
         self.assertFalse((invalid / "manifest.json").exists())
 
+    def test_writer_stores_little_endian_buffers(self) -> None:
+        columns = {
+            "tokens": np.asarray([empty_board_tokens()], dtype=np.uint8),
+            "values": np.asarray([0.5], dtype=">f4"),
+            "policy_present": np.asarray([True]),
+            "legal_offsets": np.asarray([0, 1], dtype=">u8"),
+            "legal_indices": np.asarray([9], dtype=">u2"),
+            "policy_targets": np.asarray([1.0], dtype=">f4"),
+        }
+        sharded._write_shard(self.root, 0, columns, 1, None)
+        directory = self.root / "shard-00000000"
+        for name, dtype in (("values", "<f4"), ("legal_offsets", "<u8"),
+                            ("legal_indices", "<u2"), ("policy_targets", "<f4")):
+            with self.subTest(name=name):
+                stored = np.load(directory / f"{name}.npy", allow_pickle=False)
+                self.assertEqual(stored.dtype.str, dtype)
+                np.testing.assert_array_equal(stored, columns[name])
+
     def test_jsonl_binary_batch_and_loss_parity_across_shards(self) -> None:
         manifest = self.convert(special_records())
         self.assertEqual(manifest["shard_count"], 4)
