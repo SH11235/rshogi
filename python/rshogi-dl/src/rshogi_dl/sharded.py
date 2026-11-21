@@ -12,6 +12,7 @@ import subprocess
 import sys
 from array import array
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from itertools import chain, repeat
 from pathlib import Path
@@ -256,6 +257,7 @@ def convert_hcpe3(
     split: str = "unknown",
     training_status: str = "unknown",
     compression_level: int | None = None,
+    pipeline_writer: bool = False,
 ) -> dict:
     """HCPE3 を順番に再生し、訪問数付き学習行から教師 shard を作る。"""
     output = _conversion_output(destination, shard_records, teacher_kind, split, training_status)
@@ -292,7 +294,7 @@ def convert_hcpe3(
         try:
             return _convert_shards(
                 assemble_shards(frames(), shard_records), output, name, size, shard_records, teacher_kind, split,
-                training_status, check_sources, compression_level,
+                training_status, check_sources, compression_level, pipeline_writer=pipeline_writer,
             )
         except Hcpe3RowsError as error:
             raise DatasetError(str(error)) from error
@@ -384,13 +386,15 @@ def _convert_shards(
     training_status: str,
     check_source: Callable[[], None] | None,
     compression_level: int | None,
+    *,
+    pipeline_writer: bool = False,
 ) -> dict:
     compressor = None if compression_level is None else _compressor(compression_level)
     _initialize_output(output)
     content_digest = hashlib.sha256()
     total = shards = 0
-    for columns, count in batches:
-        content_digest.update(bytes.fromhex(_write_shard(output, shards, columns, count, compressor)))
+    for digest, count in _write_shards(batches, output, compressor, pipeline_writer):
+        content_digest.update(bytes.fromhex(digest))
         total += count
         shards += 1
     if not total:
@@ -410,6 +414,24 @@ def _convert_shards(
     }
     _publish_manifest(output, manifest, check_source)
     return manifest
+
+
+def _write_shards(batches, output, compressor, pipeline):
+    if not pipeline:
+        for index, (columns, count) in enumerate(batches):
+            yield _write_shard(output, index, columns, count, compressor), count
+        return
+    # HCPE3 assembly yields owned arrays, so assembly can overlap the write of the previous shard.
+    with ThreadPoolExecutor(max_workers=1) as writer:
+        pending = None
+        pending_count = 0
+        for index, (columns, count) in enumerate(batches):
+            if pending is not None:
+                yield pending.result(), pending_count
+            pending = writer.submit(_write_shard, output, index, columns, count, compressor)
+            pending_count = count
+        if pending is not None:
+            yield pending.result(), pending_count
 
 
 def _initialize_output(output: Path) -> None:
@@ -834,6 +856,7 @@ def main(argv: list[str] | None = None) -> int:
     hcpe3 = commands.add_parser("convert-hcpe3")
     hcpe3.add_argument("--source", action="append", required=True)
     hcpe3.add_argument("--encoder", required=True)
+    hcpe3.add_argument("--pipeline-writer", action="store_true")
     for conversion in (convert, hcpe3):
         conversion.add_argument("--output", required=True)
         conversion.add_argument("--shard-records", type=int, default=4096)
@@ -862,7 +885,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "convert":
                 result = convert_jsonl(args.source, args.output, **options)
             else:
-                result = convert_hcpe3(args.source, args.output, encoder=args.encoder, **options)
+                result = convert_hcpe3(args.source, args.output, encoder=args.encoder,
+                                       pipeline_writer=args.pipeline_writer, **options)
         elif args.command == "compress":
             result = compress_dataset(args.source, args.output, level=args.level)
         else:
