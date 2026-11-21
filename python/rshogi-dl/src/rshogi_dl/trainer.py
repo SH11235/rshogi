@@ -82,6 +82,7 @@ class TrainerConfig:
     fuse_packed_attention: bool = False
     fuse_packed_attention_backward: bool = False
     fuse_ffn_residual_norm_backward: bool = False
+    tile_packed_attention_backward: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -96,8 +97,8 @@ class TrainerConfig:
         for name in (
             "fused_optimizer", "deterministic", "validation_only",
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
-            "fuse_ffn_residual_norm_backward",
             "fuse_packed_attention", "fuse_packed_attention_backward",
+            "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -134,6 +135,8 @@ class TrainerConfig:
             raise ValueError("fuse_packed_attention requires the sdpa attention backend")
         if self.fuse_packed_attention_backward and not self.fuse_packed_attention:
             raise ValueError("fuse_packed_attention_backward requires fuse_packed_attention")
+        if self.tile_packed_attention_backward and not self.fuse_packed_attention_backward:
+            raise ValueError("tile_packed_attention_backward requires fuse_packed_attention_backward")
         for name in ("fuse_norm_cast", "fuse_ffn_residual_norm"):
             if getattr(self, name) and self.execution != "cuda-graph-fused-norm":
                 raise ValueError(f"{name} requires cuda-graph-fused-norm execution")
@@ -154,7 +157,8 @@ def _config_dict(config: TrainerConfig) -> dict:
     if config.optimizer == "adamw":
         del payload["optimizer"], payload["muon_learning_rate"]
     for name in ("compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
-                 "fuse_packed_attention", "fuse_packed_attention_backward", "fuse_ffn_residual_norm_backward"):
+                 "fuse_packed_attention", "fuse_packed_attention_backward",
+                 "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -276,8 +280,8 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
         optimizer_fields = {"optimizer", "muon_learning_rate"}
         required = expected - optimizer_fields - {
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
-            "fuse_ffn_residual_norm_backward",
             "fuse_packed_attention", "fuse_packed_attention_backward",
+            "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
         }
         saved_config = payload["trainer_config"]
         if (
@@ -490,6 +494,7 @@ def run_training(
                 fuse_ffn_residual_norm_backward=config.fuse_ffn_residual_norm_backward,
                 fuse_packed_attention=config.fuse_packed_attention,
                 fuse_packed_attention_backward=config.fuse_packed_attention_backward,
+                tile_packed_attention_backward=config.tile_packed_attention_backward,
             )
         elif config.execution == "cuda-graph-fused-norm":
             execution = compiled_residual_forward(
@@ -661,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fuse-ffn-residual-norm-backward", action="store_true")
     parser.add_argument("--fuse-packed-attention", action="store_true")
     parser.add_argument("--fuse-packed-attention-backward", action="store_true")
+    parser.add_argument("--tile-packed-attention-backward", action="store_true")
     parser.add_argument("--prefetch-input", action="store_true")
     parser.add_argument("--precision", choices=("fp32", "tf32", "fp16", "bf16"), default="fp32")
     parser.add_argument("--fused-optimizer", action="store_true")
