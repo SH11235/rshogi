@@ -12,9 +12,7 @@ use std::sync::atomic::{AtomicI16, Ordering};
 use crate::types::{Color, Piece, Square};
 
 use super::history::{CORRECTION_HISTORY_LIMIT, CORRECTION_HISTORY_SIZE, PAWN_HISTORY_SIZE};
-
-/// pawnHistory初期値
-pub(super) const PAWN_HISTORY_INIT: i16 = -1238;
+use super::tune_params::SearchTuneParams;
 
 /// 複数スレッドから読み書きする履歴の 1 entry。更新式は `StatsEntry` と同じ。
 #[repr(transparent)]
@@ -73,6 +71,13 @@ pub struct SharedHistories {
 impl SharedHistories {
     /// `num_threads` 本のスレッドで共有する表を作る (初期値込み)。
     pub fn new(num_threads: usize) -> Self {
+        Self::new_with_pawn_history_init(
+            num_threads,
+            SearchTuneParams::DEFAULT.pawn_history_init as i16,
+        )
+    }
+
+    pub(super) fn new_with_pawn_history_init(num_threads: usize, pawn_history_init: i16) -> Self {
         let scale = Self::scale_for(num_threads);
         let correction_len = CORRECTION_HISTORY_SIZE * scale;
         let pawn_history_len = PAWN_HISTORY_SIZE * scale;
@@ -91,7 +96,7 @@ impl SharedHistories {
             pawn_history_mask: pawn_history_len - 1,
             scale,
         };
-        shared.clear(PAWN_HISTORY_INIT);
+        shared.clear(pawn_history_init);
         shared
     }
 

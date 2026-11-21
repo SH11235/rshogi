@@ -794,7 +794,10 @@ impl SearchWorker {
         Self::new_with_shared(
             tt,
             eval_hash,
-            Arc::new(SharedHistories::new(1)),
+            Arc::new(SharedHistories::new_with_pawn_history_init(
+                1,
+                search_tune_params.pawn_history_init as i16,
+            )),
             max_moves_to_draw,
             thread_id,
             search_tune_params,
@@ -812,7 +815,7 @@ impl SearchWorker {
         thread_id: usize,
         search_tune_params: SearchTuneParams,
     ) -> Box<Self> {
-        let history = HistoryCell::new_boxed();
+        let history = HistoryCell::new_boxed_with_params(&search_tune_params);
         // HistoryCell経由でsentinelポインタを取得
         // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
         let (cont_history_sentinel, cont_correction_sentinel) = {
@@ -1011,6 +1014,13 @@ impl SearchWorker {
             self.numa_network = network;
             self.state.evaluator = SearchEvaluator::Uninitialized;
         }
+    }
+
+    pub(super) fn update_search_tune_params(&mut self, params: SearchTuneParams) {
+        if self.search_tune_params.lmr_table_coeff != params.lmr_table_coeff {
+            self.reductions = build_reductions(params.lmr_table_coeff);
+        }
+        self.search_tune_params = params;
     }
 
     /// usinewgameで呼び出し：全履歴をクリア

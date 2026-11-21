@@ -1510,7 +1510,7 @@ impl Default for SearchTuneParams {
 
 impl SearchTuneParams {
     /// 探索・USI 宣言・SPSA 生成で共有する既定値の正本。
-    const DEFAULT: Self = Self {
+    pub(super) const DEFAULT: Self = Self {
         iir_prior_reduction_threshold_shallow: 3,
         iir_prior_reduction_threshold_deep: 3,
         iir_depth_boundary: 10,

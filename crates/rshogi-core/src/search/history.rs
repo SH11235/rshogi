@@ -50,13 +50,14 @@ pub const FROM_TO_SIZE: usize = 1 << 16;
 // 開始値を「正しい」方向にシフトさせることでLMR/枝刈りの精度を上げる。
 
 /// mainHistory初期値
-const MAIN_HISTORY_INIT: i16 = 68;
+const MAIN_HISTORY_INIT: i16 = SearchTuneParams::DEFAULT.main_history_init as i16;
 
 /// captureHistory初期値
-const CAPTURE_HISTORY_INIT: i16 = -689;
+const CAPTURE_HISTORY_INIT: i16 = SearchTuneParams::DEFAULT.capture_history_init as i16;
 
 /// continuationHistory初期値
-pub const CONTINUATION_HISTORY_INIT: i16 = -529;
+pub const CONTINUATION_HISTORY_INIT: i16 =
+    SearchTuneParams::DEFAULT.continuation_history_init as i16;
 
 /// 駒種の数（PieceType::NUM相当）
 const PIECE_TYPE_NUM: usize = PieceType::NUM + 1; // None含む
@@ -228,11 +229,7 @@ impl LowPlyHistory {
 
     /// クリア（初期値97）
     pub fn clear(&mut self) {
-        for ply_table in &mut self.table {
-            for entry in ply_table.iter_mut() {
-                entry.set(97);
-            }
-        }
+        self.clear_with_init(SearchTuneParams::DEFAULT.low_ply_history_init as i16);
     }
 
     /// 指定初期値でクリア
@@ -702,27 +699,17 @@ pub struct HistoryTables {
 impl HistoryTables {
     /// 新しいHistoryTablesを作成（ヒープ確保）
     ///
-    /// `Box::new_zeroed` で一括確保しの初期値を設定する。
+    /// `Box::new_zeroed` で一括確保し、既定の初期値を設定する。
     pub fn new_boxed() -> Box<Self> {
         // SAFETY: 各テーブルは数値型のみで構成され、ゼロ初期化は常に有効。
         let mut history = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        // の初期値を全テーブルに設定
         history.clear();
         history
     }
 
     /// すべての履歴テーブルをクリア
     pub fn clear(&mut self) {
-        self.main_history.clear();
-        self.low_ply_history.clear();
-        self.capture_history.clear();
-        for row in &mut self.continuation_history {
-            for ch in row {
-                ch.clear();
-            }
-        }
-        self.correction_history.clear();
-        self.tt_move_history.clear();
+        self.clear_with_params(&SearchTuneParams::DEFAULT);
     }
 
     /// SPSA パラメータに基づいた初期値ですべての履歴テーブルをクリア
@@ -768,21 +755,16 @@ impl HistoryCell {
         }
     }
 
-    /// Boxから作成（大きな配列のスタック確保を避ける）
-    ///
-    /// # Safety
-    ///
-    /// ゼロ初期化されたメモリでHistoryCellを構築する。
-    /// 内部のHistoryTablesはゼロ初期化が有効な型のみで構成されている。
+    /// 既定の初期値で、履歴をヒープ上に作成する。
     pub fn new_boxed() -> Box<Self> {
-        // SAFETY: HistoryCellはUnsafeCell<HistoryTables>とPhantomDataで構成
-        // UnsafeCell<T>はTと同じレイアウトを持ち、HistoryTablesはゼロ初期化が有効
-        // PhantomDataはサイズ0のマーカー型でゼロ初期化は無害
-        // new_zeroedで直接ヒープに確保し、スタックオーバーフローを回避
-        let cell = unsafe { Box::<Self>::new_zeroed().assume_init() };
-        // の初期値を全テーブルに設定
-        // SAFETY: 初期化時のみ使用、他の参照と同時保持しない
-        unsafe { cell.as_mut_unchecked() }.clear();
+        Self::new_boxed_with_params(&SearchTuneParams::DEFAULT)
+    }
+
+    pub(super) fn new_boxed_with_params(params: &SearchTuneParams) -> Box<Self> {
+        // SAFETY: UnsafeCell<HistoryTables> はゼロ初期化が有効な HistoryTables と同じ
+        // レイアウトを持ち、PhantomData はサイズ 0 のマーカー型。
+        let mut cell = unsafe { Box::<Self>::new_zeroed().assume_init() };
+        cell.get_mut().clear_with_params(params);
         cell
     }
 

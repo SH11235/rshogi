@@ -231,7 +231,7 @@ mod imp {
             self.search_tune_params = search_tune_params;
             for thread in &self.threads {
                 thread.with_worker(|worker| {
-                    worker.search_tune_params = search_tune_params;
+                    worker.update_search_tune_params(search_tune_params);
                 });
             }
         }
@@ -1146,7 +1146,13 @@ mod imp {
         }
 
         pub fn update_search_tune_params(&mut self, search_tune_params: SearchTuneParams) {
+            self.wait_for_search_finished();
             self.search_tune_params = search_tune_params;
+            for slot in &self.workers {
+                if let Some(worker) = slot.lock().expect("worker slot poisoned").as_mut() {
+                    worker.update_search_tune_params(search_tune_params);
+                }
+            }
         }
 
         pub fn helper_threads(&self) -> &[Thread] {
