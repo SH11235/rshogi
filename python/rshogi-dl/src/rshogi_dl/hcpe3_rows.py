@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from itertools import chain, islice
+from itertools import islice
 from struct import Struct, unpack_from
 from typing import BinaryIO
 
@@ -13,8 +13,7 @@ from .contract import MAX_LEGAL_LABELS, POLICY_SIZE, TOKEN_COUNT, TOKEN_ID_RANGE
 
 _MAGIC = b"RSDLHC01"
 _GAME = Struct("<32sHH")
-_POSITION = Struct("<HHHB")
-_PLY = Struct("<H")
+_POSITION = Struct(f"<H{TOKEN_COUNT}sHHHB")
 _TOKEN_MINIMUM, _TOKEN_MAXIMUM = np.asarray(TOKEN_ID_RANGES, dtype=np.uint8).T
 
 
@@ -51,6 +50,16 @@ class PolicyFrame:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PackedPolicyFrame:
+    ply: int
+    played: int
+    tokens: bytes
+    value: float
+    legal_count: int
+    payload: bytes
+
+
 def _complete(stream: BinaryIO, data: bytes, length: int) -> bytes:
     if len(data) == length:
         return data
@@ -67,8 +76,7 @@ def _read(stream: BinaryIO, length: int) -> bytes:
     return _complete(stream, stream.read(length), length)
 
 
-def iter_frames(stream: BinaryIO) -> Iterator[GameFrame | PolicyFrame]:
-    """対局ヘッダーに続いて、その対局の学習行を順番に返す。"""
+def iter_packed_frames(stream: BinaryIO) -> Iterator[GameFrame | PackedPolicyFrame]:
     if _read(stream, len(_MAGIC)) != _MAGIC:
         raise Hcpe3RowsError("unsupported HCPE3 policy stream")
     while raw := stream.read(_GAME.size):
@@ -78,9 +86,7 @@ def iter_frames(stream: BinaryIO) -> Iterator[GameFrame | PolicyFrame]:
         yield GameFrame(key, move_count, row_count)
         previous_ply = -1
         for _ in range(row_count):
-            ply, = _PLY.unpack(_read(stream, _PLY.size))
-            tokens = _read(stream, TOKEN_COUNT)
-            played, legal_count, visit_count, result = _POSITION.unpack(_read(stream, _POSITION.size))
+            ply, tokens, played, legal_count, visit_count, result = _POSITION.unpack(_read(stream, _POSITION.size))
             if (
                 not previous_ply < ply < move_count or played >= POLICY_SIZE or result > 2
                 or not 0 < visit_count <= legal_count <= MAX_LEGAL_LABELS
@@ -88,13 +94,23 @@ def iter_frames(stream: BinaryIO) -> Iterator[GameFrame | PolicyFrame]:
                 raise Hcpe3RowsError("invalid HCPE3 policy row")
             previous_ply = ply
             payload = _read(stream, 2 * legal_count + 4 * visit_count)
-            legal = unpack_from(f"<{legal_count}H", payload)
-            visits = unpack_from(f"<{2 * visit_count}H", payload, 2 * legal_count)
-            if played not in legal:
-                raise Hcpe3RowsError("HCPE3 played label is not legal")
-            if 0 in visits[1::2]:
-                raise Hcpe3RowsError("HCPE3 policy visit counts must be positive")
-            yield PolicyFrame(ply, played, tokens, result / 2, legal, visits)
+            yield PackedPolicyFrame(ply, played, tokens, result / 2, legal_count, payload)
+
+
+def iter_frames(stream: BinaryIO) -> Iterator[GameFrame | PolicyFrame]:
+    """対局ヘッダーに続いて、その対局の学習行を順番に返す。"""
+    for frame in iter_packed_frames(stream):
+        if isinstance(frame, GameFrame):
+            yield frame
+            continue
+        legal = unpack_from(f"<{frame.legal_count}H", frame.payload)
+        count = len(frame.payload) // 2 - frame.legal_count
+        visits = unpack_from(f"<{count}H", frame.payload, 2 * frame.legal_count)
+        if frame.played not in legal:
+            raise Hcpe3RowsError("HCPE3 played label is not legal")
+        if 0 in visits[1::2]:
+            raise Hcpe3RowsError("HCPE3 policy visit counts must be positive")
+        yield PolicyFrame(frame.ply, frame.played, frame.tokens, frame.value, legal, visits)
 
 
 def _offsets(lengths):
@@ -105,13 +121,10 @@ def _assemble(rows):
     tokens = np.frombuffer(b"".join(row.tokens for row in rows), dtype=np.uint8).reshape(-1, TOKEN_COUNT)
     if np.any(tokens < _TOKEN_MINIMUM) or np.any(tokens > _TOKEN_MAXIMUM):
         raise Hcpe3RowsError("HCPE3 tokens are outside the allowed ranges")
-    legal_lengths = [len(row.legal_labels) for row in rows]
-    visit_lengths = [len(row.candidate_visits) // 2 for row in rows]
-    legal = np.fromiter(chain.from_iterable(row.legal_labels for row in rows), dtype="<u2", count=sum(legal_lengths))
-    flat_visits = np.fromiter(
-        chain.from_iterable(row.candidate_visits for row in rows), dtype="<u2", count=2 * sum(visit_lengths),
-    )
-    visits = flat_visits.reshape(-1, 2)
+    legal_lengths = [row.legal_count for row in rows]
+    visit_lengths = [(len(row.payload) - 2 * row.legal_count) // 4 for row in rows]
+    legal = np.frombuffer(b"".join(row.payload[:2 * row.legal_count] for row in rows), dtype="<u2")
+    visits = np.frombuffer(b"".join(row.payload[2 * row.legal_count:] for row in rows), dtype="<u2").reshape(-1, 2)
     if np.any(legal >= POLICY_SIZE) or np.any(visits[:, 0] >= POLICY_SIZE):
         raise Hcpe3RowsError("HCPE3 label is out of range")
     row_keys = np.arange(len(rows), dtype=np.int32) * POLICY_SIZE
@@ -119,12 +132,18 @@ def _assemble(rows):
     visit_keys = np.repeat(row_keys, visit_lengths) + visits[:, 0]
     order = np.argsort(legal_keys)
     legal_sorted = legal_keys[order]
+    played_keys = row_keys + np.fromiter((row.played for row in rows), dtype="<u2", count=len(rows))
+    played = np.searchsorted(legal_sorted, played_keys)
+    if np.any(played == legal.size) or np.any(legal_sorted[played] != played_keys):
+        raise Hcpe3RowsError("HCPE3 played label is not legal")
     found = np.searchsorted(legal_sorted, visit_keys)
     if np.any(found == legal.size) or np.any(legal_sorted[found] != visit_keys):
         raise Hcpe3RowsError("HCPE3 candidate is not legal")
     if np.any(legal_sorted[1:] == legal_sorted[:-1]) or np.unique(visit_keys).size != visit_keys.size:
         raise Hcpe3RowsError("HCPE3 labels contain duplicates")
     weights = visits[:, 1]
+    if np.any(weights == 0):
+        raise Hcpe3RowsError("HCPE3 policy visit counts must be positive")
     totals = np.add.reduceat(weights.astype(np.uint64), _offsets(visit_lengths)[:-1].astype(np.intp))
     target = np.zeros(legal.size, dtype="<f4")
     target[order[found]] = weights.astype(np.float64) / np.repeat(totals, visit_lengths)
@@ -138,7 +157,7 @@ def _assemble(rows):
     }
 
 
-def assemble_shards(frames: Iterator[PolicyFrame], shard_records: int):
+def assemble_shards(frames: Iterator[PackedPolicyFrame], shard_records: int):
     """学習行を検証し、shardごとの配列にまとめる。"""
     while True:
         blocks, offset, size = [], 0, 0
