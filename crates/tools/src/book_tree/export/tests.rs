@@ -399,7 +399,7 @@ fn journal_depths_match_conditions_and_preserve_db() {
     copy["reading"]["key"] = serde_json::json!(format!("{HIRATE_KEY} 99"));
     copy["reading"]["nodes"] = serde_json::json!(900);
     let mut other = journal_record(90);
-    other["provenance"] = serde_json::json!("journal:import");
+    other["provenance"] = serde_json::json!("fixture-import");
     let mut foreign = journal_record(80);
     let mut settings: crate::book_tree::journal::Settings =
         serde_json::from_value(foreign["settings"].clone()).unwrap();
@@ -468,6 +468,48 @@ fn journal_depths_match_conditions_and_preserve_db() {
         serde_json::json!([30])
     );
     assert_eq!(std::fs::read(d.path().join("book.db")).unwrap(), db);
+}
+
+#[test]
+fn journal_depths_export_imported_readings_once_and_prefer_engine() {
+    use crate::book_tree::reply_graph::HIRATE_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = journal_record(30);
+    let fp = engine["settings"]["fingerprint"].as_str().unwrap();
+    let mut imported = engine.clone();
+    imported["provenance"] = serde_json::json!(format!(
+        "journal:sha256={}:fingerprint={fp}:force=false:path=source.jsonl",
+        "a".repeat(64)
+    ));
+    let mut conflicting = imported.clone();
+    conflicting["reading"]["multipv"][0]["depth"] = serde_json::json!(90);
+    let mut other = engine.clone();
+    other["provenance"] = serde_json::json!("fixture-import");
+
+    let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
+    r.set("cond", fp[..8].into());
+    std::fs::write(dir.path().join("moves.tsv"), master_table::format_master(&[r])).unwrap();
+    let journal = dir.path().join("journal.jsonl");
+    for (records, expected) in [
+        (vec![&imported], Some(30)),
+        (vec![&imported, &engine], Some(30)),
+        (vec![&conflicting, &engine], Some(30)),
+        (vec![&engine, &conflicting], Some(30)),
+        (vec![&imported, &conflicting], Some(30)),
+        (vec![&other], None),
+    ] {
+        let contents: String = records.iter().map(|record| format!("{record}\n")).collect();
+        std::fs::write(&journal, &contents).unwrap();
+        let mut a = args(dir.path());
+        a.journal = vec![journal.clone()];
+        a.force = true;
+        run_to(a, &mut Vec::new()).unwrap();
+        let annotation: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("book.annot.json")).unwrap())
+                .unwrap();
+        let depths = annotation["positions"][HIRATE_KEY]["moves"]["7g7f"].get("depths");
+        assert_eq!(depths.cloned(), expected.map(|depth| serde_json::json!([depth])), "{contents}");
+    }
 }
 
 #[test]
