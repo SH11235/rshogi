@@ -271,6 +271,7 @@ python -m rshogi_dl.trainer \
 | `--compile-ffn` | 学習時の満杯batchでFFNのCUDA kernelを探索。既定は無効 |
 | `--compile-attention` | 学習時の満杯batchでAttentionの射影を含む演算のCUDA kernelを探索。既定は無効 |
 | `--fuse-norm-cast` | attention残差側のLayerNormの出力を同じ処理内でBF16にする。既定は無効 |
+| `--fuse-attention-residual-norm` | 幅128、192、224、256のAttention残差加算とLayerNormの順伝播・逆伝播にCUDA Tritonを使う。`--fuse-norm-cast` が必要。丸め順が変わる場合がある。既定は無効 |
 | `--fuse-ffn-residual-norm` | 幅128、192、224、256の学習で、ブロック間のFFN残差加算とLayerNormの順伝播・逆伝播を融合する。既定は無効 |
 | `--fuse-ffn-residual-norm-backward` | FFN残差LayerNormの入力勾配とweight・bias勾配の部分和を融合する。`--fuse-ffn-residual-norm` が必要。丸め順が変わる。既定は無効 |
 | `--fuse-packed-attention` | 連結QKV・ヘッド幅32・SDPAで、CUDA Graph学習のAttentionを融合する。NVIDIA CUDAとTritonが必要。既定は無効 |
@@ -305,7 +306,7 @@ python -m rshogi_dl.trainer \
 
 `--fuse-norm-cast` は `--execution cuda-graph-fused-norm` で、FFNへの入力をLayerNormの融合処理内でBF16にします。残差はFP32で保持します。`--compile-ffn` と併用でき、途中再開では同じ設定を指定します。
 
-`--fuse-ffn-residual-norm` は幅128または256の連結QKVで、`--execution cuda-graph-fused-norm` とNVIDIA CUDA向けTritonを使用する学習で有効です。FP32のFFN残差加算と次ブロックのLayerNormをまとめ、正規化出力をBF16にします。評価とONNX出力には通常の演算を使い、途中再開では同じ設定を指定します。
+`--fuse-ffn-residual-norm` は幅128、192、224、256の連結QKVで、`--execution cuda-graph-fused-norm` とNVIDIA CUDA向けTritonを使用する学習で有効です。FP32のFFN残差加算と次ブロックのLayerNormをまとめ、正規化出力をBF16にします。評価とONNX出力には通常の演算を使い、途中再開では同じ設定を指定します。
 
 `--prefetch-input` は両方のCUDA Graph実行方式で使えます。Graphの対象外となるbatchは通常の転送を使います。途中再開で切り替えられます。
 
