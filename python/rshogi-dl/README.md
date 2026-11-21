@@ -272,6 +272,7 @@ python -m rshogi_dl.trainer \
 | `--compile-attention` | 学習時の満杯batchでAttentionの射影を含む演算のCUDA kernelを探索。既定は無効 |
 | `--fuse-norm-cast` | attention残差側のLayerNormの出力を同じ処理内でBF16にする。既定は無効 |
 | `--fuse-attention-residual-norm` | 幅128、192、224、256のAttention残差加算とLayerNormの順伝播・逆伝播にCUDA Tritonを使う。`--fuse-norm-cast` が必要。丸め順が変わる場合がある。既定は無効 |
+| `--fuse-final-residual-norm` | 幅128、192、224、256の最終FFN残差加算と出力LayerNormを順伝播・逆伝播で融合する。`--fuse-norm-cast` が必要。丸め順が変わる場合がある。既定は無効 |
 | `--fuse-ffn-residual-norm` | 幅128、192、224、256の学習で、ブロック間のFFN残差加算とLayerNormの順伝播・逆伝播を融合する。既定は無効 |
 | `--fuse-ffn-residual-norm-backward` | FFN残差LayerNormの入力勾配とweight・bias勾配の部分和を融合する。`--fuse-ffn-residual-norm` が必要。丸め順が変わる。既定は無効 |
 | `--fuse-packed-attention` | 連結QKV・ヘッド幅32・SDPAで、CUDA Graph学習のAttentionを融合する。NVIDIA CUDAとTritonが必要。既定は無効 |

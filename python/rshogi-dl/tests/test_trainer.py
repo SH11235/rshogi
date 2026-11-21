@@ -810,6 +810,18 @@ class TrainerTest(unittest.TestCase):
             model_config=replace(TEST_CONFIG, layers=2, width=224, heads=7, ffn_width=512),
         )
 
+    def test_final_residual_norm_requires_norm_cast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fuse_final_residual_norm requires fuse_norm_cast"):
+            replace(self.config, fuse_final_residual_norm=True)
+
+    def test_final_residual_norm_rejects_unsupported_width(self) -> None:
+        config = replace(
+            self.config, device="cuda", precision="bf16", fused_optimizer=True,
+            execution="cuda-graph-fused-norm", fuse_norm_cast=True, fuse_final_residual_norm=True,
+        )
+        with self.assertRaisesRegex(TrainingError, "fuse_final_residual_norm requires width"):
+            self.run_training("unsupported-width", config, model_config=replace(TEST_CONFIG, width=64, heads=2))
+
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_final_residual_resume_after_eager_fallback(self) -> None:
         self.check_cuda_graph_resume(
