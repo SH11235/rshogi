@@ -1077,7 +1077,7 @@ impl Search {
         self.game_mate.drain();
     }
 
-    /// 探索スレッド数を設定
+    /// 探索スレッド数を設定する。スレッド数が変わると、共有履歴と各 worker の履歴を初期化する。
     pub fn set_num_threads(&mut self, num: usize) {
         // WASM builds without wasm-threads feature use single-threaded search only.
         // With wasm-threads feature, multi-threading via wasm-bindgen-rayon is supported.
@@ -1087,12 +1087,14 @@ impl Search {
         let num = 1;
         #[cfg(not(all(target_arch = "wasm32", not(feature = "wasm-threads"))))]
         let num = num.clamp(1, 512);
-        if SharedHistories::scale_for(num) != self.shared_histories.scale() {
+        let threads_changed = num != self.num_threads;
+        let rebuild_shared_histories =
+            SharedHistories::scale_for(num) != self.shared_histories.scale();
+        let pawn_history_init = self.search_tune_params.pawn_history_init as i16;
+        if rebuild_shared_histories {
             // 表の大きさは倍率で決まるので、倍率が変わるときだけ作り直す。
-            self.shared_histories = Arc::new(SharedHistories::new_with_pawn_history_init(
-                num,
-                self.search_tune_params.pawn_history_init as i16,
-            ));
+            self.shared_histories =
+                Arc::new(SharedHistories::new_with_pawn_history_init(num, pawn_history_init));
             if let Some(worker) = &mut self.worker {
                 worker.shared_histories = Arc::clone(&self.shared_histories);
             }
@@ -1110,6 +1112,17 @@ impl Search {
             self.max_moves_to_draw,
             self.search_tune_params,
         );
+        if threads_changed {
+            if let Some(worker) = &mut self.worker {
+                worker.clear();
+            }
+            // Native は helper を作り直すが、Wasm は既存の worker を再利用する。
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            self.thread_pool.clear_histories();
+            if !rebuild_shared_histories {
+                self.shared_histories.clear(pawn_history_init);
+            }
+        }
     }
 
     /// 探索スレッド数を取得
@@ -2645,7 +2658,7 @@ mod tests {
             .unwrap();
     }
 
-    /// main と helper は同じ共有履歴を持ち、スレッド数を変えると作り直した表に揃う。
+    /// main と helper は同じ表を参照し、共有表は倍率が変わるときだけ作り直す。
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn helpers_share_histories_with_main_worker() {
@@ -2693,7 +2706,6 @@ mod tests {
                 let mut previous = Arc::clone(&search.shared_histories);
                 for (count, rebuilt) in [(3, true), (4, false), (2, true)] {
                     search.set_num_threads(count);
-                    search.resize_tt(2);
                     let shared = Arc::clone(&search.shared_histories);
                     assert_eq!(!Arc::ptr_eq(&previous, &shared), rebuilt, "Threads={count}");
                     previous = Arc::clone(&shared);
@@ -2705,6 +2717,74 @@ mod tests {
                             check_worker(worker);
                         });
                     }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn changing_threads_after_search_resets_histories_to_current_params() {
+        use crate::types::{Color, Piece, Square};
+
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new_with_eval_hash(1, 1);
+                search.set_num_threads(3);
+                let mut pos = Position::new();
+                pos.set_hirate();
+                let limits = LimitsType {
+                    depth: 2,
+                    ..Default::default()
+                };
+                search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+
+                let shared = Arc::clone(&search.shared_histories);
+                shared.update_pawn_correction(0, Color::Black, 123);
+                let params = SearchTuneParams {
+                    pawn_history_init: -7,
+                    main_history_init: 512,
+                    ..SearchTuneParams::default()
+                };
+                search.set_search_tune_params(params);
+                search.set_num_threads(4);
+
+                let mut fresh = Search::new_with_eval_hash(1, 1);
+                fresh.set_search_tune_params(params);
+                fresh.set_num_threads(4);
+                fresh.clear_for_new_game();
+
+                let pawn_initial_value = |histories: &SharedHistories| {
+                    histories.pawn_history(0, Piece::B_PAWN, Square::SQ_55)
+                };
+                assert!(Arc::ptr_eq(&shared, &search.shared_histories));
+                assert_eq!(
+                    pawn_initial_value(&shared),
+                    pawn_initial_value(&fresh.shared_histories)
+                );
+                assert_eq!(
+                    shared.pawn_correction(0, Color::Black),
+                    fresh.shared_histories.pawn_correction(0, Color::Black)
+                );
+
+                let main_initial_value = |worker: &mut SearchWorker| {
+                    worker.history.get_mut().main_history.get(Color::Black, Move::NONE)
+                };
+                let expected =
+                    fresh.thread_pool.helper_threads()[0].with_worker(main_initial_value);
+                let main = search.worker.as_mut().unwrap();
+                assert!(Arc::ptr_eq(&main.shared_histories, &shared));
+                assert_eq!(main_initial_value(main), expected);
+                for thread in search.thread_pool.helper_threads() {
+                    thread.with_worker(|worker| {
+                        assert!(Arc::ptr_eq(&worker.shared_histories, &shared));
+                        assert_eq!(main_initial_value(worker), expected);
+                    });
                 }
             })
             .unwrap()

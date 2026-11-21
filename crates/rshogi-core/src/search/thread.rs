@@ -1019,7 +1019,7 @@ mod imp {
                     worker.draw_value_black = draw_value_black;
                     worker.draw_value_white = draw_value_white;
                     worker.entering_king_rule = entering_king_rule;
-                    worker.search_tune_params = search_tune_params;
+                    worker.update_search_tune_params(search_tune_params);
                     worker.prepare_search(&limits_clone);
 
                     let mut search_pos = pos_clone;
@@ -1126,6 +1126,7 @@ mod imp {
             self.wait_for_search_finished();
             for slot in &self.workers {
                 if let Some(worker) = slot.lock().expect("worker slot poisoned").as_mut() {
+                    worker.search_tune_params = self.search_tune_params;
                     worker.clear();
                 }
             }
@@ -1145,14 +1146,9 @@ mod imp {
             self.eval_hash = eval_hash;
         }
 
+        /// 次の helper 探索に使うパラメータを設定する。
         pub fn update_search_tune_params(&mut self, search_tune_params: SearchTuneParams) {
-            self.wait_for_search_finished();
             self.search_tune_params = search_tune_params;
-            for slot in &self.workers {
-                if let Some(worker) = slot.lock().expect("worker slot poisoned").as_mut() {
-                    worker.update_search_tune_params(search_tune_params);
-                }
-            }
         }
 
         pub fn helper_threads(&self) -> &[Thread] {
