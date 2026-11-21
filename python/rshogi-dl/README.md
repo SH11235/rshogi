@@ -281,6 +281,7 @@ python -m rshogi_dl.trainer \
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
 | `--optimizer` | `adamw`（既定）/ `muon` / `batched-muon` |
 | `--muon-learning-rate` | `muon` / `batched-muon` の学習率。両方式で必須 |
+| `--fuse-muon-symmetric-polynomial` | `batched-muon` のNewton–Schulz反復で、対称な二次項のタイルを再利用する。短辺256・長辺が32の倍数の行列が対象。NVIDIA CUDA compute capability 8.0以上とTritonが必要。丸め順が変わる場合がある。既定は無効 |
 | `--threads` | CPU thread数、既定1 |
 | `--validation-batches` | held-out先頭batchの上限、既定32。0は全件評価 |
 | `--checkpoint-every` | 中間checkpointの試行間隔。既定0は最終状態のみ。中間は最大8個 |

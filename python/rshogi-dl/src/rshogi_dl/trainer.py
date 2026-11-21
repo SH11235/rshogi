@@ -83,6 +83,7 @@ class TrainerConfig:
     fuse_packed_attention_backward: bool = False
     fuse_ffn_residual_norm_backward: bool = False
     tile_packed_attention_backward: bool = False
+    fuse_muon_symmetric_polynomial: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -99,6 +100,7 @@ class TrainerConfig:
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
             "fuse_packed_attention", "fuse_packed_attention_backward",
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
+            "fuse_muon_symmetric_polynomial",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -124,6 +126,8 @@ class TrainerConfig:
                 raise ValueError("Muon requires a positive finite muon_learning_rate")
             if self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer:
                 raise ValueError("Muon requires CUDA, BF16 and fused AdamW")
+        if self.fuse_muon_symmetric_polynomial and self.optimizer != "batched-muon":
+            raise ValueError("fuse_muon_symmetric_polynomial requires batched-muon")
         if self.device == "cpu" and (self.precision != "fp32" or self.fused_optimizer):
             raise ValueError("CPU requires fp32 and an unfused optimizer")
         if self.execution != "compile" and self.compile_mode != "default":
@@ -158,7 +162,8 @@ def _config_dict(config: TrainerConfig) -> dict:
         del payload["optimizer"], payload["muon_learning_rate"]
     for name in ("compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
                  "fuse_packed_attention", "fuse_packed_attention_backward",
-                 "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward"):
+                 "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
+                 "fuse_muon_symmetric_polynomial"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -282,6 +287,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
             "fuse_packed_attention", "fuse_packed_attention_backward",
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
+            "fuse_muon_symmetric_polynomial",
         }
         saved_config = payload["trainer_config"]
         if (
@@ -451,6 +457,10 @@ def run_training(
             properties = torch.cuda.get_device_properties(device)
             if properties.major < 8 or properties.shared_memory_per_block_optin < 64 * 1024:
                 raise TrainingError("fuse_packed_attention_backward requires Ampere or newer and 64 KiB shared memory per block")
+        if config.fuse_muon_symmetric_polynomial and (
+            torch.version.hip is not None or torch.cuda.get_device_capability(device)[0] < 8
+        ):
+            raise TrainingError("fuse_muon_symmetric_polynomial requires NVIDIA CUDA compute capability 8.0 or later")
         uses_step_graph = config.execution in _STEP_GRAPH_EXECUTIONS
         model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
         if config.optimizer == "adamw":
@@ -463,6 +473,7 @@ def run_training(
                 model, lr=config.learning_rate, muon_lr=config.muon_learning_rate,
                 weight_decay=config.weight_decay, capturable=uses_step_graph,
                 batched=config.optimizer == "batched-muon",
+                fuse_symmetric_polynomial=config.fuse_muon_symmetric_polynomial,
             )
         scaler = torch.amp.GradScaler(
             "cuda", enabled=config.precision == "fp16",
@@ -672,6 +683,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fused-optimizer", action="store_true")
     parser.add_argument("--optimizer", choices=_OPTIMIZERS, default="adamw")
     parser.add_argument("--muon-learning-rate", type=float)
+    parser.add_argument("--fuse-muon-symmetric-polynomial", action="store_true")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--validation-batches", type=int, default=32, help="0 で全 held-out dataset")
