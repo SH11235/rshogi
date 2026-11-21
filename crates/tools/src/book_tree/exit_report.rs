@@ -842,7 +842,7 @@ fn queue_lines(
         let own = &item.side;
         let key = if let Some(line) = item.continuation_root(args.settle_cp) {
             counts.shifted += 1;
-            // DONE の木の結果は元データの続きに反映されている。
+            // 出口の根の木が読み終わっていれば、続きの先は別の局面なので積む。読みかけ・未着手・hold は同じ線を読むので除く。
             if states
                 .iter()
                 .any(|tree| tree.state != "DONE" && tree_matches(tree, &[&item.key], own))
