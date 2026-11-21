@@ -176,8 +176,8 @@ def _tile_gradients(q, k, v, dy, lse, delta):
 
 @triton.jit
 def _store_tiled_gradient(result, address, gradient, partial_bias, partial_address,
-                          col, tile: tl.constexpr):
-    if partial_bias is not None:
+                          col, tile: tl.constexpr, collect_bias: tl.constexpr):
+    if collect_bias:
         rounded = gradient.to(tl.bfloat16)
         tl.store(result + address, rounded)
         batch_stride = tl.num_programs(0) * _PACKED_HEAD_WIDTH
@@ -190,7 +190,7 @@ def _store_tiled_gradient(result, address, gradient, partial_bias, partial_addre
 @triton.jit
 def _tiled_backward(packed, output, grad, normalizer, result, heads: tl.constexpr,
              batch_stride: tl.constexpr, head_stride: tl.constexpr, row_stride: tl.constexpr,
-             feature_stride: tl.constexpr, partial_bias=None):
+             feature_stride: tl.constexpr, partial_bias, collect_bias: tl.constexpr):
     group = tl.program_id(0)
     batch, head = group // heads, group % heads
     base = batch * _TOKENS * heads * _PACKED_HEAD_WIDTH + head * 32
@@ -223,7 +223,7 @@ def _tiled_backward(packed, output, grad, normalizer, result, heads: tl.constexp
     dv0 = tl.dot(tl.trans(p00), dy0)
     p01, c01 = _tile_gradients(q0, k1, v1, dy0, lse0, delta0)
     dq0 = tl.dot(c01, k1, dq0)
-    _store_tiled_gradient(result, a0, dq0, partial_bias, bias_base, col, 0)
+    _store_tiled_gradient(result, a0, dq0, partial_bias, bias_base, col, 0, collect_bias)
     dk1 = tl.dot(tl.trans(c01), q0)
     dv1 = tl.dot(tl.trans(p01), dy0)
 
@@ -231,15 +231,15 @@ def _tiled_backward(packed, output, grad, normalizer, result, heads: tl.constexp
     dq1 = tl.dot(c10, k0)
     dk0 = tl.dot(tl.trans(c10), q1, dk0)
     dv0 = tl.dot(tl.trans(p10), dy1, dv0)
-    _store_tiled_gradient(result, a0 + heads * 32, dk0, partial_bias, key_bias, col, 0)
-    _store_tiled_gradient(result, a0 + heads * 64, dv0, partial_bias, value_bias, col, 0)
+    _store_tiled_gradient(result, a0 + heads * 32, dk0, partial_bias, key_bias, col, 0, collect_bias)
+    _store_tiled_gradient(result, a0 + heads * 64, dv0, partial_bias, value_bias, col, 0, collect_bias)
     p11, c11 = _tile_gradients(q1, k1, v1, dy1, lse1, delta1)
     dq1 = tl.dot(c11, k1, dq1)
     dk1 = tl.dot(tl.trans(c11), q1, dk1)
     dv1 = tl.dot(tl.trans(p11), dy1, dv1)
-    _store_tiled_gradient(result, a1, dq1, partial_bias, bias_base, col, 1)
-    _store_tiled_gradient(result, a1 + heads * 32, dk1, partial_bias, key_bias, col, 1)
-    _store_tiled_gradient(result, a1 + heads * 64, dv1, partial_bias, value_bias, col, 1)
+    _store_tiled_gradient(result, a1, dq1, partial_bias, bias_base, col, 1, collect_bias)
+    _store_tiled_gradient(result, a1 + heads * 32, dk1, partial_bias, key_bias, col, 1, collect_bias)
+    _store_tiled_gradient(result, a1 + heads * 64, dv1, partial_bias, value_bias, col, 1, collect_bias)
 
 
 class _PackedAttention(torch.autograd.Function):
@@ -267,10 +267,12 @@ class _PackedAttention(torch.autograd.Function):
         groups = packed.shape[0] * heads
         gradient = torch.empty_like(packed)
         strides = grad.stride()
+        if ctx.tiled_backward:
+            _tiled_backward[(groups,)](packed, output, grad, normalizer, gradient, heads, *strides,
+                                      gradient, False, num_warps=4)
+            return gradient, None, None, None, None
         if ctx.shared_backward:
-            kernel = _tiled_backward if ctx.tiled_backward else _shared_backward
-            kernel[(groups,)](packed, output, grad, normalizer, gradient, heads, *strides,
-                              num_warps=4 if ctx.tiled_backward else 8)
+            _shared_backward[(groups,)](packed, output, grad, normalizer, gradient, heads, *strides, num_warps=8)
             return gradient, None, None, None, None
         delta = torch.empty_like(normalizer)
         _row_delta[(groups, TOKEN_COUNT // 32)](output, grad, delta, heads, *strides, num_warps=4)
@@ -315,7 +317,7 @@ class _ProjectionWithBiasGradient(torch.autograd.Function):
         partial_bias = torch.empty((2 * batch, weight.shape[0]), device=packed.device, dtype=torch.float32)
         grad_heads = grad.reshape(batch, tokens, heads, 32).transpose(1, 2)
         _tiled_backward[(batch * heads,)](packed, output, grad_heads, normalizer, gradient, heads,
-                                          *grad_heads.stride(), partial_bias, num_warps=4)
+                                          *grad_heads.stride(), partial_bias, True, num_warps=4)
         matrix = gradient.reshape(-1, weight.shape[0])
         grad_inputs = (matrix @ weight).reshape_as(inputs)
         grad_weight = matrix.mT @ inputs.reshape(-1, width)
