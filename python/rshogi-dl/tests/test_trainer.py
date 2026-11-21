@@ -916,6 +916,33 @@ class TrainerTest(unittest.TestCase):
             relative = (reference - right.float()).norm() / reference.norm().clamp_min(1e-24)
             self.assertLessEqual(float(relative), 0.01)
 
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_ffn_expand_bias_gradient_resume(self) -> None:
+        records = synthetic_records(seed=31, count=6 * 256 + 1)
+        for record in records:
+            record["policy"] = [[record["legal_labels"][0], 1]]
+        self.train = self.make_dataset("full-policy", records, shard_records=512)
+        model = replace(TEST_CONFIG, layers=1, width=256, heads=8, ffn_width=1024, packed_qkv=True)
+        config = replace(
+            self.config, max_steps=12, checkpoint_every=6, batch_size=256,
+            device="cuda", precision="bf16", fused_optimizer=True, execution="cuda-graph-fused-norm",
+            attention_backend="sdpa", compile_ffn=True, fuse_norm_cast=True, fuse_ffn_expand_bias_gradient=True,
+        )
+        full = self.run_training("ffn-graph", config, model_config=model)
+        self.assertEqual(full["cuda_graph_replayed_steps"], 7)
+        checkpoint = self.root / "ffn-graph" / "resume-0000000006.pt"
+        with self.assertRaisesRegex(ResumeError, "configuration differs"):
+            self.run_training(
+                "ffn-without-fusion", replace(config, fuse_ffn_expand_bias_gradient=False),
+                model_config=model, resume=checkpoint,
+            )
+        resumed = self.run_training("ffn-resumed", config, model_config=model, resume=checkpoint)
+        self.assertEqual(resumed["cuda_graph_replayed_steps"], 1)
+        want = load_resume(self.root / "ffn-graph" / "resume-final.pt")
+        got = load_resume(self.root / "ffn-resumed" / "resume-final.pt")
+        for name in ("model_state", "optimizer_state", "progress", "rng"):
+            self.assert_nested_equal(want[name], got[name])
+
     def test_final_residual_norm_rejects_unsupported_width(self) -> None:
         config = replace(
             self.config, device="cuda", precision="bf16", fused_optimizer=True,
