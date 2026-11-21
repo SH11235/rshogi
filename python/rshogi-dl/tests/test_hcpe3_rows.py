@@ -7,7 +7,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from rshogi_dl.hcpe3_rows import GameFrame, Hcpe3RowsError, PolicyFrame, iter_frames
+from rshogi_dl.hcpe3_rows import GameFrame, Hcpe3RowsError, PolicyFrame, assemble_shards, iter_frames
 from rshogi_dl.sharded import DatasetError, convert_hcpe3, convert_records, verify_dataset
 
 from .support import artifact_tempdir, empty_board_tokens
@@ -29,6 +29,26 @@ class ShortReader(io.BytesIO):
 
 
 class Hcpe3RowsTest(unittest.TestCase):
+    def test_shard_offsets_cross_assembly_blocks(self):
+        row = PolicyFrame(0, 1, bytes(empty_board_tokens()), 0.5, (3, 1, 5), (5, 2, 3, 1))
+        (columns, count), = assemble_shards(iter([row] * 4097), 5000)
+        self.assertEqual(count, 4097)
+        self.assertEqual(columns["legal_offsets"][-3:].tolist(), [12285, 12288, 12291])
+        self.assertEqual(columns["legal_indices"][-3:].tolist(), [3, 1, 5])
+        for got, want in zip(columns["policy_targets"][-3:], (1 / 3, 0.0, 2 / 3), strict=True):
+            self.assertAlmostEqual(float(got), want)
+
+    def test_shard_assembly_rejects_invalid_tokens_and_labels(self):
+        tokens = bytes(empty_board_tokens())
+        for row, message in (
+            (PolicyFrame(0, 1, b"\xff" + tokens[1:], 0.5, (1, 2), (1, 1)), "tokens"),
+            (PolicyFrame(0, 1, tokens, 0.5, (1, 2), (3, 1)), "not legal"),
+            (PolicyFrame(0, 1, tokens, 0.5, (1, 1), (1, 1)), "duplicates"),
+            (PolicyFrame(0, 1, tokens, 0.5, (1, 2), (1, 1, 1, 2)), "duplicates"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(Hcpe3RowsError, message):
+                list(assemble_shards(iter([row]), 4))
+
     def test_empty_game_and_positive_visit_row_survive_short_reads(self):
         first, second, row = list(iter_frames(ShortReader(source_stream())))
         self.assertEqual(first, GameFrame(b"a" * 32, 0, 0))
