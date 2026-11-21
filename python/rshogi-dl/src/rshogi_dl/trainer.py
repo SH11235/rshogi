@@ -86,6 +86,7 @@ class TrainerConfig:
     fuse_muon_symmetric_polynomial: bool = False
     tile_packed_attention_forward: bool = False
     fuse_attention_residual_norm: bool = False
+    fuse_final_residual_norm: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -103,7 +104,7 @@ class TrainerConfig:
             "fuse_packed_attention", "fuse_packed_attention_backward",
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
             "fuse_muon_symmetric_polynomial",
-            "tile_packed_attention_forward", "fuse_attention_residual_norm",
+            "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -153,6 +154,8 @@ class TrainerConfig:
             raise ValueError("fuse_ffn_residual_norm_backward requires fuse_ffn_residual_norm")
         if self.fuse_attention_residual_norm and not self.fuse_norm_cast:
             raise ValueError("fuse_attention_residual_norm requires fuse_norm_cast")
+        if self.fuse_final_residual_norm and not self.fuse_norm_cast:
+            raise ValueError("fuse_final_residual_norm requires fuse_norm_cast")
         if self.execution in _STEP_GRAPH_EXECUTIONS and (
             self.device != "cuda" or self.precision != "bf16" or not self.fused_optimizer
         ):
@@ -170,7 +173,8 @@ def _config_dict(config: TrainerConfig) -> dict:
     for name in ("compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
                  "fuse_packed_attention", "fuse_packed_attention_backward",
                  "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
-                 "fuse_muon_symmetric_polynomial", "tile_packed_attention_forward", "fuse_attention_residual_norm"):
+                 "fuse_muon_symmetric_polynomial", "tile_packed_attention_forward", "fuse_attention_residual_norm",
+                 "fuse_final_residual_norm"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -295,7 +299,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
             "fuse_packed_attention", "fuse_packed_attention_backward",
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
             "fuse_muon_symmetric_polynomial",
-            "tile_packed_attention_forward", "fuse_attention_residual_norm",
+            "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
         }
         saved_config = payload["trainer_config"]
         if (
@@ -445,6 +449,11 @@ def run_training(
             raise TrainingError("fuse_attention_residual_norm requires width 128, 192, 224 or 256")
         if torch.version.cuda is None:
             raise TrainingError("fuse_attention_residual_norm requires NVIDIA CUDA")
+    if config.fuse_final_residual_norm:
+        if model_config.width not in (128, 192, 224, 256):
+            raise TrainingError("fuse_final_residual_norm requires width 128, 192, 224 or 256")
+        if torch.version.cuda is None:
+            raise TrainingError("fuse_final_residual_norm requires NVIDIA CUDA")
     if config.fuse_packed_attention:
         if not model_config.packed_qkv or model_config.width != 32 * model_config.heads:
             raise TrainingError("fuse_packed_attention requires packed QKV with a head width of 32")
@@ -521,12 +530,14 @@ def run_training(
                 tile_packed_attention_backward=config.tile_packed_attention_backward,
                 tile_packed_attention_forward=config.tile_packed_attention_forward,
                 fuse_attention_residual_norm=config.fuse_attention_residual_norm,
+                fuse_final_residual_norm=config.fuse_final_residual_norm,
             )
         elif config.execution == "cuda-graph-fused-norm":
             execution = compiled_residual_forward(
                 model, cast_output=config.fuse_norm_cast, fuse_ffn_residual_norm=config.fuse_ffn_residual_norm,
                 fuse_ffn_residual_norm_backward=config.fuse_ffn_residual_norm_backward,
                 fuse_attention_residual_norm=config.fuse_attention_residual_norm,
+                fuse_final_residual_norm=config.fuse_final_residual_norm,
             )
         else:
             execution = model
@@ -692,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fuse-ffn-residual-norm", action="store_true")
     parser.add_argument("--fuse-ffn-residual-norm-backward", action="store_true")
     parser.add_argument("--fuse-attention-residual-norm", action="store_true")
+    parser.add_argument("--fuse-final-residual-norm", action="store_true")
     parser.add_argument("--fuse-packed-attention", action="store_true")
     parser.add_argument("--fuse-packed-attention-backward", action="store_true")
     parser.add_argument("--tile-packed-attention-backward", action="store_true")

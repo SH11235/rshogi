@@ -28,13 +28,18 @@ def compiled_residual_forward(
     fuse_ffn_residual_norm: bool = False,
     fuse_ffn_residual_norm_backward: bool = False,
     fuse_attention_residual_norm: bool = False,
+    fuse_final_residual_norm: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     normalize_ffn = None
-    if fuse_ffn_residual_norm or fuse_attention_residual_norm:
+    if fuse_ffn_residual_norm or fuse_attention_residual_norm or fuse_final_residual_norm:
         try:
             from ._ffn_residual_norm import ffn_residual_norm
         except ImportError as error:
-            option = "fuse_attention_residual_norm" if fuse_attention_residual_norm else "fuse_ffn_residual_norm"
+            option = next(name for name, enabled in (
+                ("fuse_attention_residual_norm", fuse_attention_residual_norm),
+                ("fuse_final_residual_norm", fuse_final_residual_norm),
+                ("fuse_ffn_residual_norm", fuse_ffn_residual_norm),
+            ) if enabled)
             raise ValueError(f"{option} requires CUDA Triton") from error
     if fuse_ffn_residual_norm:
         normalize_ffn = (
@@ -67,6 +72,13 @@ def compiled_residual_forward(
             if normalize_ffn is not None and index + 1 < len(model.blocks):
                 norm = model.blocks[index + 1].attention_norm
                 residual, normalized = normalize_ffn(residual, update, norm.weight, norm.bias, norm.eps)
+            elif fuse_final_residual_norm and index + 1 == len(model.blocks):
+                norm = model.final_norm
+                normalized = ffn_residual_norm(
+                    residual, update, norm.weight, norm.bias, norm.eps,
+                    fuse_backward=True, return_residual=False,
+                )
+                return model._readout(normalized)
             else:
                 residual = residual + update
         return model._readout(model.final_norm(residual))

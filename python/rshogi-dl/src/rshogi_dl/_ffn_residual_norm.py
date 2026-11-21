@@ -106,7 +106,7 @@ def _forward(
 @triton.jit
 def _input_gradient(
     data, means, inverse_devs, scale, residual_upstream, norm_upstream, residual_grad, update_grad, width: tl.constexpr,
-    block_width: tl.constexpr,
+    block_width: tl.constexpr, has_residual_upstream: tl.constexpr = True,
 ):
     row = tl.program_id(0)
     col = tl.arange(0, block_width)
@@ -118,7 +118,9 @@ def _input_gradient(
     weighted = tl.load(norm_upstream + offsets, valid, 0).to(tl.float32) * tl.load(scale + col, valid, 0)
     center = tl.sum(weighted) / width
     stretch = tl.sum(weighted * normalized) / width
-    gradient = ((weighted - center) - normalized * stretch) * inverse + tl.load(residual_upstream + offsets, valid, 0)
+    gradient = ((weighted - center) - normalized * stretch) * inverse
+    if has_residual_upstream:
+        gradient += tl.load(residual_upstream + offsets, valid, 0)
     tl.store(residual_grad + offsets, gradient, valid)
     tl.store(update_grad + offsets, gradient, valid)
 
@@ -144,6 +146,7 @@ def _affine_partial(data, means, inverse_devs, norm_upstream, out, rows: tl.cons
 def _input_and_affine_grad(
     data, means, inverse_devs, scale, residual_upstream, norm_upstream, residual_grad, update_grad,
     affine, rows: tl.constexpr, width: tl.constexpr, block_width: tl.constexpr, tile_rows: tl.constexpr,
+    has_residual_upstream: tl.constexpr = True,
 ):
     tile = tl.program_id(0)
     row = tile * tile_rows + tl.arange(0, tile_rows)
@@ -160,8 +163,9 @@ def _input_and_affine_grad(
     weighted = upstream * tl.load(scale + col, valid_col, 0)[None, :]
     center = tl.sum(weighted, 1) / width
     stretch = tl.sum(weighted * normalized, 1) / width
-    identity = tl.load(residual_upstream + offsets, valid, 0)
-    gradient = ((weighted - center[:, None]) - normalized * stretch[:, None]) * inverse[:, None] + identity
+    gradient = ((weighted - center[:, None]) - normalized * stretch[:, None]) * inverse[:, None]
+    if has_residual_upstream:
+        gradient += tl.load(residual_upstream + offsets, valid, 0)
     tl.store(residual_grad + offsets, gradient, valid)
     tl.store(update_grad + offsets, gradient, valid)
     affine_offsets = tile * 2 * width + col
@@ -171,7 +175,7 @@ def _input_and_affine_grad(
 
 class _ResidualNorm(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, residual, update, weight, bias, eps, fuse_backward):
+    def forward(ctx, residual, update, weight, bias, eps, fuse_backward, return_residual):
         added = torch.empty_like(residual)
         normalized = torch.empty_like(update)
         means = torch.empty(residual.shape[:-1], device=residual.device, dtype=torch.float32)
@@ -183,22 +187,28 @@ class _ResidualNorm(torch.autograd.Function):
         )
         ctx.save_for_backward(added, means, inverse, weight)
         ctx.fuse_backward = fuse_backward
-        return added, normalized
+        ctx.return_residual = return_residual
+        return (added, normalized) if return_residual else normalized
 
     @staticmethod
-    def backward(ctx, residual_upstream, norm_upstream):
+    def backward(ctx, *upstream):
         data, means, inverse, weight = ctx.saved_tensors
+        if ctx.return_residual:
+            residual_upstream, norm_upstream = upstream
+            residual_upstream = residual_upstream.contiguous()
+        else:
+            residual_upstream = data
+            norm_upstream, = upstream
         norm_upstream = norm_upstream.contiguous()
         residual_grad = torch.empty_like(data)
         update_grad = torch.empty_like(data, dtype=torch.bfloat16)
         rows = means.numel()
         width = weight.numel()
         block_width = triton.next_power_of_2(width)
-        residual_upstream = residual_upstream.contiguous()
         if not ctx.fuse_backward:
             _input_gradient[(rows,)](
                 data, means, inverse, weight, residual_upstream, norm_upstream, residual_grad, update_grad,
-                width, block_width, num_warps=4,
+                width, block_width, ctx.return_residual, num_warps=4,
             )
         tile_rows = 16 if ctx.fuse_backward else 64
         tiles = triton.cdiv(rows, tile_rows)
@@ -206,15 +216,16 @@ class _ResidualNorm(torch.autograd.Function):
         if ctx.fuse_backward:
             _input_and_affine_grad[(tiles,)](
                 data, means, inverse, weight, residual_upstream, norm_upstream, residual_grad, update_grad,
-                partial, rows, width, block_width, tile_rows, num_warps=4 if width == 128 else 8,
+                partial, rows, width, block_width, tile_rows, ctx.return_residual,
+                num_warps=4 if width == 128 else 8,
             )
         else:
             _affine_partial[(tiles, width // 32)](data, means, inverse, norm_upstream, partial, rows, width, num_warps=4)
         scale, shift = partial.sum(0).chunk(2)
-        return residual_grad, update_grad, scale, shift, None, None
+        return residual_grad, update_grad, scale, shift, None, None, None
 
 
-def ffn_residual_norm(residual, update, weight, bias, eps, *, fuse_backward=False):
+def ffn_residual_norm(residual, update, weight, bias, eps, *, fuse_backward=False, return_residual=True):
     width = residual.shape[-1] if residual.ndim else 0
     if (
         not residual.is_cuda
@@ -230,5 +241,6 @@ def ffn_residual_norm(residual, update, weight, bias, eps, *, fuse_backward=Fals
         or any(t.device != residual.device for t in (update, weight, bias))
         or not all(t.is_contiguous() for t in (residual, update, weight, bias))
     ):
-        return _add_normalize(residual, update, weight, bias, eps)
-    return _ResidualNorm.apply(residual, update, weight, bias, eps, fuse_backward)
+        added, normalized = _add_normalize(residual, update, weight, bias, eps)
+        return (added, normalized) if return_residual else normalized
+    return _ResidualNorm.apply(residual, update, weight, bias, eps, fuse_backward, return_residual)
