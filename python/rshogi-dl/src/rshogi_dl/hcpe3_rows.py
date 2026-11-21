@@ -130,8 +130,10 @@ def _assemble(rows):
     row_keys = np.arange(len(rows), dtype=np.int32) * POLICY_SIZE
     legal_keys = np.repeat(row_keys, legal_lengths) + legal
     visit_keys = np.repeat(row_keys, visit_lengths) + visits[:, 0]
-    ranks = np.arange(1, legal.size + 1, dtype=np.int32)
-    legal_by_row_label = np.zeros(len(rows) * POLICY_SIZE, dtype=np.int32)
+    legal_offsets = _offsets(legal_lengths)
+    row_starts = legal_offsets[:-1].astype(np.int32)
+    ranks = np.arange(1, legal.size + 1, dtype=np.int32) - np.repeat(row_starts, legal_lengths)
+    legal_by_row_label = np.zeros(len(rows) * POLICY_SIZE, dtype=np.uint16)
     legal_by_row_label[legal_keys] = ranks
     played_keys = row_keys + np.fromiter((row.played for row in rows), dtype="<u2", count=len(rows))
     if np.any(legal_by_row_label[played_keys] == 0):
@@ -146,12 +148,13 @@ def _assemble(rows):
         raise Hcpe3RowsError("HCPE3 policy visit counts must be positive")
     totals = np.add.reduceat(weights.astype(np.uint64), _offsets(visit_lengths)[:-1].astype(np.intp))
     target = np.zeros(legal.size, dtype="<f4")
-    target[positions - 1] = weights.astype(np.float64) / np.repeat(totals, visit_lengths)
+    indices = np.repeat(row_starts, visit_lengths) + positions - 1
+    target[indices] = weights.astype(np.float64) / np.repeat(totals, visit_lengths)
     return {
         "tokens": tokens,
         "values": np.fromiter((row.value for row in rows), dtype="<f4", count=len(rows)),
         "policy_present": np.ones(len(rows), dtype=np.bool_),
-        "legal_offsets": _offsets(legal_lengths),
+        "legal_offsets": legal_offsets,
         "legal_indices": legal,
         "policy_targets": target,
     }
@@ -162,7 +165,7 @@ def assemble_shards(frames: Iterator[PackedPolicyFrame], shard_records: int):
     while True:
         blocks, offset, size = [], 0, 0
         while size < shard_records:
-            rows = list(islice(frames, min(4096, shard_records - size)))
+            rows = list(islice(frames, min(512, shard_records - size)))
             if not rows:
                 break
             block = _assemble(rows)
