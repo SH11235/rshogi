@@ -329,6 +329,16 @@ dataset 指紋は生成済み manifest の内容 root を使い、通常の run/
 
 `resume-final.pt` は再開専用です。別に保存する `checkpoint.pt` は既存の `export` と `parity` CLI で読める v1 形式で、元の reader の契約は変更しません。最終の model・optimizer 検査後、held-out 評価より先に両 checkpoint を保存します。評価に失敗して `report.json` が書かれない場合も、保存済み状態から再開できます。同一環境の CPU で中断前後の model/AdamW/cursor/RNG が一致することをテストしています。CUDA や異なる hardware・実行方式を跨いだ bit 一致を保証するものではありません。
 
+### 同じプロセスで複数の学習を実行
+
+同じ形状のモデルで短いseed探索を繰り返す場合は、`trainer` の引数配列を実行順に並べたJSONファイルを使えます。各ジョブに個別の `--run-dir` を指定します。
+
+```bash
+python -m rshogi_dl.train_many jobs.json
+```
+
+各学習は通常の `trainer` と同じ checkpoint と report を出力し、標準出力に完了したジョブのJSONを順に書きます。失敗時はそのジョブで停止します。同じプロセスではコンパイラとGPUメモリのキャッシュが後続ジョブに残るため、GPUの予約メモリが増える場合があります。
+
 ## smoke
 
 ```bash
