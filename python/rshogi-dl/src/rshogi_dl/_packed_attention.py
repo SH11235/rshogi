@@ -267,7 +267,7 @@ class _PackedAttention(torch.autograd.Function):
         groups = packed.shape[0] * heads
         gradient = torch.empty_like(packed)
         strides = grad.stride()
-        if ctx.tiled_backward:
+        if ctx.shared_backward and ctx.tiled_backward:
             _tiled_backward[(groups,)](packed, output, grad, normalizer, gradient, heads, *strides,
                                       gradient, False, num_warps=4)
             return gradient, None, None, None, None
