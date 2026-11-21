@@ -2360,7 +2360,7 @@ fn box_without_progress_keeps_the_receipt_arrival_order() {
     let mut again = row("z", "7g7f");
     again["priority"] = json!(7);
     enqueue(&b, "second", end, &[row("m", "5g5f"), again]);
-    let loaded = load_box("A", b, &mut vec![]).unwrap();
+    let loaded = load_box("A", b, &mut vec![], None).unwrap();
     let order: Vec<_> = loaded.progress.trees.iter().map(|t| (t.id.as_str(), t.priority)).collect();
     assert_eq!(order, [("z", 7), ("a", 42), ("m", 42)]);
 }
@@ -2854,7 +2854,7 @@ fn per_tree_rerank_payload_adds_partial_remaining_to_exact_priority() {
     enqueue(&b, "a", 0, std::slice::from_ref(&r));
     status_file(&b, &[status(&r, "RUNNING", 40, 180)]);
     let mut inputs = Vec::new();
-    let boxes = vec![load_box("a", b, &mut inputs).unwrap()];
+    let boxes = vec![load_box("a", b, &mut inputs, None).unwrap()];
     let statuses = per_tree::load(&boxes, &mut inputs).unwrap();
     let metrics = vec![BoxMetrics {
         speed: 100.0,

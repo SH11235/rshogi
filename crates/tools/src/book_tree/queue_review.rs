@@ -3,7 +3,7 @@
 use super::{
     export::files,
     reply_graph::HIRATE_KEY,
-    targets::{Line, Receipt, parse_root},
+    targets::{Line, Receipt, Rejected, parse_root},
 };
 use crate::book_db::{apply_usi_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result, ensure};
@@ -174,6 +174,7 @@ struct TreeProgress {
     priority: u32,
     hold: bool,
     finished: bool,
+    generation: Option<u32>,
     #[serde(default)]
     failed: bool,
     read: u64,
@@ -201,6 +202,7 @@ struct BoxData {
     progress: Progress,
     /// `fetch/progress.json` が無く、受付の木をすべて未着手として補った台。
     progress_missing: bool,
+    rejected: Vec<Queued>,
 }
 #[derive(Default)]
 struct Walk {
@@ -236,7 +238,18 @@ fn rates(values: &[String], names: &BTreeSet<String>) -> Result<BTreeMap<String,
     Ok(result)
 }
 
-fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxData> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotKind {
+    Legacy,
+    Export,
+}
+
+fn load_box(
+    name: &str,
+    dir: PathBuf,
+    inputs: &mut Vec<PathBuf>,
+    rejections: Option<&[Rejected]>,
+) -> Result<BoxData> {
     let mut accepted = Vec::new();
     for entry in std::fs::read_dir(dir.join("enqueue"))? {
         let path = entry?.path();
@@ -273,7 +286,15 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
     }
     let mut queue = BTreeMap::new();
     let mut arrival = Vec::new();
+    let mut rejected = Vec::new();
     for (_, path, receipt) in accepted {
+        let rejected_ids: BTreeSet<_> = rejections
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| receipt.start <= r.start && r.end <= receipt.end)
+            .filter_map(|r| r.id.as_deref())
+            .collect();
+        let mut matched_rejections = BTreeSet::new();
         let mut count = 0;
         for text in BufReader::new(File::open(&path)?).lines() {
             let text = text?;
@@ -282,24 +303,35 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
             }
             let raw: Value = serde_json::from_str(&text)?;
             let line: Line = serde_json::from_value(raw.clone())?;
-            line.check().with_context(|| format!("{}: {}", path.display(), line.id))?;
+            let is_rejected = rejected_ids.contains(line.id.as_str());
+            if !is_rejected {
+                line.check().with_context(|| format!("{}: {}", path.display(), line.id))?;
+            }
             let roots = std::iter::once(&line.root)
                 .chain(&line.roots)
                 .map(|r| parse_root(r).map(|r| r.key))
                 .collect::<Result<_>>()?;
             let primary_root = parse_root(&line.root)?.key;
-            if !queue.contains_key(&line.id) {
-                arrival.push(line.id.clone());
+            let id = line.id.clone();
+            let queued = Queued {
+                line,
+                raw,
+                roots,
+                primary_root,
+            };
+            if is_rejected {
+                ensure!(
+                    matched_rejections.insert(id.clone()),
+                    "受領内の拒否行を特定できません: {}: {id}",
+                    path.display()
+                );
+                rejected.push(queued);
+            } else {
+                if !queue.contains_key(&id) {
+                    arrival.push(id.clone());
+                }
+                queue.insert(id.clone(), queued);
             }
-            queue.insert(
-                line.id.clone(),
-                Queued {
-                    line,
-                    raw,
-                    roots,
-                    primary_root,
-                },
-            );
             count += 1;
         }
         ensure!(count == receipt.lines, "受領の行数と一致しません: {}", path.display());
@@ -319,6 +351,7 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
                     priority: q.line.priority,
                     hold: q.line.hold,
                     finished: false,
+                    generation: None,
                     failed: false,
                     read: 0,
                     requested: 0,
@@ -355,7 +388,8 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
         );
     }
     ensure!(
-        ids.len() == queue.values().map(|q| q.line.sides().len()).sum::<usize>(),
+        rejections.is_some()
+            || ids.len() == queue.values().map(|q| q.line.sides().len()).sum::<usize>(),
         "{name}: progress に無い受付があります。写しを揃えてください"
     );
     Ok(BoxData {
@@ -364,6 +398,7 @@ fn load_box(name: &str, dir: PathBuf, inputs: &mut Vec<PathBuf>) -> Result<BoxDa
         queue,
         progress,
         progress_missing,
+        rejected,
     })
 }
 
@@ -608,7 +643,7 @@ fn run_at(args: QueueReviewArgs, now: DateTime<Utc>, stdout: &mut impl Write) ->
             safe_name(name) && names.insert(name.to_owned()),
             "台の名前は重複のない英数字・_・- にしてください: {name}"
         );
-        boxes.push(load_box(name, PathBuf::from(dir), &mut inputs)?);
+        boxes.push(load_box(name, PathBuf::from(dir), &mut inputs, None)?);
     }
     let rate = rates(&args.rate, &names)?;
     let box_rate = rates(&args.box_rate, &names)?;
@@ -974,44 +1009,126 @@ pub(super) struct TreeState {
     pub own: String,
     pub depth: usize,
     pub roots: BTreeSet<String>,
-    /// `DONE`・`failed`・`hold`・`<read>/<requested>`。
     pub state: String,
+    pub covers: bool,
 }
 
-/// `NAME=DIR` の台の受付と進みの写しを `tree queue-review` と同じ検査で読み、木ごとの状態と読んだファイルを返す。
-pub(super) fn tree_states(specs: &[String]) -> Result<(Vec<TreeState>, Vec<PathBuf>)> {
+#[derive(Default, Deserialize)]
+struct SnapshotStatus {
+    #[serde(default)]
+    rejected: Vec<Rejected>,
+    #[serde(default)]
+    targets: Vec<SnapshotTarget>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotTarget {
+    id: String,
+    own: String,
+    state: String,
+    generation: Option<u32>,
+}
+
+/// 受付と進みの写しを読み、木ごとの状態と読んだファイルを返す。
+pub(super) fn tree_states(
+    legacy_specs: &[String],
+    export_specs: &[String],
+) -> Result<(Vec<TreeState>, Vec<PathBuf>)> {
     let mut states = Vec::new();
     let mut inputs = Vec::new();
     let mut names = BTreeSet::new();
-    for text in specs {
-        let (name, dir) = assignment(text)?;
-        ensure!(
-            safe_name(name) && names.insert(name.to_owned()),
-            "台の名前は重複のない英数字・_・- にしてください: {name}"
-        );
-        let b = load_box(name, PathBuf::from(dir), &mut inputs)?;
-        if b.progress_missing {
-            note_missing_progress(&b, "");
-        }
-        for tree in &b.progress.trees {
-            let queued = &b.queue[&tree.id];
-            let state = if tree.finished {
-                "DONE".to_owned()
-            } else if tree.failed {
-                "failed".to_owned()
-            } else if tree.hold {
-                "hold".to_owned()
+    for (specs, kind) in [
+        (legacy_specs, SnapshotKind::Legacy),
+        (export_specs, SnapshotKind::Export),
+    ] {
+        for text in specs {
+            let (name, dir) = assignment(text)?;
+            ensure!(
+                safe_name(name) && names.insert(name.to_owned()),
+                "台の名前は重複のない英数字・_・- にしてください: {name}"
+            );
+            let dir = PathBuf::from(dir);
+            let status_path = dir.join("fetch/targets.status.json");
+            let has_status = status_path.try_exists()?;
+            let status: SnapshotStatus = if has_status {
+                let status = serde_json::from_reader(File::open(&status_path)?)
+                    .with_context(|| format!("受付の状態が不正です: {}", status_path.display()))?;
+                inputs.push(status_path);
+                status
             } else {
-                format!("{}/{}", tree.read, tree.requested)
+                SnapshotStatus::default()
             };
-            states.push(TreeState {
-                box_name: b.name.clone(),
-                id: tree.id.clone(),
-                own: tree.own.clone(),
-                depth: queued.line.depth,
-                roots: queued.roots.clone(),
-                state,
-            });
+            // 書き出し済みの受付は拒否行を除いた別のキューで、元のバイト範囲は使えない。
+            let rejections = if kind == SnapshotKind::Legacy {
+                &status.rejected[..]
+            } else {
+                &[]
+            };
+            let b = load_box(name, dir, &mut inputs, Some(rejections))?;
+            if b.progress_missing && kind == SnapshotKind::Legacy {
+                eprintln!(
+                    "{}: 進みの記録 {} が無いので、受付の木 {} 本を状態不明 (受付ありに数えない) とします",
+                    b.name,
+                    b.dir.join("fetch/progress.json").display(),
+                    b.progress.trees.len()
+                );
+            }
+            let targets: BTreeMap<_, _> =
+                status.targets.iter().map(|t| ((t.id.as_str(), t.own.as_str()), t)).collect();
+            let progress: BTreeMap<_, _> =
+                b.progress.trees.iter().map(|t| ((t.id.as_str(), t.own.as_str()), t)).collect();
+            for queued in b.queue.values() {
+                for own in queued.line.sides() {
+                    let key = (queued.line.id.as_str(), own.as_str());
+                    let tree = progress.get(&key);
+                    let (state, covers) = if queued.line.hold {
+                        ("hold".into(), false)
+                    } else if b.progress_missing && !has_status && kind == SnapshotKind::Export {
+                        ("waiting".into(), true)
+                    } else if let Some(t) = tree.filter(|_| !b.progress_missing) {
+                        if t.failed {
+                            ("failed".into(), false)
+                        } else if t.finished {
+                            // progress の finished は DONE と NOT_READY の両方を含む。
+                            match targets
+                                .get(&key)
+                                .filter(|target| target.generation == t.generation)
+                                .map(|target| target.state.as_str())
+                            {
+                                Some("DONE") => ("DONE".into(), true),
+                                Some("NOT_READY") => ("NOT_READY".into(), false),
+                                _ => ("unknown".into(), false),
+                            }
+                        } else {
+                            (format!("{}/{}", t.read, t.requested), kind == SnapshotKind::Export)
+                        }
+                    } else {
+                        ("unknown".into(), false)
+                    };
+                    states.push(TreeState {
+                        box_name: b.name.clone(),
+                        id: queued.line.id.clone(),
+                        own,
+                        depth: queued.line.depth,
+                        roots: queued.roots.clone(),
+                        state,
+                        covers,
+                    });
+                }
+            }
+            for queued in b.rejected {
+                for own in queued.line.sides() {
+                    states.push(TreeState {
+                        box_name: b.name.clone(),
+                        id: queued.line.id.clone(),
+                        own,
+                        depth: queued.line.depth,
+                        roots: queued.roots.clone(),
+                        state: "rejected".into(),
+                        covers: false,
+                    });
+                }
+            }
         }
     }
     Ok((states, inputs))

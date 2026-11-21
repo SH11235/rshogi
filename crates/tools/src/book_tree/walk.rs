@@ -782,6 +782,10 @@ fn merged_own(rows: &[Row]) -> BTreeMap<(&'static str, &str), (f64, &Row)> {
 pub(super) type Excluded = BTreeMap<(String, String), BTreeSet<String>>;
 
 pub(super) fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
+    Ok(queue_positions(paths)?.0)
+}
+
+pub(super) fn queue_positions(paths: &[PathBuf]) -> Result<(Excluded, BTreeSet<String>)> {
     let mut latest: BTreeMap<String, (Line, super::targets::Root)> = BTreeMap::new();
     for path in paths {
         read_checked_lines(path, |mut line, root, _| {
@@ -804,9 +808,13 @@ pub(super) fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
         })?;
     }
     let mut excluded = Excluded::new();
+    let mut held = BTreeSet::new();
     for (id, (line, root)) in latest {
         if line.depth == 0 {
             continue;
+        }
+        if line.hold {
+            held.insert(id.clone());
         }
         let sides = line.sides();
         let mut add = |key: &str, own: &str| {
@@ -830,7 +838,7 @@ pub(super) fn excluded_positions(paths: &[PathBuf]) -> Result<Excluded> {
             }
         }
     }
-    Ok(excluded)
+    Ok((excluded, held))
 }
 
 #[derive(Default, Debug)]

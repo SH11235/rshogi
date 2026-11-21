@@ -196,6 +196,7 @@ pub(super) fn build(
                 priority: q.line.priority,
                 hold: q.line.hold,
                 finished: false,
+                generation: None,
                 failed: false,
                 read: 0,
                 requested: 0,
