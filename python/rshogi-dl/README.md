@@ -117,6 +117,22 @@ pip install --no-deps -e .
 
 ## shard の作成と読み込み
 
+HCPE3 の訪問数付き教師は、Rust の変換ツールから直接 shard にできます。
+
+```bash
+cargo build -p tools --no-default-features --release --bin hcpe3_to_dl_rows
+python -m rshogi_dl.sharded convert-hcpe3 \
+  --encoder target/release/hcpe3_to_dl_rows \
+  --source "$SHOGI_DATA/teachers/dl/games.hcpe3" \
+  --output "$SHOGI_DATA/teachers/dl/games-shards" \
+  --compression-level 3
+```
+
+`--source` を繰り返すと、指定順に各ファイルを読みます。訪問数を合法手内の教師分布に正規化し、
+手番から見た勝敗を value 教師とします。対局別の分割や重複排除を行う場合は
+`rshogi_dl.hcpe3_rows.iter_frames` で対局キーを確認してから学習行を選べます。
+[Rust 変換ツールと出力形式](../../crates/tools/docs/hcpe3_to_dl_rows.md)
+
 生成済みの NPY shard は Zstandard で可逆圧縮できます。圧縮形式を使う環境では
 `pip install zstandard==0.25.0` または `rshogi-dl[compression]` を導入してください。
 

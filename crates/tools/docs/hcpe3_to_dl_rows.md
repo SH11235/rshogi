@@ -1,0 +1,38 @@
+# hcpe3_to_dl_rows
+
+HCPE3 の開始局面から実着手を順に指し、正の訪問数を持つ局面を rshogi の policy / value 学習用に出力します。各行に盤面 token、合法手ラベル、実着手、候補手ごとの訪問数、手番側の勝敗を保存します。
+
+## 使い方
+
+```bash
+cargo build -p tools --no-default-features --release --bin hcpe3_to_dl_rows
+target/release/hcpe3_to_dl_rows "$SHOGI_DATA/teachers/dl/games.hcpe3" \
+  > "$SHOGI_DATA/runs/rshogi-dl/games.rows"
+```
+
+複数ファイルは引数の順に読み、`-` で標準入力を選べます。標準出力がバイナリ、標準エラー出力が対局数と行数です。ストリームを受け取る側は、データを公開する前に終了コードを確認してください。教師 shard を直接作るには、Python の `rshogi_dl.sharded convert-hcpe3` を使えます。 [学習用 shard の作成](../../../python/rshogi-dl/README.md#shard-の作成と読み込み)
+
+## 出力形式
+
+多バイト数値はリトルエンディアンです。最初の8バイトは `RSDLHC01`。ファイルをまたいで対局フレームを順に出力します。
+
+| 対局フレームのフィールド | 型 |
+| --- | --- |
+| 対局キー。開始局面の HCP 32バイトと全実着手の HCPE3 コードを順に連結した SHA-256 | 32 bytes |
+| 実着手数 | u16 |
+| 直後に続く学習行の数 | u16 |
+
+学習行は次の順で格納します。
+
+| 学習行のフィールド | 型 |
+| --- | --- |
+| 対局中の手数。最初の局面を0とする | u16 |
+| `stm-tokens-v1` の入力 | 96 u8 |
+| 実着手の policy ラベル | u16 |
+| 全合法手の数 | u16 |
+| 正の訪問数を持つ候補手の数 | u16 |
+| 手番側の勝敗。敗北0、引き分け1、勝利2 | u8 |
+| 全合法手の policy ラベル | u16 の列 |
+| 候補手の policy ラベルと訪問数。元の候補手順を維持 | u16 の組の列 |
+
+対局キーは訪問数と評価値が異なる同じ棋譜でも一致します。訪問数が0の着手も局面の再生に使います。学習行数が0の対局には対局フレームだけが付きます。対局単位の分割や局面の除外は、Python の `rshogi_dl.hcpe3_rows.iter_frames` で対局ヘッダーと各学習行にアクセスできます。

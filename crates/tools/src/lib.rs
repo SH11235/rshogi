@@ -91,6 +91,7 @@ pub mod ek_testset;
 pub mod eval_sfens_tool;
 pub mod game_record_psv;
 pub mod hcpe;
+pub mod hcpe3;
 pub mod kif;
 pub mod kifu_publish;
 pub mod king_zone;

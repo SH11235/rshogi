@@ -80,6 +80,8 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 
 ### 教師データの生成とシャッフル
 
+[hcpe3_to_dl_rows](docs/hcpe3_to_dl_rows.md) で、HCPE3 から訪問数付きの DL 学習行を作れます。
+
 ```bash
 # model.bin は使用する評価関数に置き換える。
 RUN="$SHOGI_DATA/teachers/generated-$(date +%Y%m%d_%H%M%S)"
