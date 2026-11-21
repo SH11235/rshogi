@@ -79,9 +79,9 @@ class TrainerConfig:
     prefetch_input: bool = False
     compile_attention: bool = False
     fuse_ffn_residual_norm: bool = False
-    fuse_ffn_residual_norm_backward: bool = False
     fuse_packed_attention: bool = False
     fuse_packed_attention_backward: bool = False
+    fuse_ffn_residual_norm_backward: bool = False
 
     def __post_init__(self) -> None:
         limits = {
