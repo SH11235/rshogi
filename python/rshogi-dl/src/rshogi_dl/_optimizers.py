@@ -8,8 +8,15 @@ from .trainer_checkpoint import ResumeError
 
 
 class BatchedMuon(torch.optim.Muon):
-    def __init__(self, params, *, lr, weight_decay):
+    def __init__(self, params, *, lr, weight_decay, fuse_symmetric_polynomial=False):
         super().__init__(params, lr=lr, weight_decay=weight_decay, nesterov=True, adjust_lr_fn="match_rms_adamw")
+        self._symmetric_polynomial = None
+        if fuse_symmetric_polynomial:
+            try:
+                from ._muon_symmetric import symmetric_polynomial
+            except ImportError as error:
+                raise ValueError("fuse_muon_symmetric_polynomial requires CUDA Triton") from error
+            self._symmetric_polynomial = symmetric_polynomial
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -36,9 +43,18 @@ class BatchedMuon(torch.optim.Muon):
                     update = update.mT
                 norm = torch.linalg.vector_norm(update, dim=(-2, -1), keepdim=True)
                 update.div_(norm.clamp_min_(group["eps"]))
+                symmetric = self._symmetric_polynomial
+                if symmetric is not None and (
+                    not update.is_cuda or min(shape) != 256 or max(shape) % 32 != 0
+                    or len(parameters) * 256 * 256 >= 2**31
+                ):
+                    symmetric = None
                 for _ in range(group["ns_steps"]):
                     gram = torch.bmm(update, update.mT)
-                    polynomial = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+                    if symmetric is None:
+                        polynomial = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+                    else:
+                        polynomial = symmetric(gram, linear=b, quadratic=c)
                     update = torch.baddbmm(update, polynomial, update, beta=a)
                 if shape[0] > shape[1]:
                     update = update.mT
@@ -101,7 +117,7 @@ def validate_adamw_state(state, parameter, updates=None, *, serialized=False) ->
 
 
 class MuonAdamW:
-    def __init__(self, model, *, lr, muon_lr, weight_decay, capturable, batched):
+    def __init__(self, model, *, lr, muon_lr, weight_decay, capturable, batched, fuse_symmetric_polynomial=False):
         groups = model.parameter_groups()
         selected = {p for key in ("attention", "ffn") for p in groups[key] if p.ndim == 2}
         adamw, muon = [], []
@@ -114,7 +130,10 @@ class MuonAdamW:
             self.adamw_parameters, lr=lr, weight_decay=weight_decay, fused=True, capturable=capturable,
         )
         if batched:
-            self._muon = BatchedMuon(self._muon_parameters, lr=muon_lr, weight_decay=weight_decay)
+            self._muon = BatchedMuon(
+                self._muon_parameters, lr=muon_lr, weight_decay=weight_decay,
+                fuse_symmetric_polynomial=fuse_symmetric_polynomial,
+            )
         else:
             self._muon = torch.optim.Muon(
                 self._muon_parameters, lr=muon_lr, weight_decay=weight_decay, adjust_lr_fn="match_rms_adamw",

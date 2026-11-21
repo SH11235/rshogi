@@ -528,6 +528,8 @@ class TrainerTest(unittest.TestCase):
             self.run_training("unpacked-qkv", config, model_config=replace(TEST_CONFIG, width=128))
 
     def test_muon_config_and_checkpoint_parameter_partition(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires batched-muon"):
+            replace(self.config, fuse_muon_symmetric_polynomial=True)
         for options in ({"optimizer": "muon", "muon_learning_rate": 0.002},
                         {"muon_learning_rate": 0.002},
                         {"optimizer": "batched-muon", "device": "cuda", "precision": "bf16",
@@ -577,6 +579,21 @@ class TrainerTest(unittest.TestCase):
     def test_cuda_graph_batched_muon_resume_after_eager_fallback(self) -> None:
         self.check_cuda_graph_resume("cuda-graph", optimizer="batched-muon")
 
+    def test_batched_muon_uses_native_products_on_cpu(self) -> None:
+        parameter = torch.nn.Parameter(torch.ones(256, 256))
+        parameter.grad = torch.ones_like(parameter)
+        optimizer = BatchedMuon([parameter], lr=0.002, weight_decay=0.0)
+        with mock.patch.object(optimizer, "_symmetric_polynomial") as symmetric:
+            optimizer.step()
+            symmetric.assert_not_called()
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_symmetric_muon_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph", optimizer="batched-muon", fuse_muon_symmetric_polynomial=True,
+            model_config=replace(TEST_CONFIG, width=256, heads=8, ffn_width=1024, packed_qkv=True),
+        )
+
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_batched_muon_matches_stock_updates_with_weight_decay(self) -> None:
         random = torch.Generator(device="cuda").manual_seed(91)
@@ -599,6 +616,30 @@ class TrainerTest(unittest.TestCase):
                 )
                 error = torch.linalg.vector_norm(p - q) / torch.linalg.vector_norm(p - initial)
                 self.assertLessEqual(float(error.detach()), 0.025)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_symmetric_muon_matches_batched_updates_with_weight_decay(self) -> None:
+        rng = torch.Generator(device="cuda").manual_seed(919)
+        shapes = ((256, 1024), (1024, 256), (256, 256), (128, 256), (256, 257))
+        options = {"lr": 0.002, "weight_decay": 0.01}
+        control = [torch.nn.Parameter(torch.randn(shape, device="cuda", generator=rng)) for shape in shapes]
+        candidate = [torch.nn.Parameter(p.detach().clone()) for p in control]
+        baseline = BatchedMuon(control, **options)
+        symmetric = BatchedMuon(candidate, **options, fuse_symmetric_polynomial=True)
+        for _ in range(3):
+            initial = [p.detach().clone() for p in control]
+            for p, q in zip(control, candidate, strict=True):
+                with torch.no_grad():
+                    q.copy_(p)
+                p.grad = q.grad = torch.randn(p.shape, device=p.device, generator=rng)
+            baseline.step()
+            symmetric.step()
+            for before, p, q in zip(initial, control, candidate, strict=True):
+                torch.testing.assert_close(
+                    baseline.state[p]["momentum_buffer"], symmetric.state[q]["momentum_buffer"], rtol=0, atol=0,
+                )
+                difference = torch.linalg.vector_norm(p - q) / torch.linalg.vector_norm(p - before)
+                self.assertLessEqual(float(difference.detach()), 0.01)
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_tuned_ffn_resume_after_eager_fallback(self) -> None:
@@ -754,6 +795,7 @@ class TrainerTest(unittest.TestCase):
                                 fuse_ffn_residual_norm_backward: bool = False,
                                 fuse_packed_attention: bool = False, fuse_packed_attention_backward: bool = False,
                                 tile_packed_attention_backward: bool = False,
+                                fuse_muon_symmetric_polynomial: bool = False,
                                 model_config=TEST_CONFIG) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
@@ -775,6 +817,7 @@ class TrainerTest(unittest.TestCase):
             fuse_packed_attention=fuse_packed_attention,
             fuse_packed_attention_backward=fuse_packed_attention_backward,
             tile_packed_attention_backward=tile_packed_attention_backward,
+            fuse_muon_symmetric_polynomial=fuse_muon_symmetric_polynomial,
         )
         full = self.run_training("graph", config, model_config=model_config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)
