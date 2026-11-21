@@ -21,6 +21,7 @@ def tuned_training_forward(
     fuse_final_residual_norm: bool = False,
     fuse_packed_qkv_bias_gradient: bool = False,
     fuse_ffn_expand_bias_gradient: bool = False,
+    tile_packed_attention_short_key_first: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     def select_forward(operation, enabled):
         if not enabled:
@@ -53,7 +54,8 @@ def tuned_training_forward(
             attention_operation = partial(packed_attention_forward, shared_backward=fuse_packed_attention_backward,
                                           tiled_backward=tile_packed_attention_backward,
                                           tiled_forward=tile_packed_attention_forward,
-                                          fuse_qkv_bias_gradient=fuse_packed_qkv_bias_gradient)
+                                          fuse_qkv_bias_gradient=fuse_packed_qkv_bias_gradient,
+                                          short_key_first=tile_packed_attention_short_key_first)
     run_attention = select_forward(attention_operation, compile_attention)
     if run_attention is None and fuse_packed_attention:
         run_attention = attention_operation

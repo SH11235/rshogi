@@ -700,6 +700,10 @@ class TrainerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires fuse_packed_attention_backward"):
             replace(self.config, tile_packed_attention_backward=True)
 
+    def test_attention_short_key_first_requires_tiled_backward(self) -> None:
+        with self.assertRaisesRegex(ValueError, "tile_packed_attention_short_key_first requires"):
+            replace(self.config, tile_packed_attention_short_key_first=True)
+
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_tiled_attention_backward_resume_after_eager_fallback(self) -> None:
         self.check_cuda_graph_resume(
@@ -744,21 +748,33 @@ class TrainerTest(unittest.TestCase):
         flags = dict(shared_backward=True, tiled_backward=True, tiled_forward=True)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             baseline = packed_attention_forward(attention, inputs, **flags)
-            fused = packed_attention_forward(attention, inputs, **flags, fuse_qkv_bias_gradient=True)
-        torch.testing.assert_close(baseline, fused, rtol=0, atol=0)
+            candidates = [
+                packed_attention_forward(
+                    attention, inputs, **flags, fuse_qkv_bias_gradient=bias, short_key_first=short,
+                )
+                for bias, short in ((True, False), (False, True), (True, True))
+            ]
         upstream = torch.randn(baseline.shape, device="cuda", dtype=baseline.dtype, generator=rng)
         parameters = inputs, *attention.parameters()
         base_grads = torch.autograd.grad(baseline, parameters, upstream)
-        fused_grads = torch.autograd.grad(fused, parameters, upstream)
-        for want, got in zip(base_grads, fused_grads, strict=True):
-            reference = want.float()
-            relative = (reference - got.float()).norm() / reference.norm().clamp_min(1e-24)
-            self.assertLessEqual(float(relative), 0.01)
+        for candidate in candidates:
+            torch.testing.assert_close(baseline, candidate, rtol=0, atol=0)
+            candidate_grads = torch.autograd.grad(candidate, parameters, upstream)
+            for want, got in zip(base_grads, candidate_grads, strict=True):
+                reference = want.float()
+                relative = (reference - got.float()).norm() / reference.norm().clamp_min(1e-24)
+                self.assertLessEqual(float(relative.detach()), 0.01)
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_packed_qkv_bias_gradient_resume(self) -> None:
         model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True)
         self.check_fixed_shape_graph_resume(self.packed_qkv_bias_config(), model, "fuse_packed_qkv_bias_gradient")
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_attention_short_key_first_resume(self) -> None:
+        model = replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True)
+        config = replace(self.packed_qkv_bias_config(), tile_packed_attention_short_key_first=True)
+        self.check_fixed_shape_graph_resume(config, model, "tile_packed_attention_short_key_first")
 
     def check_fixed_shape_graph_resume(self, config, model, option) -> None:
         records = synthetic_records(seed=29, count=6 * 256 + 1)
