@@ -158,7 +158,7 @@ fn settle_classifies_missing_end_by_the_last_move_value() {
         let (_, table, _) = run_report_with_rows(&d, &walk, &[], &rows);
         let row = table.lines().nth(1).unwrap();
         assert!(row.starts_with(&format!("{class}\t")), "{row}");
-        assert!(row.ends_with(&format!("settle_plies=3;settle_black={value};settle_end=missing")));
+        assert!(row.contains(&format!("settle_plies=3;settle_black={value};settle_end=missing\t")));
     }
 }
 
@@ -207,7 +207,7 @@ fn settle_counts_mate_on_the_last_allowed_move() {
     std::fs::write(&master, format_master(&[row])).unwrap();
     let mut index = MasterIndex::open(&master, &Schema::default()).unwrap();
     let line = settle_line(&mut index, key.to_owned(), None, 1).unwrap();
-    assert_eq!((line.plies, line.value_black, line.end.name()), (1, Some(60), "mate"));
+    assert_eq!((line.moves.len(), line.value_black, line.end.name()), (1, Some(60), "mate"));
     assert_eq!(line.key, child(key, "G*5b").unwrap());
     assert!(line.end.settled(line.value_black, 300));
 }
@@ -627,6 +627,16 @@ fn queued_trees_list_every_box_both_sides_and_skip_depth_zero() {
         )
         .unwrap();
         std::fs::write(dir.join("fetch/progress.json"), progress(trees)).unwrap();
+        let targets: Vec<_> = trees
+            .iter()
+            .filter(|(_, _, finished, _, _)| *finished)
+            .map(|(id, own, _, _, _)| serde_json::json!({"id":id,"own":own,"state":"DONE"}))
+            .collect();
+        std::fs::write(
+            dir.join("fetch/targets.status.json"),
+            serde_json::json!({"targets":targets}).to_string(),
+        )
+        .unwrap();
         format!("{name}={}", dir.display())
     };
     let mut held = serde_json::from_str::<serde_json::Value>(&line("same", "b", 6)).unwrap();
@@ -972,6 +982,7 @@ fn enqueue_bad_continuation_moves_to_missing_root_only_when_unsettled() {
         assert_eq!(lines[0].memo.as_ref().unwrap().contains("元データの続き 2 手の先"), moved);
         assert!(stdout.contains(&format!("続きへ移した行={}", usize::from(moved))), "{stdout}");
         let row: Vec<_> = table.lines().nth(1).unwrap().split('\t').collect();
+        assert_eq!(&row[12..], ["ok", &lines[0].id]);
         let black = fmt_value(Some(value.parse().unwrap()));
         assert_eq!((row[0], row[3], row[9], row[10]), ("bad", "2", exit_key.as_str(), "7g7f"));
         assert_eq!(
@@ -1005,7 +1016,7 @@ fn enqueue_weak_continuation_uses_exit_value_and_memo_keeps_its_exit_number() {
     assert_eq!(lines[0].root, root);
     assert_eq!(lines[0].priority, 7);
 
-    let (stdout, _, _) = run_report_with_rows(&d, &walk, &options, &rows);
+    let (stdout, table, _) = run_report_with_rows(&d, &walk, &options, &rows);
     let lines = read_queue(&out);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].root, root);
@@ -1013,6 +1024,13 @@ fn enqueue_weak_continuation_uses_exit_value_and_memo_keeps_its_exit_number() {
     let memo = lines[0].memo.as_deref().unwrap();
     assert!(memo.starts_with("bad 4手目 "), "{memo}");
     assert!(memo.contains("元データの続き 2 手の先 (2 手目の出口から)"), "{memo}");
+    assert!(memo.contains("path=[bad@4=ok; weak@2=ok]"), "{memo}");
+    assert_eq!(table.matches(&format!("\tok\t{}\n", lines[0].id)).count(), 2);
+    assert!(stdout.contains("path_not_ok=0"), "{stdout}");
+    for (name, path) in [("master", &d.path().join("moves.tsv")), ("enqueue", &out)] {
+        let digest = super::super::journal::digest(path).unwrap();
+        assert!(stdout.contains(&format!("{name}_sha256={digest}")), "{stdout}");
+    }
 }
 
 #[test]
@@ -1065,7 +1083,18 @@ fn enqueue_continuation_checks_box_at_both_roots_and_reports_without_enqueue() {
         )
         .unwrap();
 
-        let (_, table, md) = run_report_with_rows(&d, &walk, &["--box", &box_spec], &rows);
+        let targets: Vec<_> = progress
+            .iter()
+            .filter(|p| p["finished"] == true)
+            .map(|p| serde_json::json!({"id":p["id"],"own":p["own"],"state":"DONE"}))
+            .collect();
+        std::fs::write(
+            box_dir.join("fetch/targets.status.json"),
+            serde_json::json!({"targets":targets}).to_string(),
+        )
+        .unwrap();
+
+        let (_, table, md) = run_report_with_rows(&d, &walk, &["--queue-box", &box_spec], &rows);
         let state = if finished { "DONE" } else { "40/92" };
         let mut queued = format!("exit (A, {state})");
         if include_continuation {
@@ -1078,10 +1107,23 @@ fn enqueue_continuation_checks_box_at_both_roots_and_reports_without_enqueue() {
         let (stdout, with_enqueue_table, with_enqueue_md) = run_report_with_rows(
             &d,
             &walk,
-            &["--box", &box_spec, "--enqueue-out", out.to_str().unwrap()],
+            &[
+                "--queue-box",
+                &box_spec,
+                "--enqueue-out",
+                out.to_str().unwrap(),
+            ],
             &rows,
         );
-        assert_eq!(with_enqueue_table, table);
+        assert!(table.ends_with("\tok\tnot-requested\n"));
+        if expected_excluded == 1 {
+            let reason = if finished {
+                "covered:next(A,DONE)"
+            } else {
+                "covered:exit(A,40/92)"
+            };
+            assert!(with_enqueue_table.ends_with(&format!("\tok\t{reason}\n")));
+        }
         assert_eq!(with_enqueue_md, md);
         assert!(stdout.contains(&format!("照合除外={expected_excluded} ")), "{stdout}");
         let lines = read_queue(&out);
@@ -1252,7 +1294,7 @@ fn enqueue_rejoin_uses_dig_and_merges_reply_games_and_counts_missing_numbers() {
     let d = TempDir::new().unwrap();
     let out = d.path().join("plan.jsonl");
     let rejoin = write_rejoins(&d);
-    let (stdout, _, _) = run_report(
+    let (stdout, table, _) = run_report(
         &d,
         &[],
         &[
@@ -1270,7 +1312,14 @@ fn enqueue_rejoin_uses_dig_and_merges_reply_games_and_counts_missing_numbers() {
     assert_eq!(line.own, "b");
     assert_eq!(line.game, [vec!["8c8d"], vec!["4c4d"]]);
     assert_eq!(line.priority, 4);
-    assert!(line.memo.as_ref().unwrap().contains("重み=0.02000 (2件)"));
+    assert!(
+        line.memo
+            .as_ref()
+            .unwrap()
+            .contains("重み=0.02000 (2件) path=[rejoin@3=-; rejoin@3=-]")
+    );
+    assert!(table.contains("\t-\tno-move-number\n"));
+    assert!(stdout.contains("path_not_ok=1"));
 }
 
 #[test]
@@ -1378,14 +1427,23 @@ fn enqueue_merge_keeps_earlier_class_heavier_representative_and_minimum_priority
         item(Class::Gap, 0.02, Some(10), "7g7f"),
         item(Class::Gap, 0.01, Some(60), "2g2f"),
     ];
-    let (lines, counts) = queue_lines(&items, &args, &[], &Excluded::new()).unwrap();
+    let paths = ["ok", "pos:1", "ok", "move:2"].map(str::to_owned);
+    let EnqueuePlan {
+        lines,
+        counts,
+        dispositions,
+    } = queue_lines(&items, &paths, &args, &[], &Excluded::new(), &BTreeSet::new()).unwrap();
+    assert!(dispositions.iter().all(|id| id == &lines[0].id));
+    assert_eq!(counts.path_not_ok, 1);
     assert_eq!(lines.len(), 1);
     assert_eq!(counts.merged, 3);
     assert_eq!(lines[0].priority, 1);
     assert_eq!(lines[0].game, [vec!["7g7f"], vec!["2g2f"]]);
     assert_eq!(
         lines[0].memo.as_deref(),
-        Some("gap 1手目 先手値=+10 出所=tree:2 重み=0.02000 (4件)")
+        Some(
+            "gap 1手目 先手値=+10 出所=tree:2 重み=0.02000 (4件) path=[gap@1=ok; gap@1=pos:1; gap@1=move:2; shallow@1=ok]"
+        )
     );
 }
 
@@ -1450,7 +1508,7 @@ fn enqueue_box_matches_dig_root_and_own_but_ignores_depth_zero() {
                 rejoin.to_str().unwrap(),
                 "--enqueue-out",
                 out.to_str().unwrap(),
-                "--box",
+                "--queue-box",
                 &format!("A={}", box_dir.display()),
             ],
         );
@@ -1551,4 +1609,154 @@ fn enqueue_validates_all_lines_before_changing_outputs() {
     assert!(run_to(args, &mut Vec::new()).is_err());
     assert_eq!(std::fs::read_to_string(out).unwrap(), "keep");
     assert_eq!(std::fs::read_to_string(table).unwrap(), "keep table");
+}
+
+#[test]
+fn path_checks_direct_positions_and_own_playable_moves_before_root() {
+    let d = TempDir::new().unwrap();
+    let path = ["7g7f", "3c3d", "2g2f"];
+    let walk = [walk_line("b", "own", 0.02, &path)];
+    let mut own = master_row(&path[..2], path[2], "10", "single");
+    own.set("role", "alt".into());
+    let mut rows = vec![
+        master_row(&[], path[0], "60", "tree:3"),
+        master_row(&path[..1], "8c8d", "10", "single"),
+        own,
+    ];
+    let (_, table, _) = run_report_with_rows(&d, &walk, &[], &rows);
+    assert!(table.ends_with("\tok\tnot-requested\n"), "{table}");
+
+    rows.remove(1);
+    rows[1].set("role", "bench".into());
+    let (_, table, _) = run_report_with_rows(&d, &walk, &[], &rows);
+    assert!(table.ends_with("\tpos:2,move:3\tnot-requested\n"), "{table}");
+}
+
+#[test]
+fn path_checks_the_rejoin_move_into_dig_but_not_the_reply() {
+    let d = TempDir::new().unwrap();
+    let rejoin = write_rejoins(&d);
+    let walk = [walk_line("b", "stop", 0.02, &["7g7f", "3c3d"])];
+    let mut rows = vec![
+        master_row(&[], "7g7f", "60", "tree:3"),
+        master_row(&["7g7f"], "8c8d", "10", "single"),
+        master_row(&["7g7f", "3c3d"], "5g5f", "10", "single"),
+    ];
+    let options = ["--rejoin", rejoin.to_str().unwrap()];
+    let (_, table, _) = run_report_with_rows(&d, &walk, &options, &rows);
+    assert_eq!(table.matches("\tmove:3\tnot-requested\n").count(), 2, "{table}");
+
+    rows[2].set("move", "2g2f".into());
+    let (_, table, _) = run_report_with_rows(&d, &walk, &options, &rows);
+    assert_eq!(table.matches("\tok\tnot-requested\n").count(), 2, "{table}");
+    assert!(table.ends_with("\t-\tnot-requested\n"), "{table}");
+}
+
+#[test]
+fn enqueue_only_counts_coverage_from_known_eligible_states() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let exclude = d.path().join("exclude.jsonl");
+    let box_dir = d.path().join("box");
+    std::fs::create_dir_all(box_dir.join("enqueue")).unwrap();
+    std::fs::create_dir_all(box_dir.join("fetch")).unwrap();
+    let box_spec = format!("A={}", box_dir.display());
+    let walk = [walk_line("b", "own", 0.02, &["7g7f"])];
+    let root = format!("sfen {} 2", key_after(&["7g7f"]));
+    let queue_row =
+        |id, hold| serde_json::json!({"id":id, "root":root, "own":"b", "depth":2, "hold":hold});
+    let text = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n",
+        queue_row("held", true),
+        queue_row("rejected", false),
+        queue_row("failed", false),
+        queue_row("unknown", false),
+        queue_row("running", false),
+        queue_row("terminal", false)
+    );
+    std::fs::write(box_dir.join("enqueue/a.jsonl"), &text).unwrap();
+    std::fs::write(
+        box_dir.join("enqueue/a.jsonl.receipt"),
+        serde_json::json!({"start":0,"end":text.len(),"lines":6}).to_string(),
+    )
+    .unwrap();
+    let progress_row = |id, hold, failed, finished| {
+        serde_json::json!({
+            "id":id, "own":"b", "priority":100, "hold":hold, "failed":failed,
+            "finished":finished, "read":10, "requested":20
+        })
+    };
+    let progress = box_dir.join("fetch/progress.json");
+    std::fs::write(
+        &progress,
+        serde_json::json!({
+            "trees":[progress_row("held", true, false, true), progress_row("failed", false, true, true),
+                     progress_row("running", false, false, false), progress_row("terminal", false, false, true)],
+            "workers":[]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let rejected_start = text.find('\n').unwrap() + 1;
+    let status = box_dir.join("fetch/targets.status.json");
+    let mut snapshot = serde_json::json!({
+        "targets":[{"id":"terminal","own":"b","state":"NOT_READY"}],
+        "rejected":[{
+
+            "start": rejected_start, "end": rejected_start + text[rejected_start..].find('\n').unwrap() + 1,
+            "id":"rejected", "reason":"test"
+        }]
+    });
+    std::fs::write(&status, snapshot.to_string()).unwrap();
+    std::fs::write(&exclude, format!("{}\n", queue_row("manual", true))).unwrap();
+    let (_, table, _) = run_report(
+        &d,
+        &walk,
+        &[
+            "--enqueue-out",
+            out.to_str().unwrap(),
+            "--box",
+            &box_spec,
+            "--exclude-queue",
+            exclude.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(read_queue(&out).len(), 1);
+    for shown in [
+        "held (A, hold)",
+        "rejected (A, rejected)",
+        "failed (A, failed)",
+        "unknown (A, unknown)",
+        "running (A, 10/20)",
+        "terminal (A, NOT_READY)",
+        "manual (exclude-queue)",
+    ] {
+        assert!(table.contains(shown), "{table}");
+    }
+
+    snapshot["targets"][0]["state"] = serde_json::json!("DONE");
+    std::fs::write(&status, snapshot.to_string()).unwrap();
+    let (_, table, _) =
+        run_report(&d, &walk, &["--enqueue-out", out.to_str().unwrap(), "--box", &box_spec]);
+    assert!(read_queue(&out).is_empty());
+    assert!(table.ends_with("\tok\tcovered:terminal(A,DONE)\n"), "{table}");
+
+    std::fs::remove_file(progress).unwrap();
+    std::fs::remove_file(status).unwrap();
+    let text = format!("{}\n{}\n", queue_row("held", true), queue_row("waiting", false));
+    std::fs::write(box_dir.join("enqueue/a.jsonl"), &text).unwrap();
+    std::fs::write(
+        box_dir.join("enqueue/a.jsonl.receipt"),
+        serde_json::json!({"start":0,"end":text.len(),"lines":2}).to_string(),
+    )
+    .unwrap();
+    for (arg, expected, shown) in [
+        ("--box", 1, "waiting (A, unknown)"),
+        ("--queue-box", 0, "covered:waiting(A,waiting)"),
+    ] {
+        let (_, table, _) =
+            run_report(&d, &walk, &["--enqueue-out", out.to_str().unwrap(), arg, &box_spec]);
+        assert_eq!(read_queue(&out).len(), expected);
+        assert!(table.contains(shown), "{table}");
+    }
 }

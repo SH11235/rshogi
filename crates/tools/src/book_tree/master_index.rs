@@ -3,6 +3,7 @@
 use super::master_table::{Row, read_rows};
 use super::schema::Schema;
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 
@@ -19,13 +20,40 @@ fn bucket(key: &str) -> usize {
 
 impl MasterIndex {
     pub(super) fn open(path: &std::path::Path, schema: &Schema) -> Result<Self> {
+        Self::from_reader(BufReader::new(File::open(path)?), schema)
+    }
+
+    pub(super) fn open_hashed(path: &std::path::Path, schema: &Schema) -> Result<(Self, String)> {
+        struct HashReader<'a> {
+            file: File,
+            hash: &'a mut Sha256,
+        }
+
+        impl Read for HashReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.file.read(buf)?;
+                self.hash.update(&buf[..n]);
+                Ok(n)
+            }
+        }
+
+        let mut hash = Sha256::new();
+        let reader = HashReader {
+            file: File::open(path)?,
+            hash: &mut hash,
+        };
+        let index = Self::from_reader(BufReader::new(reader), schema)?;
+        Ok((index, format!("{:x}", hash.finalize())))
+    }
+
+    fn from_reader(reader: impl std::io::BufRead, schema: &Schema) -> Result<Self> {
         let mut index = Self {
             file: tempfile::tempfile()?,
             heads: vec![0; BUCKETS],
         };
         // 0 は鎖の終端。行の前に同じバケットの直前の行の位置を置く。
         index.file.write_all(&[0])?;
-        for row in read_rows(BufReader::new(File::open(path)?))? {
+        for row in read_rows(reader)? {
             let (_, row) = row?;
             schema.validate_row(&row)?;
             let b = bucket(row.get("key"));

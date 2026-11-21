@@ -251,6 +251,7 @@ mod tests {
                     workers: Vec::new(),
                 },
                 progress_missing: false,
+                rejected: Vec::new(),
             },
             statuses,
         )
