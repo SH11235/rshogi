@@ -880,6 +880,42 @@ class TrainerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fuse_final_residual_norm requires fuse_norm_cast"):
             replace(self.config, fuse_final_residual_norm=True)
 
+    def test_ffn_expand_bias_gradient_requires_compiled_bf16_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fuse_ffn_expand_bias_gradient requires compile_ffn and fuse_norm_cast"):
+            replace(self.config, fuse_ffn_expand_bias_gradient=True)
+
+    def test_ffn_expand_bias_gradient_rejects_unsupported_shape(self) -> None:
+        config = replace(
+            self.config, device="cuda", precision="bf16", fused_optimizer=True, batch_size=256,
+            execution="cuda-graph-fused-norm", fuse_norm_cast=True, compile_ffn=True,
+            fuse_ffn_expand_bias_gradient=True,
+        )
+        model = replace(TEST_CONFIG, width=256, heads=8, ffn_width=512)
+        with self.assertRaisesRegex(TrainingError, "fuse_ffn_expand_bias_gradient requires width 256"):
+            self.run_training("unsupported-ffn-width", config, model_config=model)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_ffn_expand_bias_gradient_matches_unfused(self) -> None:
+        from rshogi_dl._ffn_expand_bias import fused_ffn_forward
+        from rshogi_dl.contract import TOKEN_COUNT
+
+        rng = torch.Generator(device="cuda").manual_seed(577)
+        layer = FeedForward(256, 1024).cuda()
+        inputs = torch.randn((256, TOKEN_COUNT, 256), device="cuda", dtype=torch.bfloat16, generator=rng)
+        inputs.requires_grad_()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            baseline = layer(inputs)
+            fused = fused_ffn_forward(layer, inputs)
+        torch.testing.assert_close(baseline, fused, rtol=0, atol=0)
+        upstream = torch.randn(baseline.shape, device="cuda", dtype=baseline.dtype, generator=rng)
+        parameters = inputs, *layer.parameters()
+        want = torch.autograd.grad(baseline, parameters, upstream)
+        got = torch.autograd.grad(fused, parameters, upstream)
+        for left, right in zip(want, got, strict=True):
+            reference = left.float()
+            relative = (reference - right.float()).norm() / reference.norm().clamp_min(1e-24)
+            self.assertLessEqual(float(relative), 0.01)
+
     def test_final_residual_norm_rejects_unsupported_width(self) -> None:
         config = replace(
             self.config, device="cuda", precision="bf16", fused_optimizer=True,

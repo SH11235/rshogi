@@ -269,6 +269,7 @@ python -m rshogi_dl.trainer \
 | `--execution` | `eager` / `compile` / `cuda-graph` / `cuda-graph-fused-norm`。既定eager。compileとgraph記録の初回費用も学習時間に含む |
 | `--compile-mode` | `default` / `reduce-overhead` / `max-autotune` / `max-autotune-no-cudagraphs`。既定default。非defaultはcompile時だけ指定可 |
 | `--compile-ffn` | 学習時の満杯batchでFFNのCUDA kernelを探索。既定は無効 |
+| `--fuse-ffn-expand-bias-gradient` | FFNのGELU逆伝播に展開射影のbias勾配の部分和を融合する。幅256・FFN幅1024・batch256で、`--compile-ffn` と `--fuse-norm-cast` が必要。丸め順が変わる場合がある。既定は無効 |
 | `--compile-attention` | 学習時の満杯batchでAttentionの射影を含む演算のCUDA kernelを探索。既定は無効 |
 | `--fuse-norm-cast` | attention残差側のLayerNormの出力を同じ処理内でBF16にする。既定は無効 |
 | `--fuse-attention-residual-norm` | 幅128、192、224、256のAttention残差加算とLayerNormの順伝播・逆伝播にCUDA Tritonを使う。`--fuse-norm-cast` が必要。丸め順が変わる場合がある。既定は無効 |
