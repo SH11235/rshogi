@@ -89,6 +89,7 @@ class TrainerConfig:
     fuse_final_residual_norm: bool = False
     fuse_packed_qkv_bias_gradient: bool = False
     fuse_ffn_expand_bias_gradient: bool = False
+    tile_packed_attention_short_key_first: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -108,6 +109,7 @@ class TrainerConfig:
             "fuse_muon_symmetric_polynomial",
             "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
             "fuse_packed_qkv_bias_gradient", "fuse_ffn_expand_bias_gradient",
+            "tile_packed_attention_short_key_first",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -148,6 +150,8 @@ class TrainerConfig:
             raise ValueError("fuse_packed_attention_backward requires fuse_packed_attention")
         if self.tile_packed_attention_backward and not self.fuse_packed_attention_backward:
             raise ValueError("tile_packed_attention_backward requires fuse_packed_attention_backward")
+        if self.tile_packed_attention_short_key_first and not self.tile_packed_attention_backward:
+            raise ValueError("tile_packed_attention_short_key_first requires tile_packed_attention_backward")
         if self.tile_packed_attention_forward and not self.fuse_packed_attention:
             raise ValueError("tile_packed_attention_forward requires fuse_packed_attention")
         if self.fuse_packed_qkv_bias_gradient and not (
@@ -187,7 +191,8 @@ def _config_dict(config: TrainerConfig) -> dict:
                  "fuse_packed_attention", "fuse_packed_attention_backward",
                  "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
                  "fuse_muon_symmetric_polynomial", "tile_packed_attention_forward", "fuse_attention_residual_norm",
-                 "fuse_final_residual_norm", "fuse_packed_qkv_bias_gradient", "fuse_ffn_expand_bias_gradient"):
+                 "fuse_final_residual_norm", "fuse_packed_qkv_bias_gradient", "fuse_ffn_expand_bias_gradient",
+                 "tile_packed_attention_short_key_first"):
         if not payload[name]:
             del payload[name]
     return payload
@@ -314,6 +319,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
             "fuse_muon_symmetric_polynomial",
             "tile_packed_attention_forward", "fuse_attention_residual_norm", "fuse_final_residual_norm",
             "fuse_packed_qkv_bias_gradient", "fuse_ffn_expand_bias_gradient",
+            "tile_packed_attention_short_key_first",
         }
         saved_config = payload["trainer_config"]
         if (
@@ -558,6 +564,7 @@ def run_training(
                 fuse_final_residual_norm=config.fuse_final_residual_norm,
                 fuse_packed_qkv_bias_gradient=config.fuse_packed_qkv_bias_gradient,
                 fuse_ffn_expand_bias_gradient=config.fuse_ffn_expand_bias_gradient,
+                tile_packed_attention_short_key_first=config.tile_packed_attention_short_key_first,
             )
         elif config.execution == "cuda-graph-fused-norm":
             execution = compiled_residual_forward(
@@ -735,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fuse-packed-attention", action="store_true")
     parser.add_argument("--fuse-packed-attention-backward", action="store_true")
     parser.add_argument("--tile-packed-attention-backward", action="store_true")
+    parser.add_argument("--tile-packed-attention-short-key-first", action="store_true")
     parser.add_argument("--tile-packed-attention-forward", action="store_true")
     parser.add_argument("--fuse-packed-qkv-bias-gradient", action="store_true")
     parser.add_argument("--prefetch-input", action="store_true")
