@@ -7,7 +7,9 @@ import subprocess
 import unittest
 from unittest import mock
 
-from rshogi_dl.hcpe3_rows import GameFrame, Hcpe3RowsError, PolicyFrame, assemble_shards, iter_frames
+from rshogi_dl.hcpe3_rows import (
+    GameFrame, Hcpe3RowsError, PackedPolicyFrame, PolicyFrame, assemble_shards, iter_frames, iter_packed_frames,
+)
 from rshogi_dl.sharded import DatasetError, convert_hcpe3, convert_records, verify_dataset
 
 from .support import artifact_tempdir, empty_board_tokens
@@ -23,6 +25,11 @@ def source_stream(*, played=13, visits=(46, 19)) -> bytes:
     )
 
 
+def policy_frame(tokens, legal, visits):
+    payload = struct.pack(f"<{len(legal) + len(visits)}H", *legal, *visits)
+    return PackedPolicyFrame(0, 1, tokens, 0.5, len(legal), payload)
+
+
 class ShortReader(io.BytesIO):
     def read(self, size=-1):
         return super().read(min(3, size) if size >= 0 else size)
@@ -30,7 +37,7 @@ class ShortReader(io.BytesIO):
 
 class Hcpe3RowsTest(unittest.TestCase):
     def test_shard_offsets_cross_assembly_blocks(self):
-        row = PolicyFrame(0, 1, bytes(empty_board_tokens()), 0.5, (3, 1, 5), (5, 2, 3, 1))
+        row = policy_frame(bytes(empty_board_tokens()), (3, 1, 5), (5, 2, 3, 1))
         (columns, count), = assemble_shards(iter([row] * 4097), 5000)
         self.assertEqual(count, 4097)
         self.assertEqual(columns["legal_offsets"][-3:].tolist(), [12285, 12288, 12291])
@@ -41,10 +48,10 @@ class Hcpe3RowsTest(unittest.TestCase):
     def test_shard_assembly_rejects_invalid_tokens_and_labels(self):
         tokens = bytes(empty_board_tokens())
         for row, message in (
-            (PolicyFrame(0, 1, b"\xff" + tokens[1:], 0.5, (1, 2), (1, 1)), "tokens"),
-            (PolicyFrame(0, 1, tokens, 0.5, (1, 2), (3, 1)), "not legal"),
-            (PolicyFrame(0, 1, tokens, 0.5, (1, 1), (1, 1)), "duplicates"),
-            (PolicyFrame(0, 1, tokens, 0.5, (1, 2), (1, 1, 1, 2)), "duplicates"),
+            (policy_frame(b"\xff" + tokens[1:], (1, 2), (1, 1)), "tokens"),
+            (policy_frame(tokens, (1, 2), (3, 1)), "not legal"),
+            (policy_frame(tokens, (1, 1), (1, 1)), "duplicates"),
+            (policy_frame(tokens, (1, 2), (1, 1, 1, 2)), "duplicates"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(Hcpe3RowsError, message):
                 list(assemble_shards(iter([row]), 4))
@@ -55,6 +62,7 @@ class Hcpe3RowsTest(unittest.TestCase):
         self.assertEqual(second, GameFrame(b"b" * 32, 2, 1))
         self.assertIsInstance(row, PolicyFrame)
         self.assertEqual((row.ply, row.played), (1, 13))
+        self.assertEqual(row, PolicyFrame(1, 13, bytes(empty_board_tokens()), 1.0, (13, 46), (46, 19)))
         self.assertEqual(row.to_record(), {
             "tokens": list(empty_board_tokens()), "legal_labels": [13, 46], "policy": [[46, 19]], "value": 1.0,
         })
@@ -94,6 +102,10 @@ class Hcpe3RowsTest(unittest.TestCase):
         ):
             with self.subTest(arguments=arguments), self.assertRaisesRegex(Hcpe3RowsError, message):
                 list(iter_frames(io.BytesIO(source_stream(**arguments))))
+            rows = (frame for frame in iter_packed_frames(ShortReader(source_stream(**arguments)))
+                    if isinstance(frame, PackedPolicyFrame))
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(Hcpe3RowsError, message):
+                list(assemble_shards(rows, 4))
 
     def test_conversion_checks_encoder_and_sources_before_manifest_publication(self):
         with artifact_tempdir() as temporary:

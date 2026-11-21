@@ -21,7 +21,7 @@ import torch
 
 from .contract import INPUT_FORMAT, MAX_LEGAL_LABELS, POLICY_FORMAT, TOKEN_COUNT, VALUE_FORMAT
 from .data import Batch, Record, RecordError, iter_records, validate_record
-from .hcpe3_rows import Hcpe3RowsError, PolicyFrame, assemble_shards, iter_frames
+from .hcpe3_rows import Hcpe3RowsError, PackedPolicyFrame, assemble_shards, iter_packed_frames
 from .paths import ArtifactPathError, shogi_data_root
 
 FORMAT = "rshogi-dl-sharded-v1"
@@ -279,8 +279,8 @@ def convert_hcpe3(
     with subprocess.Popen([encoder, *paths], stdout=subprocess.PIPE) as child:
         def frames():
             assert child.stdout is not None
-            for frame in iter_frames(child.stdout):
-                if isinstance(frame, PolicyFrame):
+            for frame in iter_packed_frames(child.stdout):
+                if isinstance(frame, PackedPolicyFrame):
                     yield frame
             try:
                 status = child.wait(timeout=_ENCODER_EXIT_GRACE_SECONDS)
