@@ -1065,6 +1065,14 @@ pub(super) fn tree_states(
                 &[]
             };
             let b = load_box(name, dir, &mut inputs, Some(rejections))?;
+            if b.progress_missing && kind == SnapshotKind::Legacy {
+                eprintln!(
+                    "{}: 進みの記録 {} が無いので、受付の木 {} 本を状態不明 (受付ありに数えない) とします",
+                    b.name,
+                    b.dir.join("fetch/progress.json").display(),
+                    b.progress.trees.len()
+                );
+            }
             let targets: BTreeMap<_, _> =
                 status.targets.iter().map(|t| ((t.id.as_str(), t.own.as_str()), t)).collect();
             let progress: BTreeMap<_, _> =
