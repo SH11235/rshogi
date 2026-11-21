@@ -791,6 +791,25 @@ class TrainerTest(unittest.TestCase):
             model_config=replace(TEST_CONFIG, layers=2, width=224, heads=7, ffn_width=512, packed_qkv=True),
         )
 
+    def test_attention_residual_norm_requires_norm_cast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fuse_attention_residual_norm requires fuse_norm_cast"):
+            replace(self.config, fuse_attention_residual_norm=True)
+
+    def test_attention_residual_norm_rejects_unsupported_width(self) -> None:
+        config = replace(
+            self.config, device="cuda", precision="bf16", fused_optimizer=True,
+            execution="cuda-graph-fused-norm", fuse_norm_cast=True, fuse_attention_residual_norm=True,
+        )
+        with self.assertRaisesRegex(TrainingError, "fuse_attention_residual_norm requires width"):
+            self.run_training("unsupported-width", config, model_config=replace(TEST_CONFIG, width=64, heads=2))
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_attention_residual_norm_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", fuse_norm_cast=True, fuse_attention_residual_norm=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=224, heads=7, ffn_width=512),
+        )
+
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_ffn_residual_fusion_matches_native(self) -> None:
         for width in (128, 192, 224, 256):
@@ -829,6 +848,7 @@ class TrainerTest(unittest.TestCase):
                                 tile_packed_attention_backward: bool = False,
                                 fuse_muon_symmetric_polynomial: bool = False,
                                 tile_packed_attention_forward: bool = False,
+                                fuse_attention_residual_norm: bool = False,
                                 model_config=TEST_CONFIG) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
@@ -852,6 +872,7 @@ class TrainerTest(unittest.TestCase):
             tile_packed_attention_backward=tile_packed_attention_backward,
             fuse_muon_symmetric_polynomial=fuse_muon_symmetric_polynomial,
             tile_packed_attention_forward=tile_packed_attention_forward,
+            fuse_attention_residual_norm=fuse_attention_residual_norm,
         )
         full = self.run_training("graph", config, model_config=model_config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)
@@ -866,12 +887,13 @@ class TrainerTest(unittest.TestCase):
             resumed = self.run_training(f"graph-resumed-{step}", config, model_config=model_config, resume=path)
             self.assertEqual(resumed["progress"], full["progress"])
             self.assertGreater(resumed["cuda_graph_replayed_steps"], 0)
-        if fuse_ffn_residual_norm_backward:
-            with self.assertRaisesRegex(ResumeError, "configuration differs"):
-                self.run_training(
-                    "resume-without-fused-backward", replace(config, fuse_ffn_residual_norm_backward=False),
-                    model_config=model_config, resume=self.root / "graph/resume-0000000008.pt",
-                )
+        for option in ("fuse_ffn_residual_norm_backward", "fuse_attention_residual_norm"):
+            if getattr(config, option):
+                with self.assertRaisesRegex(ResumeError, "configuration differs"):
+                    self.run_training(
+                        f"resume-without-{option}", replace(config, **{option: False}),
+                        model_config=model_config, resume=self.root / "graph/resume-0000000008.pt",
+                    )
         runs = ["graph", "graph-resumed-4", "graph-resumed-8"]
         if prefetch_input:
             synchronous = replace(config, prefetch_input=False)

@@ -27,19 +27,29 @@ def compiled_residual_forward(
     cast_output: bool = False,
     fuse_ffn_residual_norm: bool = False,
     fuse_ffn_residual_norm_backward: bool = False,
+    fuse_attention_residual_norm: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-    normalize = _add_normalize_bf16 if cast_output else _add_normalize
-    add_normalize = torch.compile(normalize, fullgraph=True, dynamic=True)
     normalize_ffn = None
-    if fuse_ffn_residual_norm:
+    if fuse_ffn_residual_norm or fuse_attention_residual_norm:
         try:
             from ._ffn_residual_norm import ffn_residual_norm
         except ImportError as error:
-            raise ValueError("fuse_ffn_residual_norm requires CUDA Triton") from error
+            option = "fuse_attention_residual_norm" if fuse_attention_residual_norm else "fuse_ffn_residual_norm"
+            raise ValueError(f"{option} requires CUDA Triton") from error
+    if fuse_ffn_residual_norm:
         normalize_ffn = (
             partial(ffn_residual_norm, fuse_backward=True)
             if fuse_ffn_residual_norm_backward else ffn_residual_norm
         )
+
+    if fuse_attention_residual_norm:
+        def add_normalize(residual, update, weight, bias, epsilon):
+            residual, normalized = ffn_residual_norm(residual, update, weight, bias, epsilon, fuse_backward=True)
+            # The kernel fallback returns its normalized output in FP32.
+            return residual, normalized.to(torch.bfloat16)
+    else:
+        normalize = _add_normalize_bf16 if cast_output else _add_normalize
+        add_normalize = torch.compile(normalize, fullgraph=True, dynamic=True)
 
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = model._embed(tokens)
