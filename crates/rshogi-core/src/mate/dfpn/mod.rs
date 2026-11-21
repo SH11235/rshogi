@@ -18,6 +18,8 @@
 //! ([`MateResult::Unsupported`])。
 
 mod estimate;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod game;
 mod pv;
 mod search;
 mod shortest;
@@ -783,7 +785,7 @@ impl RootState for NoAttackerKing {
 /// 補助スレッドのスタック。探索は手数ごとに再帰するので、既定 (2 MB) では探索深さの上限まで潜れない
 /// (debug ビルドは 1 手あたりの使用量が数倍になる)。確保するのは仮想領域で、使った分だけが実メモリになる。
 #[cfg(not(target_arch = "wasm32"))]
-const HELPER_STACK_SIZE: usize = 256 * 1024 * 1024;
+pub(crate) const HELPER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 /// 呼び出したスレッドが panic で抜けるとき (補助の起動の失敗も含む) に、補助スレッドを止める。
 /// 止めないと、scope の終わりで補助の終わりを待ち続けて panic が伝わらない

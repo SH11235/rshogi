@@ -242,6 +242,10 @@ pub struct Search {
 
     /// 探索スレッド数
     num_threads: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    game_mate_config: Option<super::game_mate::Config>,
+    #[cfg(not(target_arch = "wasm32"))]
+    game_mate: super::game_mate::GameMateSearch,
     /// 探索スレッドプール（helper threads）
     thread_pool: ThreadPool,
     /// main と helper の全スレッドで共有する履歴
@@ -513,6 +517,7 @@ fn emit_best_thread_debug(
 fn collect_thread_summaries(
     main_worker: &SearchWorker,
     thread_pool: &ThreadPool,
+    #[cfg(not(target_arch = "wasm32"))] active_helpers: usize,
 ) -> Vec<ThreadSummary> {
     let mut summaries = Vec::new();
     if let Some(summary) = ThreadSummary::from_worker(0, main_worker) {
@@ -521,7 +526,7 @@ fn collect_thread_summaries(
 
     // Native: Use helper_threads() to access Thread objects directly
     #[cfg(not(target_arch = "wasm32"))]
-    for thread in thread_pool.helper_threads() {
+    for thread in thread_pool.helper_threads().iter().take(active_helpers) {
         if let Some(summary) = thread.with_worker(|worker: &mut SearchWorker| {
             ThreadSummary::from_worker(thread.id(), worker)
         }) {
@@ -562,8 +567,14 @@ fn get_best_thread_id(
     thread_pool: &ThreadPool,
     use_best_thread: bool,
     debug: bool,
+    #[cfg(not(target_arch = "wasm32"))] active_helpers: usize,
 ) -> usize {
-    let summaries = collect_thread_summaries(main_worker, thread_pool);
+    let summaries = collect_thread_summaries(
+        main_worker,
+        thread_pool,
+        #[cfg(not(target_arch = "wasm32"))]
+        active_helpers,
+    );
     if summaries.is_empty() {
         return 0;
     }
@@ -770,6 +781,10 @@ impl Search {
             time_options: super::TimeOptions::default(),
             skill_options: SkillOptions::default(),
             num_threads: 1,
+            #[cfg(not(target_arch = "wasm32"))]
+            game_mate_config: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            game_mate: super::game_mate::GameMateSearch::default(),
             thread_pool,
             shared_histories,
             // workerは遅延初期化（最初のgoで作成）
@@ -1042,6 +1057,27 @@ impl Search {
         self.entering_king_rule
     }
 
+    /// 通常対局で詰み探索に割ける最大スレッド数。0 で無効になる。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_game_mate_options(
+        &mut self,
+        threads: usize,
+        hash_mb: usize,
+        mode: crate::mate::dfpn::MateMode,
+    ) {
+        self.game_mate_config = (threads > 0).then_some(super::game_mate::Config {
+            threads,
+            hash_mb: hash_mb.clamp(1, 4096),
+            mode,
+        });
+    }
+
+    /// 通常対局の詰みワーカーを停止し、別の詰み探索を起動する前に回収する。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn wait_for_game_mate(&mut self) {
+        self.game_mate.drain();
+    }
+
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         // WASM builds without wasm-threads feature use single-threaded search only.
@@ -1059,6 +1095,8 @@ impl Search {
                 worker.shared_histories = Arc::clone(&self.shared_histories);
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.game_mate.ensure_thread_limit(num);
         self.num_threads = num;
         #[cfg(target_os = "linux")]
         self.update_numa_plan();
@@ -1415,6 +1453,54 @@ impl Search {
         let mut skill = Skill::from_options(&self.skill_options);
         let skill_enabled = skill.enabled();
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let game_mate_started = {
+            self.game_mate.reap();
+            let side = pos.side_to_move();
+            self.game_mate_config.is_some_and(|mut config| {
+                config.threads = config.threads.min(self.num_threads.saturating_sub(1));
+                if !helper_search_enabled
+                    || self.game_mate.busy_threads() != 0
+                    || config.threads == 0
+                    || skill_enabled
+                    || limits.ponder
+                    || limits.infinite
+                    || limits.analysis.is_some()
+                    || limits.nodes != 0
+                    || limits.depth != 0
+                    || limits.rtime != 0
+                    || limits.perft != 0
+                    || limits.multi_pv != 1
+                    || !limits.search_moves.is_empty()
+                    || (limits.movetime <= 0
+                        && limits.time_left(side) <= 0
+                        && limits.byoyomi_time(side) <= 0
+                        && limits.increment(side) <= 0)
+                    || self.entering_king_rule == EnteringKingRule::TryRule
+                    || pos.declaration_win(self.entering_king_rule) != Move::NONE
+                    || !crate::mate::dfpn::game::has_checking_move(pos)
+                {
+                    return false;
+                }
+                let Some(deadline) = time_manager.maximum_deadline() else {
+                    return false;
+                };
+                self.game_mate.start(
+                    config,
+                    pos,
+                    self.max_moves_to_draw,
+                    deadline,
+                    Arc::clone(&self.stop),
+                )
+            })
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            limits.reserved_game_mate_threads = self.game_mate.busy_threads();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let active_helpers = self.num_threads.saturating_sub(1 + limits.reserved_game_mate_threads);
+
         if helper_search_enabled {
             self.thread_pool.start_thinking(
                 pos,
@@ -1475,6 +1561,9 @@ impl Search {
             }
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let game_mate = self.game_mate.finish().filter(|_| game_mate_started);
+
         if helper_search_enabled {
             self.stop.store(true, Ordering::SeqCst);
             self.thread_pool.wait_for_search_finished();
@@ -1490,7 +1579,14 @@ impl Search {
                 .worker
                 .as_ref()
                 .expect("worker should be initialized by search_with_callback");
-            get_best_thread_id(worker, &self.thread_pool, use_best_thread, debug_best_thread)
+            get_best_thread_id(
+                worker,
+                &self.thread_pool,
+                use_best_thread,
+                debug_best_thread,
+                #[cfg(not(target_arch = "wasm32"))]
+                active_helpers,
+            )
         };
 
         let best_result = if best_thread_id == 0 {
@@ -1577,6 +1673,23 @@ impl Search {
             })
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let best_result = if let Some(mate) = game_mate {
+            if best_result.best_move == Move::WIN {
+                best_result
+            } else {
+                log::info!("game mate verified: {} in {} plies", mate.first.to_usi(), mate.plies);
+                BestThreadResult {
+                    best_move: mate.first,
+                    score: Value::mate_in(i32::from(mate.plies)),
+                    bound: Bound::Lower,
+                    pv: vec![mate.first],
+                    ..best_result
+                }
+            }
+        } else {
+            best_result
+        };
         let BestThreadResult {
             best_move,
             score,
@@ -1604,9 +1717,12 @@ impl Search {
             // Native: Use helper_threads() to get node counts
             #[cfg(not(target_arch = "wasm32"))]
             let helper_nodes =
-                self.thread_pool.helper_threads().iter().fold(0u64, |acc, thread| {
-                    acc.saturating_add(thread.with_worker(|worker| worker.state.nodes))
-                });
+                self.thread_pool.helper_threads().iter().take(active_helpers).fold(
+                    0u64,
+                    |acc, thread| {
+                        acc.saturating_add(thread.with_worker(|worker| worker.state.nodes))
+                    },
+                );
 
             // Wasm with wasm-threads: Use helper_nodes() to get node counts
             #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -2211,7 +2327,9 @@ where
                 // Native: Use helper_threads() to collect best_move_changes
                 #[cfg(not(target_arch = "wasm32"))]
                 let (changes_sum, thread_count) = {
-                    let helper_threads = ms.thread_pool.helper_threads();
+                    let helpers = ms.thread_pool.helper_threads();
+                    let helper_threads =
+                        &helpers[..helpers.len().saturating_sub(limits.reserved_game_mate_threads)];
                     let mut changes = Vec::with_capacity(helper_threads.len() + 1);
                     changes.push(best_move_changes);
                     for thread in helper_threads {

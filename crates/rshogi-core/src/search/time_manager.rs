@@ -654,6 +654,12 @@ impl TimeManagement {
         self.optimum_time
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn maximum_deadline(&self) -> Option<Instant> {
+        let ms = u64::try_from(self.maximum_time).ok()?;
+        self.start_time.checked_add(std::time::Duration::from_millis(ms))
+    }
+
     /// 最大思考時間を取得
     #[inline]
     pub fn maximum(&self) -> TimePoint {

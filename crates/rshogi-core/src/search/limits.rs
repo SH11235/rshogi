@@ -23,6 +23,8 @@ pub type TimePoint = i64;
 /// USI `go` コマンドで指定されるパラメータを保持する。
 #[derive(Clone)]
 pub struct LimitsType {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) reserved_game_mate_threads: usize,
     pub(crate) analysis: Option<super::analysis::AnalysisRun>,
     /// 両者の残り時間（ミリ秒）
     pub time: [TimePoint; Color::NUM],
@@ -80,6 +82,8 @@ pub struct LimitsType {
 impl Default for LimitsType {
     fn default() -> Self {
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            reserved_game_mate_threads: 0,
             analysis: None,
             time: [0; Color::NUM],
             inc: [0; Color::NUM],

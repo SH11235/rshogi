@@ -226,3 +226,23 @@ fn new_go_cancels_go_mate_without_output() {
     assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate G*5b");
     engine.assert_no_more_checkmate();
 }
+
+#[test]
+fn game_mate_option_keeps_go_and_go_mate_responses_separate() {
+    let mut engine = Engine::start();
+    engine.send("usi");
+    let advertised = engine
+        .wait_for(|line| line.starts_with("option name GameMateThreads "), Duration::from_secs(5));
+    assert_eq!(advertised, "option name GameMateThreads type spin default 0 min 0 max 512");
+    let position = "position sfen 4k4/9/4P4/9/9/9/9/9/4K4 b G 1";
+    engine.send(&format!(
+        "setoption name Threads value 2\nsetoption name GameMateThreads value 1\n{position}\ngo movetime 500"
+    ));
+    let best = engine.wait_for(
+        |line| line.starts_with("bestmove ") || line.starts_with("checkmate"),
+        Duration::from_secs(10),
+    );
+    assert_eq!(best.split_whitespace().take(2).collect::<Vec<_>>(), ["bestmove", "G*5b"]);
+    engine.send(&format!("{position}\ngo mate 2000"));
+    assert_eq!(engine.checkmate(Duration::from_secs(5)), "checkmate G*5b");
+}

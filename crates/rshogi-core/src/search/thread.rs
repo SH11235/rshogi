@@ -177,7 +177,8 @@ mod imp {
                 return;
             }
 
-            for thread in &self.threads {
+            let count = self.threads.len().saturating_sub(limits.reserved_game_mate_threads);
+            for thread in self.threads.iter().take(count) {
                 thread.start_searching(SearchTask {
                     pos: pos.clone(),
                     limits: limits.clone(),
