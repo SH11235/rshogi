@@ -22,6 +22,7 @@ def tuned_training_forward(
     fuse_packed_qkv_bias_gradient: bool = False,
     fuse_ffn_expand_bias_gradient: bool = False,
     tile_packed_attention_short_key_first: bool = False,
+    lookup_ffn_gelu_derivative: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     def select_forward(operation, enabled):
         if not enabled:
@@ -38,10 +39,12 @@ def tuned_training_forward(
     ffn_forward = FeedForward.forward
     if fuse_ffn_expand_bias_gradient:
         try:
-            from ._ffn_expand_bias import fused_ffn_forward
+            from ._ffn_expand_bias import fused_ffn_forward, gelu_derivative_table
         except ImportError as error:
             raise ValueError("fuse_ffn_expand_bias_gradient requires CUDA Triton") from error
         ffn_forward = fused_ffn_forward
+        if lookup_ffn_gelu_derivative:
+            ffn_forward = partial(ffn_forward, gelu_derivatives=gelu_derivative_table(model.position_embedding.device))
     run_ffn = select_forward(ffn_forward, compile_ffn)
     attention_operation = SelfAttention.forward
     if fuse_packed_attention:
