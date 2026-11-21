@@ -811,6 +811,16 @@ class TrainerTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_final_residual_resume_after_eager_fallback(self) -> None:
+        self.check_cuda_graph_resume(
+            "cuda-graph-fused-norm", fuse_norm_cast=True, fuse_attention_residual_norm=True,
+            fuse_final_residual_norm=True, fuse_ffn_residual_norm=True, fuse_ffn_residual_norm_backward=True,
+            fuse_packed_attention=True, fuse_packed_attention_backward=True, tile_packed_attention_backward=True,
+            tile_packed_attention_forward=True,
+            model_config=replace(TEST_CONFIG, layers=2, width=256, heads=8, ffn_width=512, packed_qkv=True),
+        )
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_ffn_residual_fusion_matches_native(self) -> None:
         for width in (128, 192, 224, 256):
             for fuse_backward in (False, True):
@@ -849,6 +859,7 @@ class TrainerTest(unittest.TestCase):
                                 fuse_muon_symmetric_polynomial: bool = False,
                                 tile_packed_attention_forward: bool = False,
                                 fuse_attention_residual_norm: bool = False,
+                                fuse_final_residual_norm: bool = False,
                                 model_config=TEST_CONFIG) -> None:
         records = synthetic_records(seed=29, count=19)
         for index, record in enumerate(records):
@@ -873,6 +884,7 @@ class TrainerTest(unittest.TestCase):
             fuse_muon_symmetric_polynomial=fuse_muon_symmetric_polynomial,
             tile_packed_attention_forward=tile_packed_attention_forward,
             fuse_attention_residual_norm=fuse_attention_residual_norm,
+            fuse_final_residual_norm=fuse_final_residual_norm,
         )
         full = self.run_training("graph", config, model_config=model_config)
         self.assertEqual(full["cuda_graph_replayed_steps"], 8)
@@ -887,7 +899,7 @@ class TrainerTest(unittest.TestCase):
             resumed = self.run_training(f"graph-resumed-{step}", config, model_config=model_config, resume=path)
             self.assertEqual(resumed["progress"], full["progress"])
             self.assertGreater(resumed["cuda_graph_replayed_steps"], 0)
-        for option in ("fuse_ffn_residual_norm_backward", "fuse_attention_residual_norm"):
+        for option in ("fuse_ffn_residual_norm_backward", "fuse_attention_residual_norm", "fuse_final_residual_norm"):
             if getattr(config, option):
                 with self.assertRaisesRegex(ResumeError, "configuration differs"):
                     self.run_training(

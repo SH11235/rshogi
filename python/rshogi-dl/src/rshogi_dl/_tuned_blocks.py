@@ -18,6 +18,7 @@ def tuned_training_forward(
     tile_packed_attention_backward: bool = False,
     tile_packed_attention_forward: bool = False,
     fuse_attention_residual_norm: bool = False,
+    fuse_final_residual_norm: bool = False,
 ) -> Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
     def select_forward(operation, enabled):
         if not enabled:
@@ -53,6 +54,7 @@ def tuned_training_forward(
             fuse_ffn_residual_norm=fuse_ffn_residual_norm,
             fuse_ffn_residual_norm_backward=fuse_ffn_residual_norm_backward,
             fuse_attention_residual_norm=fuse_attention_residual_norm,
+            fuse_final_residual_norm=fuse_final_residual_norm,
         )
 
     def forward(tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
