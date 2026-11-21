@@ -248,9 +248,9 @@ fn in_tree_declaration_finds_own_declaration_in_two() {
     on_large_stack(|| {
         // 先手は敵陣の駒が 9 枚で今は宣言できないが、大駒を敵陣に打つと 10 枚 29 点になり、
         // 後手のどの応手の後でも宣言できる。
-        // 先手の盤上に歩を置かないのは、静止探索が歩の成りを bestMove として置換表に残すと
-        // 非 PV ノードでは宣言判定が省かれる（`!ttMove || PvNode` 条件）ため。
-        let sfen = "KGG6/+S+S7/+P+P+P+P+P4/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
+        // 盤上の不成の歩・銀は、静止探索が成りを bestMove として置換表に残すため、宣言判定が
+        // 置換表の手の有無に左右されないことも合わせて確かめる。
+        let sfen = "KGG6/SS7/PPPPP4/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
         let root = position(sfen);
         assert_eq!(root.declaration_win(EnteringKingRule::Point27), Move::NONE);
 
