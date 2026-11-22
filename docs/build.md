@@ -268,7 +268,8 @@ RSHOGI_EMBED_SPSA_PARAMS=/path/to/tuned.params cargo xtask build --edition <pres
 RSHOGI_ENGINE_NAME="RAMU 2304" cargo xtask build --edition <preset>
 ```
 
-- 前後の空白は取り除きます。改行などの制御文字を含む名前は build が止まります。
+- 前後の空白は取り除きます。改行などの制御文字を含む名前 (前後にあるものも) は build が止まります。
+- 名前は UTF-8 のまま出すので、GUI によっては日本語などが文字化けします。ASCII の名前を勧めます。
 - エンジン名は探索の結果を変えないので、`--source-version` には含めません。
 
 #### 命名規則

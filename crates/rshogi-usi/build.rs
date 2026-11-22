@@ -57,14 +57,19 @@ fn main() {
 fn engine_name() -> String {
     const VAR: &str = "RSHOGI_ENGINE_NAME";
     println!("cargo:rerun-if-env-changed={VAR}");
-    let name = env::var(VAR).unwrap_or_default();
-    let name = name.trim();
+    let raw = match env::var(VAR) {
+        Ok(raw) => raw,
+        Err(env::VarError::NotPresent) => String::new(),
+        Err(env::VarError::NotUnicode(raw)) => panic!("{VAR} が UTF-8 ではありません: {raw:?}"),
+    };
+    // `id name` は 1 行で返すので、改行などの制御文字は前後にあっても受け付けない
+    assert!(!raw.chars().any(char::is_control), "{VAR} に制御文字は使えません: {raw:?}");
+    let name = raw.trim();
     if name.is_empty() {
-        return "RAMU".to_owned();
+        "RAMU".to_owned()
+    } else {
+        name.to_owned()
     }
-    // `id name` は 1 行で返すので、改行などの制御文字は受け付けない
-    assert!(!name.chars().any(char::is_control), "{VAR} に制御文字は使えません: {name:?}");
-    name.to_owned()
 }
 
 /// `RSHOGI_EMBED_SPSA_PARAMS` (`.params` の絶対パス) の名前と値を `OUT_DIR/embedded_spsa.rs` に
