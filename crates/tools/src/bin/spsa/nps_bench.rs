@@ -22,6 +22,12 @@ pub(super) fn measure(
         cancel,
         |idx, cancel| {
             let (mut plus, minus) = spawn_worker_engines(ctx, idx, cancel, true)?;
+            ensure_tuned_options_advertised(
+                &plus,
+                ctx.params,
+                ctx.translator,
+                ctx.application_mask,
+            )?;
             apply_parameter_vector(
                 &mut plus,
                 ctx.params,
