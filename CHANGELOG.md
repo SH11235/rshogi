@@ -14,6 +14,100 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+## v1.10.0 — 2026-11-23
+
+v1.9.0 以降の、探索の修正、NNUE の読める形式の拡充と threat 累積の高速化、定跡・教師データのツールの拡充を
+中心としたリリース。探索は静止探索でも入玉宣言勝ちを判定し、調整値 (`SPSAParamsFile` や焼き込みの値) を
+起動直後の最初の探索から使う。USI エンジンに任意の並行詰み探索 (`GameMateThreads`、既定 0) を足した。
+crates.io の `rshogi-core` は 0.9.1 のままで、今回は公開しない (未公開の core の変更は下の節に記す)。
+
+詳細は各 PR を参照。
+
+### 移行が要る変更
+
+- `ls_bucket=` を持つ LayerStacks net に `LS_BUCKET_MODE`・`LS_PROGRESS_BUCKETS`・`LS_PROGRESS_COEFF` のどれかを
+  設定すると、`isready` でエラーになる。そうした net に切り替えるときは、GUI の設定や `engine_options.txt` から
+  この 3 つを外す (#1586)。
+- `book_mine master exit-report`: 受付の管理から書き出した写しは `--box` でなく `--queue-box` で渡す (#1638)。
+  目標に届いた `tree` の出口のうち、分類 `good` は出口からの一本道が決着したものだけになり、決着しないものは
+  新しい分類 `unsettled` になる。一本道は辿れる手がなくなるまで辿り、直前の手の値の絶対値が `--settle-cp`
+  (既定 300) 以上か、同一局面への循環か、合法手なしで終われば決着とする。`--settle-max-plies` (既定 400) で
+  打ち切ったものは決着としない。細かい扱いは `crates/tools/docs/book_mine.md` の `exit-report` の節 (#1585)。
+- `book_mine` の受付の行の `opts.settle_rounds` は古い serve に拒否される。全部の台の一式を入れ替えてから
+  行に付ける (#1590)。
+- `policy_rollout_psv` は PSV の padding に種からの手数を書かず、常に 0 を書く。padding の bit 1 を探索木標本の
+  印に使うため。以前の出力には bit 1 が立った行があり得るので、探索木標本の印として読まない (#1576)。
+- `rescore_psv`・`preprocess_psv`・`expand_psv_from_policy` は、出力の padding を 0 にしなくなった。`move16` を
+  そのまま出す経路は padding 全体 (dual-label の bit 0 を含む) を引き継ぎ、`move16` を書き換える経路は bit 1
+  だけを残す (#1580)。
+
+### 探索
+
+- 静止探索でも入玉宣言勝ちを判定する。置換表に手がある局面を非 PV ノードで訪れたときや、深さが尽きて
+  静止探索に入った局面で、宣言すれば勝ちの局面を見落としていた (#1639)。
+- 新しく作る探索 worker と共有の履歴を、設定済みの調整値で初期化する。調整値が既定値と違うとき、起動して
+  最初の探索だけ組み込みの既定値で始まっていた。スレッド数を変えたときも履歴を初期化し直す (#1637)。
+- 歩以外の駒打ちの指し手の生成を AVX-512 でまとめて行う。探索木は変わらない (#1573)。
+
+### USI エンジン
+
+- `GameMateThreads` で、時計付きの対局の探索と並行して詰みを探せるようにした。既定値は 0 (使わない)。
+  ネイティブ版のみで、`Threads=1` では起動しない。通常探索に最低 1 スレッドを残し、合計を `Threads` 内に
+  収める (#1634)。
+- `Stochastic_Ponder=true` で ponderhit を受けたとき、受信した時刻を持ち時間の起点にする。これまでは探索の
+  やり直し (停止・join・局面の再設定) にかかった時間を消費時間に数えておらず、その分だけ時間を使いすぎていた。
+  やり直しまでの時間を `info string stochastic ponderhit restart delay <ms>ms` で出す (#1641)。
+- `LS_PROGRESS_BUCKETS` の上限を 64 にした (#1586, #1592)。
+
+### NNUE
+
+- LayerStacks の net の arch 文字列に `ls_bucket=<spec>` があれば、その分け方で bucket を選ぶ。3 軸・64 bucket
+  まで読む (PSQT 付きの net は 32 bucket まで)。分け方を持たない net は今までどおり (#1586, #1592)。
+- AVX-512F/BW の build で、駒 FT の重みが全て ±254 以内の偶数かつ幅が 32 の倍数の LayerStacks net は、重みを
+  int8 で持つ。評価値は変わらない。compile された SIMD の経路が扱えない幅の net は読み込み時に拒否する。
+  Linux の共有重みは `/dev/shm` の空きが足りなければ `local` に戻る (#1591)。
+- Threat 特徴の edition を 3 つ足した: 全幅の `layerstacks-halfka_hm_merged-1536x16x64-threat`、FT の一部の幅
+  (512) だけに足した net を読む `layerstacks-halfka_hm_merged-1536x16x64-threat512` と
+  `layerstacks-halfka_hm_merged-1536x16x32-threat512`。全幅の net から一部の幅の net を作る道具
+  `resize_nnue_threat` を足した (#1583)。
+- Threat の累積を、祖先からの差分更新、tile での作り直し、変化した升だけの見直しで高速化した
+  (#1538, #1560, #1612, #1613, #1616)。
+
+### 定跡ツール (`book_mine`)
+
+- `master game-pave` で負けた局の崩れまでを定跡につなぐ (#1513)。
+- `master one-way` で、MultiPV の 1 位と 2 位の差が大きい局面の連なり (一本道) を一覧にする (#1579)。
+- `master exit-report` に、受付の積み荷の出力 (`--enqueue-out`)、一本道の決着の判定 (`--settle-cp`・
+  `--settle-max-plies`)、出口から先の元データの続きの追跡、出口の手順の照合と積み荷の処置を足した
+  (#1554, #1585, #1635, #1638)。
+- `master game-gaps` に、対局の線を両側で舗装する `--line` と、局ごとの優先度の `--game-priority` を足した
+  (#1577, #1588)。
+- `tree lines` を足し、延長の線と実戦の手の止まった理由を出す (#1589)。受付の行の `opts.settle_rounds`
+  (0〜50、既定 0) で、通常の展開の後に、根の最善手・根の比較候補・木にある実戦の各手から伝播後の最善手順を
+  辿り、決着していない線を伸ばし直す (#1590)。
+- `master export` の注釈の depths を、取り込んだ台帳の記録からも拾う (#1636)。
+
+### 教師データ / 評価・計測ツール
+
+- `gensfen` に、探索中の静かな局面を確率 `--tree-sample-p` で `--tree-sample-out` に書き出す機能を足した
+  (cargo feature `search-tree-sample`、native モードで先後とも探索スレッド数 1) (#1576)。
+- `tournament` に、先後を固定して 1 局だけ指す `--single-game` と、開始局面までの手順を探索と千日手の裁定に渡す
+  `--preserve-start-history` を足した (#1578)。
+- `compare_nodes` に `--strict` を足した (#1511)。
+
+### rshogi-core (未公開)
+
+0.9.1 の公開後に入った、次に core を公開するときに載せる変更。公開された型の field の型が変わるので、
+次の core は patch でなく minor (0.10.0) にする。追加の API は主なものだけを挙げる。
+
+- 互換を壊す変更: `MAX_LAYER_STACK_BUCKETS` を 16 から 64 にし、`AccumulatorLayerStacks::psqt_accumulation` の型を
+  `[[i32; MAX_LAYER_STACK_PSQT_BUCKETS]; 2]` (32) にした (#1586, #1592)。
+- bucket の分け方の `BucketSpec` / `BucketSpec3` / `LayerStackBucketSpec` と `MAX_LAYER_STACK_PSQT_BUCKETS` を
+  足した (#1586, #1592)。
+- 全駒 FT の係数を i16 で読む `piece_weights()` / `piece_weight()` を足した (#1591)。
+- `LimitsType::set_start_time_at` を足した (#1641)。
+- cargo feature `search-tree-sample` (#1576) と `threat-width-512` (#1583) を足した。
+
 ## v1.9.0 — 2026-11-17
 
 v1.8.0 以降の、探索・評価の高速化、USI エンジンの設定、CSA クライアント / サーバー、定跡ツールの
