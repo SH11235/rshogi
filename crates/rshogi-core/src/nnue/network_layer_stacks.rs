@@ -3101,7 +3101,13 @@ mod tests {
     #[cfg(all(feature = "nnue-threat", feature = "layerstack-arch"))]
     #[test]
     fn partial_threat_forward_matches_zero_padded_scalar_and_avx512_lane_model() {
-        const N: usize = 1536;
+        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+            2304
+        } else {
+            1536
+        };
+        let width = super::super::expected_threat_width(N);
+        let half = width / 2;
         let mut acc = AccumulatorLayerStacks::<N>::new();
         for side in 0..2 {
             for (i, x) in acc.accumulation[side].iter_mut().enumerate() {
@@ -3115,11 +3121,12 @@ mod tests {
         for (side, output) in combined.iter_mut().enumerate() {
             add_i16_arrays(&mut output.0, acc.get(side), acc.get_threat(side));
             let mut expected = acc.accumulation[side];
-            let half = acc.get_threat(side).len() / 2;
-            for i in 0..half {
-                expected[i] = expected[i].wrapping_add(acc.get_threat(side)[i]);
-                expected[N / 2 + i] =
-                    expected[N / 2 + i].wrapping_add(acc.get_threat(side)[half + i]);
+            let compact = acc.get_threat(side);
+            assert_eq!(compact.len(), width);
+            assert!(half <= N / 2 && half.is_multiple_of(64));
+            for (j, &value) in compact.iter().enumerate() {
+                let column = if j < half { j } else { N / 2 + j - half };
+                expected[column] = expected[column].wrapping_add(value);
             }
             assert_eq!(output.0, expected);
         }
@@ -3134,9 +3141,9 @@ mod tests {
                         let local = (lane / 16) * 8 + lane % 8 + ((lane % 16) / 8) * 32;
                         let i = block * 64 + local;
                         let (mut a, mut b) = (acc.get(side)[i], acc.get(side)[N / 2 + i]);
-                        if block * 64 < threat.len() / 2 {
+                        if block * 64 < half {
                             a = a.wrapping_add(threat[i]);
-                            b = b.wrapping_add(threat[threat.len() / 2 + i]);
+                            b = b.wrapping_add(threat[half + i]);
                         }
                         *byte =
                             ((i32::from(a).clamp(0, 127) * i32::from(b).clamp(0, 127)) >> 7) as u8;
@@ -3154,33 +3161,49 @@ mod tests {
     ))]
     #[test]
     fn loader_rejects_wrong_threat_width_before_reading_ft() {
-        let wrong = if cfg!(feature = "threat-width-512") {
-            ""
+        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+            2304
         } else {
-            ",ThreatWidth=512"
+            1536
         };
-        let arch = format!(
-            "Features=HalfKA_hm[138510->1536x2],LayerStacks,l2=16,l3=32,Threat=216720{wrong}"
-        );
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(
-            &super::super::constants::NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes(),
-        );
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(arch.as_bytes());
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        let error = NetworkLayerStacks::<
-            1536,
-            16,
-            30,
-            32,
-            super::super::ls_feature_spec::HalfKaHmMergedSpec,
-        >::read(&mut std::io::Cursor::new(bytes))
-        .err()
-        .unwrap();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("Threat width mismatch"), "{error}");
+        const L3: usize =
+            if cfg!(any(feature = "layerstacks-2304x16x64", feature = "layerstacks-1536x16x64")) {
+                64
+            } else {
+                32
+            };
+        for width in [512, 768, N] {
+            if width == super::super::expected_threat_width(N) {
+                continue;
+            }
+            let mut arch = format!(
+                "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720"
+            );
+            if width != N {
+                use std::fmt::Write;
+                write!(arch, ",ThreatWidth={width}").unwrap();
+            }
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(
+                &super::super::constants::NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes(),
+            );
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(arch.as_bytes());
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            let error = NetworkLayerStacks::<
+                N,
+                16,
+                30,
+                32,
+                super::super::ls_feature_spec::HalfKaHmMergedSpec,
+                L3,
+            >::read(&mut std::io::Cursor::new(bytes))
+            .err()
+            .unwrap();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("Threat width mismatch"), "{error}");
+        }
     }
 
     #[test]

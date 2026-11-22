@@ -726,8 +726,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             // - `w_ptr`: `AlignedBox<i8>` のポインタ。`_mm_loadu_si128`
             //   （非アラインロード）を使っているためアライメント要件は無い
             // - プリフェッチは hint のみで safety に影響しない
-            // - ループ `T / 16` は const generics 由来。`T ∈ {512, 768, 1024, 1536, 3072}`
-            //   は全て 16 の倍数なので末端要素が取り残されない
+            // - const assert が T は 16 の倍数であることを保証する。
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
@@ -1047,7 +1046,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             //   アラインが保証され `_mm256_load/store_si256` の要件を満たす
             // - `w_ptr`: `AlignedBox<i8>` だが `_mm_loadu_si128` 非アラインロード
             //   を使うためアライメント要件は無い
-            // - `T ∈ {512, 768, 1024, 1536, 3072}` はすべて 16 の倍数
+            // - const assert が T は 16 の倍数であることを保証する。
             unsafe {
                 use std::arch::x86_64::*;
 
@@ -3150,7 +3149,9 @@ mod tests {
     #[test]
     fn threat_ancestor_matches_full_refresh() {
         use crate::movegen::{MoveList, generate_legal};
-        const N: usize = if cfg!(feature = "threat-width-512") {
+        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+            2304
+        } else if cfg!(feature = "threat-width-512") {
             1536
         } else {
             64
@@ -3158,7 +3159,7 @@ mod tests {
         let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
         ft.has_threat = true;
         for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
-            *w = ((i * 73 + i / N * 19) % 255) as i8;
+            *w = ((i * 73 + i / threat_width(N) * 19) % 255) as i8;
         }
         for (i, w) in ft.weights.make_mut().iter_mut().enumerate() {
             *w = ((i * 17 + i / N * 23) % 511) as i16 - 255;
@@ -3371,7 +3372,9 @@ mod tests {
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn full_threat_refresh_matches_scalar_raw_accumulator() {
-        const N: usize = if cfg!(feature = "threat-width-512") {
+        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+            2304
+        } else if cfg!(feature = "threat-width-512") {
             1536
         } else {
             256

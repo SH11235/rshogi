@@ -125,6 +125,7 @@ layerstacks-1536x16x64 = []
 # - nnue-effect-bucket: HalfKaHmMerged の FT 入力を EffectBucket modifier 付きに差し替える。
 nnue-psqt   = []
 threat-width-512 = ["nnue-threat"]
+threat-width-768 = ["nnue-threat"]
 nnue-threat = []
 nnue-effect-bucket = []
 # universal edition 用の runtime 次元 NNUE 実装。
@@ -308,6 +309,12 @@ edition-layerstacks-halfka_hm_merged-2304x16x64-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2304x16x64",
   "nnue-progress-diff",
 ]
+edition-layerstacks-halfka_hm_merged-2304x16x64-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2304x16x64", "nnue-threat",
+  "nnue-progress-diff",
+]
+edition-layerstacks-halfka_hm_merged-2304x16x64-threat512 = ["edition-layerstacks-halfka_hm_merged-2304x16x64-threat", "threat-width-512"]
+edition-layerstacks-halfka_hm_merged-2304x16x64-threat768 = ["edition-layerstacks-halfka_hm_merged-2304x16x64-threat", "threat-width-768"]
 edition-layerstacks-halfka_hm_merged-3072x16x64-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x16x64",
   "nnue-progress-diff",

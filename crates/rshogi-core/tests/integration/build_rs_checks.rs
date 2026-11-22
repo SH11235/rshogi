@@ -12,23 +12,47 @@ fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {
 }
 
 #[test]
-fn threat_width_512_requires_supported_static_size() {
+fn partial_threat_width_requires_supported_static_size() {
     for size in LAYERSTACK_FEATURES {
-        for mode in ["mode-specific", "mode-family", "mode-universal"] {
-            let features = [
-                mode,
-                "layerstack-arch",
-                "ft-halfka_hm_merged",
-                size,
-                "nnue-threat",
-                "threat-width-512",
-            ];
-            let has = lookup(&features);
-            let supported = mode == "mode-specific"
-                && matches!(*size, "layerstacks-1536x16x32" | "layerstacks-1536x16x64");
-            assert_eq!(validate_feature_combination(&has).is_ok(), supported, "{mode}, {size}");
+        for mode in ["mode-specific", "mode-family", "mode-universal", ""] {
+            for width in ["threat-width-512", "threat-width-768"] {
+                let features = [
+                    mode,
+                    "layerstack-arch",
+                    "ft-halfka_hm_merged",
+                    size,
+                    "nnue-threat",
+                    width,
+                ];
+                let supported = mode == "mode-specific"
+                    && (*size == "layerstacks-2304x16x64"
+                        || (width == "threat-width-512"
+                            && matches!(
+                                *size,
+                                "layerstacks-1536x16x32" | "layerstacks-1536x16x64"
+                            )));
+                assert_eq!(
+                    validate_feature_combination(&lookup(&features)).is_ok(),
+                    supported,
+                    "{mode}, {size}, {width}"
+                );
+            }
         }
     }
+}
+
+#[test]
+fn partial_threat_widths_are_mutually_exclusive() {
+    let has = lookup(&[
+        "mode-specific",
+        "layerstack-arch",
+        "ft-halfka_hm_merged",
+        "layerstacks-2304x16x64",
+        "nnue-threat",
+        "threat-width-512",
+        "threat-width-768",
+    ]);
+    assert!(validate_feature_combination(&has).unwrap_err().contains("mutually exclusive"));
 }
 
 #[test]

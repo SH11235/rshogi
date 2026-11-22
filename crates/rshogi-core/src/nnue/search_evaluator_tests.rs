@@ -921,15 +921,16 @@ fn with_auxiliary_weights(
         arch.push_str(&format!(",PSQT={buckets}"));
     }
     #[cfg(feature = "nnue-threat")]
+    let threat_profile = nnue::threat_exclusion::THREAT_PROFILE_ID;
+    #[cfg(feature = "nnue-threat")]
     let threat_width = {
         let (l1, _, _) = nnue::spec::parse_arch_dimensions(&arch);
-        let width = nnue::threat_width::width(l1);
+        let width = nnue::expected_threat_width(l1);
         if has_threat {
-            arch.push_str(&format!(
-                ",Threat={},ThreatProfile={}",
-                nnue::threat_features::THREAT_DIMENSIONS,
-                nnue::threat_exclusion::THREAT_PROFILE_ID
-            ));
+            arch.push_str(&format!(",Threat={}", nnue::threat_features::THREAT_DIMENSIONS));
+            if threat_profile != 0 {
+                arch.push_str(&format!(",ThreatProfile={threat_profile}"));
+            }
             if width != l1 {
                 arch.push_str(&format!(",ThreatWidth={width}"));
             }
@@ -952,7 +953,9 @@ fn with_auxiliary_weights(
     }
     #[cfg(feature = "nnue-threat")]
     if has_threat {
-        result.extend_from_slice(&nnue::threat_exclusion::THREAT_PROFILE_ID.to_le_bytes());
+        if threat_profile != 0 {
+            result.extend_from_slice(&threat_profile.to_le_bytes());
+        }
         for row in 0..nnue::threat_features::THREAT_DIMENSIONS {
             for col in 0..threat_width {
                 result.push(((row * 7 + col) % 5) as u8);

@@ -27,6 +27,7 @@ LayerStacks では、下記の振り分け方式も `isready` の前に設定し
 | LayerStacks の活性化 | Product Pooling、SCReLU と CReLU の混在、skip を持つ専用構造 | 同じ専用構造。任意の活性化グラフは非対応 |
 | PSQT | LayerStacks のヘッダーから読み込む | `nnue-psqt` を含む構成 |
 | ThreatProfile | profile 0 のみ | モデルと同じ profile を含む構成 |
+| ThreatWidth | FT と同じ全幅 | 全幅、または下記の部分幅 |
 | EffectBucket | 2×2 / 3×3、kingfixed / kingbucketed をヘッダーから選択 | `nnue-effect-bucket` と対応する設定が必要 |
 | factorized | 学習用の未統合重みは非対応。coalesced な推論形式へ書き出す | 同左 |
 
@@ -124,6 +125,10 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 | 1536 | 16×32、32×32、16×64 |
 | 2304 | 16×64 |
 | 3072 | 16×32、16×64 |
+
+部分幅の Threat は固定 edition で扱います。`ThreatWidth=512` は 1536×16×32 /
+1536×16×64 / 2304×16×64 の `threat512`、`ThreatWidth=768` は 2304×16×64 の
+`threat768` を選びます。`ThreatWidth` を省略したヘッダーは FT と同じ全幅を表します。
 
 ### 振り分け方式の設定
 

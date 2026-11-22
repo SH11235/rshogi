@@ -904,22 +904,24 @@ mod tests {
 #[cfg(all(test, feature = "nnue-psqt", feature = "nnue-threat"))]
 mod extension_tests {
     use super::*;
+    use crate::nnue::expected_threat_width;
     use crate::nnue::ls_feature_spec::{HalfKaHmMergedSpec, LsFeatureSpec};
     use crate::nnue::net_delta::test_utils::{
         SyntheticFtConfig, SyntheticFtEncoding, SyntheticFtValues,
         build_synthetic_layer_stacks_with_ft_values,
     };
     use crate::nnue::network_layer_stacks::NetworkLayerStacks;
-    use crate::nnue::threat_width;
 
     #[test]
     fn prepacked_preserves_piece_ft_psqt_and_threat() {
-        const L1: usize = if cfg!(feature = "threat-width-512") {
+        const L1: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+            2304
+        } else if expected_threat_width(32) != 32 {
             768
         } else {
             32
         };
-        let width = threat_width::width(L1);
+        let width = expected_threat_width(L1);
         type Net = NetworkLayerStacks<L1, 8, 14, 32, HalfKaHmMergedSpec>;
         let fixture = super::tests::Fixture::new(SyntheticFtEncoding::Leb128Combined);
         let dimensions = HalfKaHmMergedSpec::DIMENSIONS;
