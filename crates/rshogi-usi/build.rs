@@ -59,6 +59,7 @@ fn embed_spsa_params() -> Option<String> {
     println!("cargo:rerun-if-env-changed={VAR}");
     println!("cargo:rerun-if-changed=src/spsa_params.rs");
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_spsa.rs");
+    let specified = env::var_os(VAR).is_some_and(|v| !v.is_empty());
     let content = match env::var_os(VAR).filter(|v| !v.is_empty()) {
         Some(path) => {
             let path = PathBuf::from(path);
@@ -73,7 +74,7 @@ fn embed_spsa_params() -> Option<String> {
     };
     let entries = spsa_params::parse_spsa_params(&content);
     assert!(
-        content.is_empty() || !entries.is_empty(),
+        !specified || !entries.is_empty(),
         "{VAR} のファイルに SPSA の値の行がありません"
     );
     let mut code = String::from("&[\n");

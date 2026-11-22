@@ -166,7 +166,7 @@ LS_BUCKET_MODE progresskpabsq16
 
 - 固定したオプションは、その後の `setoption` では変わりません (`info string ... setoption ignored` を出す)。
   GUI の設定より常にファイルが優先されます。`SPSA_*` を固定した場合は、`SPSAParamsFile` や `spsa.params` でも変わりません。
-  値を焼き込んだ build は `SPSA_*` / `SPSA_NET_*` を広告しないので、このファイルでは固定できません (知らない名前として飛ばします)。
+  値を焼き込んだ build は `SPSA_*` / `SPSA_NET_*` を `usi` で広告しませんが、このファイルでは固定できます。
 - ファイルの値を書き換えると、次の `isready` で反映します。行やファイルを消しても、固定はエンジンを起動し直すまで残ります。
 - 同じ名前が複数行にあれば最後の行を使います。値が `usi` で示す型・範囲に合わない行は警告して飛ばします (固定もしない)。
 - `EvalFile` / `LS_PROGRESS_COEFF` / `SPSAParamsFile` / `BookDir` / `BookExploreFile` の相対パスは、

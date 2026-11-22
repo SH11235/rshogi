@@ -377,13 +377,23 @@ impl UsiEngine {
         println!("id name {ENGINE_NAME}");
         println!("id author {ENGINE_AUTHOR}");
         println!();
-        for line in self.usi_option_lines() {
+        for line in self.advertised_option_lines() {
             println!("{line}");
         }
         println!("usiok");
     }
 
-    /// `usi` に返す `option name ...` の行。engine_options.txt の名前の照合にも使う。
+    /// `usi` で広告する行。SPSA の値を焼き込んだ build は、調整用の `SPSA_*` / `SPSA_NET_*` を除く。
+    fn advertised_option_lines(&self) -> Vec<String> {
+        let mut lines = self.usi_option_lines();
+        if self.spsa_options_hidden {
+            lines.retain(|line| !line.starts_with("option name SPSA_"));
+        }
+        lines
+    }
+
+    /// 受け付けるオプションの `option name ...` の行。engine_options.txt の名前と値の照合に使う
+    /// (広告しない `SPSA_*` / `SPSA_NET_*` も含む)。
     fn usi_option_lines(&self) -> Vec<String> {
         let mut lines = Vec::new();
         lines.push("option name USI_Hash type spin default 256 min 1 max 4096".to_string());
@@ -479,16 +489,14 @@ impl UsiEngine {
         lines.push("option name IgnoreBookPly type check default true".to_string());
         lines.push("option name FlippedBook type check default true".to_string());
         lines.push("option name BookOnTheFly type check default false".to_string());
-        if !self.spsa_options_hidden {
-            for spec in SearchTuneParams::option_specs() {
-                lines.push(format!(
-                    "option name {} type spin default {} min {} max {}",
-                    spec.usi_name, spec.default, spec.min, spec.max
-                ));
-            }
-            for name in &self.spsa_net_spec_names {
-                lines.push(format!("option name {name} type spin default 0 min -32768 max 32767"));
-            }
+        for spec in SearchTuneParams::option_specs() {
+            lines.push(format!(
+                "option name {} type spin default {} min {} max {}",
+                spec.usi_name, spec.default, spec.min, spec.max
+            ));
+        }
+        for name in &self.spsa_net_spec_names {
+            lines.push(format!("option name {name} type spin default 0 min -32768 max 32767"));
         }
         lines
     }
@@ -3019,19 +3027,49 @@ mod tests {
                 let mut engine = UsiEngine::new_with_spsa_net_spec(vec![format!(
                     "{NET_DELTA_OPTION_PREFIX}out_w_b0_0"
                 )]);
-                assert!(
-                    engine.usi_option_lines().iter().any(|l| l.starts_with("option name SPSA_"))
-                );
-                let mut expected = engine.search.as_ref().unwrap().search_tune_params();
+                let advertises_spsa = |engine: &UsiEngine| {
+                    engine
+                        .advertised_option_lines()
+                        .iter()
+                        .any(|l| l.starts_with("option name SPSA_"))
+                };
+                assert!(advertises_spsa(&engine));
+                let defaults = engine.search.as_ref().unwrap().search_tune_params();
+                let mut expected = defaults;
                 expected.set_from_usi_name(spec.usi_name, baked).unwrap();
 
                 engine
                     .apply_embedded_spsa_params(&[(spec.usi_name, baked), ("SPSA_NoSuchParam", 5)]);
                 assert_eq!(engine.search.as_ref().unwrap().search_tune_params(), expected);
                 assert!(
-                    !engine.usi_option_lines().iter().any(|l| l.starts_with("option name SPSA_")),
+                    !advertises_spsa(&engine),
                     "焼き込んだ build は SPSA_* / SPSA_NET_* を広告しない"
                 );
+
+                // 広告しなくても setoption と engine_options.txt の固定は受け付ける
+                let default_value = spec.default.to_string();
+                engine.cmd_setoption(&[
+                    "setoption",
+                    "name",
+                    spec.usi_name,
+                    "value",
+                    &default_value,
+                ]);
+                assert_eq!(engine.search.as_ref().unwrap().search_tune_params(), defaults);
+
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(ENGINE_OPTIONS_FILE);
+                std::fs::write(&path, format!("{} {baked}", spec.usi_name)).unwrap();
+                engine.apply_engine_options_from(&path);
+                assert_eq!(engine.search.as_ref().unwrap().search_tune_params(), expected);
+                engine.cmd_setoption(&[
+                    "setoption",
+                    "name",
+                    spec.usi_name,
+                    "value",
+                    &default_value,
+                ]);
+                assert_eq!(engine.search.as_ref().unwrap().search_tune_params(), expected);
             })
             .unwrap()
             .join()

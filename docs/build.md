@@ -247,8 +247,11 @@ RSHOGI_EMBED_SPSA_PARAMS=/path/to/tuned.params cargo xtask build --edition <pres
 
 - 起動時に適用し、探索定数を固定値として扱います。やねうら王や Stockfish の調整用でない build と同じく、
   調整用の `SPSA_*` / `SPSA_NET_*` は `usi` で広告しません (GUI の設定画面に出ず、GUI が既定値を送り返して
-  焼き込んだ値を上書きすることもありません)。`setoption` で名前を指定すれば上書きでき、`SPSAParamsFile` で指定した
-  ファイルや隣の `spsa.params` も、その上に重ねて読みます。
+  焼き込んだ値を上書きすることもありません)。`setoption` で名前を指定すれば上書きでき、`engine_options.txt` で
+  固定することもできます。`SPSAParamsFile` で指定したファイルや隣の `spsa.params` も、その上に重ねて読みます。
+- rshogi の道具 (`spsa`・`tournament` など) は `usi` で広告したオプションにだけ `setoption` を送るので、焼き込んだ
+  実行ファイルには `--usi-option SPSA_*=...` が届きません。`spsa` は、調整する定数が広告されていなければエラーで止まります。
+  調整や定数を変えた対局には、焼き込まない build を使います。
 - 値は build 時に数値に直して埋め込み、`.params` のテキストは実行ファイルに残しません。
 - 起動時に `info string SPSA params embedded: N parameters` を標準エラーに出します。知らない名前の行は警告します。
   値の行が 1 つも無いファイルを指定すると build が止まります。
