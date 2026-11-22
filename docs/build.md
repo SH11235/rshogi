@@ -168,13 +168,14 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 | activation (HalfKX) | `crelu` / `screlu` / `pairwise` | ✗ | ✓ |
 | ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
 | size (LS) | [対応する10構成](./nnue-supported-architectures.md#layerstacks)から選択 | ✗ | ✓ |
-| ext (LS) | `psqt` / `threat` / `psqt_threat` / `threat512` | ✓ | ✓ |
+| ext (LS) | `psqt` / `threat` / `psqt_threat` / `threat512` / `threat768` | ✓ | ✓ |
 
 - slot の省略は alias `edition-halfkx` / `edition-layerstacks` 以外では不可。全候補を
   dispatch したいときは `any` を書く。
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
-- `threat512` は 1536x16x32 / 1536x16x64 の駒 FT に512列の Threat を加える静的 edition。形式と変換は
+- `threat512` は 1536x16x32 / 1536x16x64 / 2304x16x64 で512列の Threat を使う静的 edition。
+  `threat768` は 2304x16x64 で768列の Threat を使う。形式と変換は
   [`resize_nnue_threat`](../crates/tools/docs/resize_nnue_threat.md) を参照。
 - `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
   `edition-layerstacks-any-any-any` の短縮形。利用可能な preset は `cargo xtask list-editions` で確認する。
@@ -442,15 +443,22 @@ cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-230
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
 ```
 
-1536x16x64 では、全幅 (1536列) の Threat を使う
-`layerstacks-halfka_hm_merged-1536x16x64-threat` と、512列の Threat を使う
-`layerstacks-halfka_hm_merged-1536x16x64-threat512` も利用できる。
-両方とも `nnue-progress-diff` を含む。`LayerStack-1536-16-64-8bucket` + Threat の net は、
-`ThreatWidth=512` なら後者、省略時または `ThreatWidth=1536` なら前者を選ぶ。
+Threat 付きの net は、FT 幅とヘッダーの `ThreatWidth` に合う edition を選ぶ。
+全幅の行には `ThreatWidth` 省略時と FT 幅を明記した場合が該当する。以下の edition は
+いずれも `nnue-progress-diff` を含む。
+
+| FT 幅 | Threat 幅 | edition |
+|---:|---:|---|
+| 1536 | 全幅 | `layerstacks-halfka_hm_merged-1536x16x64-threat` |
+| 1536 | 512 | `layerstacks-halfka_hm_merged-1536x16x64-threat512` |
+| 2304 | 全幅 | `layerstacks-halfka_hm_merged-2304x16x64-threat` |
+| 2304 | 512 | `layerstacks-halfka_hm_merged-2304x16x64-threat512` |
+| 2304 | 768 | `layerstacks-halfka_hm_merged-2304x16x64-threat768` |
 
 ```sh
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-threat --profile production
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-threat512 --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-threat768 --profile production
 ```
 
 AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融合出力 kernel を使う。出力 64 は
