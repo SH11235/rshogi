@@ -943,6 +943,9 @@ fn play_pair(
     minus: &mut EngineProcess,
 ) -> Result<([GameRecord; 2], [GameDetail; 2])> {
     use tools::selfplay::game::EngineFailure;
+    for engine in [&*plus, &*minus] {
+        ensure_tuned_options_advertised(engine, ctx.params, ctx.translator, ctx.application_mask)?;
+    }
     apply_parameter_vector(plus, ctx.params, &task.plus, ctx.translator, ctx.application_mask)
         .context(EngineFailure)?;
     apply_parameter_vector(minus, ctx.params, &task.minus, ctx.translator, ctx.application_mask)

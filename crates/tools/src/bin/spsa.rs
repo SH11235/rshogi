@@ -2431,6 +2431,31 @@ fn resolve_engine_path(cli: &Cli) -> Result<PathBuf> {
     bail!("engine binary not found. specify --engine-path or build target/release/rshogi-usi");
 }
 
+/// 調整する定数をエンジンが `usi` で広告しているかを確かめる。広告していない名前は
+/// `set_option_if_available` が送らないので、そのまま対局を続けると定数が変わらないまま調整が進む
+/// (SPSA の値を焼き込んだ rshogi-usi は `SPSA_*` を広告しない)。設定の誤りなので、呼び出し側は
+/// 再試行の対象 (`EngineFailure`) にしない。
+fn ensure_tuned_options_advertised(
+    engine: &EngineProcess,
+    params: &[SpsaParam],
+    translator: &EngineNameTranslator,
+    application_mask: &[bool],
+) -> Result<()> {
+    for (p, &applicable) in params.iter().zip(application_mask.iter()) {
+        if !applicable {
+            continue;
+        }
+        let (engine_name, _) = translator.translate(&p.name, 0.0);
+        if !engine.is_option_available(engine_name) {
+            bail!(
+                "engine does not advertise USI option '{engine_name}' (tuned parameter '{}'); use a build that exposes the tuning options",
+                p.name
+            );
+        }
+    }
+    Ok(())
+}
+
 fn apply_parameter_vector(
     engine: &mut EngineProcess,
     params: &[SpsaParam],
@@ -2451,15 +2476,6 @@ fn apply_parameter_vector(
         // しない。translator は名前と符号だけを変換する役割で、YO 側 USI option の
         // min/max との整合性は運用責任（runbook §10.6 + check_param_mapping --yo-binary
         // で事前検証する想定）。
-        // 広告していない名前に送らないまま対局を続けると、調整が進まないことに気付けない
-        // (SPSA の値を焼き込んだ rshogi-usi は SPSA_* を広告しない)
-        if !engine.is_option_available(engine_name) {
-            bail!(
-                "engine does not advertise USI option '{engine_name}' (tuned parameter '{}'); \
-                 use a build that exposes the tuning options",
-                p.name
-            );
-        }
         engine.set_option_if_available(engine_name, &option_value_string(p, engine_value))?;
     }
     engine.sync_ready()?;
@@ -2900,6 +2916,9 @@ fn play_pool_task(
     minus: &mut EngineProcess,
 ) -> Result<GameTaskResult> {
     use tools::selfplay::game::EngineFailure;
+    for engine in [&*plus, &*minus] {
+        ensure_tuned_options_advertised(engine, ctx.params, ctx.translator, ctx.application_mask)?;
+    }
     apply_parameter_vector(
         plus,
         ctx.params,
