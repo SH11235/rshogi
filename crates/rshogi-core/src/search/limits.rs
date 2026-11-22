@@ -145,6 +145,11 @@ impl LimitsType {
         self.start_time = Some(Instant::now());
     }
 
+    /// 探索開始時刻を指定した時刻に設定
+    pub fn set_start_time_at(&mut self, start_time: Instant) {
+        self.start_time = Some(start_time);
+    }
+
     /// 探索開始からの経過時間（ミリ秒）
     pub fn elapsed(&self) -> TimePoint {
         self.start_time.map(|t| t.elapsed().as_millis() as TimePoint).unwrap_or(0)
