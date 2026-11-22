@@ -98,7 +98,9 @@ pub(super) fn qsearch<const NT: u8>(
 
     // 宣言勝ち判定（通常探索の probe_transposition と同じ扱い）。縮小で深さが尽きて
     // 静止探索に入った局面でも宣言を見落とさないよう、置換表を引く前に判定する。
-    if pos.declaration_win(ctx.entering_king_rule).is_some() {
+    if pos.declaration_possible(ctx.entering_king_rule)
+        && pos.declaration_win(ctx.entering_king_rule).is_some()
+    {
         return Value::mate_in(ply + 1);
     }
 

@@ -273,8 +273,8 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
     // 宣言勝ち判定（置換表カットオフより前に、置換表の内容によらず毎回実施する）
     // - 置換表の値・手は宣言判定を経ずに書かれうる（ルールを切り替える前のエントリ、
     //   キーの一部だけが一致する別局面のエントリ）。
-    //   それらで宣言を隠さないよう、カットオフより前に判定する。玉が敵陣にいない局面は
-    //   declaration_win の先頭で弾かれるので負担は小さい。
+    //   それらで宣言を隠さないよう、カットオフより前に判定する。全ノードで通るので、
+    //   玉が敵陣にいない大半の局面は inline の declaration_possible だけで抜ける。
     // - Root は engine.rs 側で root_moves に宣言手を加える形で扱うため、ここでは実施しない。
     // - 王手の有無は問わない（点数法は declaration_win 内で王手を弾く。トライルールは
     //   王手回避しながら入玉する手がありうる）。
@@ -284,7 +284,7 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
     //   問うもので、宣言勝ち（Move::WIN）は ttMove と別の手なので詰みスコアを返すのが正しい。
     //   ただしトライルールでは宣言手が通常の玉移動で、それ自体が除外手になりうるため、
     //   宣言手 == excludedMove のときだけは採用しない。
-    if NT != NodeType::Root as u8 {
+    if NT != NodeType::Root as u8 && pos.declaration_possible(ctx.entering_king_rule) {
         let decl_move = pos.declaration_win(ctx.entering_king_rule);
         if decl_move.is_some() && decl_move != excluded_move {
             // 1手詰めと同様、次の node で指し手がなくなって詰むという解釈

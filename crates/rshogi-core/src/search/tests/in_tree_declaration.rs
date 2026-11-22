@@ -343,3 +343,37 @@ fn in_tree_declaration_finds_own_declaration_in_two() {
         assert!(!result.score.is_win(), "score={}", result.score.raw());
     });
 }
+
+#[test]
+fn declaration_possible_is_necessary_for_declaration() {
+    const RULES: [EnteringKingRule; 6] = [
+        EnteringKingRule::None,
+        EnteringKingRule::Point24,
+        EnteringKingRule::Point24H,
+        EnteringKingRule::Point27,
+        EnteringKingRule::Point27H,
+        EnteringKingRule::TryRule,
+    ];
+    let start = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+    assert!(!position(start).declaration_possible(EnteringKingRule::Point27));
+    for root_sfen in [DECLARABLE, TRY_READY, start] {
+        let root = position(root_sfen);
+        let mut legal = MoveList::new();
+        generate_legal_all_with_pass(&root, &mut legal);
+        let children = legal.as_slice().iter().map(|&mv| {
+            let mut pos = root.clone();
+            let check = pos.gives_check(mv);
+            pos.do_move(mv, check);
+            pos
+        });
+        for pos in std::iter::once(root.clone()).chain(children) {
+            for rule in RULES {
+                if pos.declaration_win(rule) != Move::NONE {
+                    assert!(pos.declaration_possible(rule), "{} {rule:?}", pos.to_sfen());
+                }
+            }
+        }
+    }
+    assert!(position(DECLARABLE).declaration_possible(EnteringKingRule::Point27));
+    assert!(position(TRY_READY).declaration_possible(EnteringKingRule::TryRule));
+}
