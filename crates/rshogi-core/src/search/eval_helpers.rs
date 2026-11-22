@@ -382,16 +382,24 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
     }
 
     // 宣言勝ち判定（置換表に指し手がない場合、または PV ノードで実施）
+    // - 置換表に手があれば、その局面は宣言判定を経ている前提で省く。qsearch も置換表に
+    //   書く前に宣言判定するので、宣言できる局面に手が書かれるのは次の場合に限られる。
+    //   上の 1 手詰めの判定が詰みの手を書く場合は、値が宣言勝ちと同じ詰みなので見落としに
+    //   ならない。ルールを切り替える前のエントリと、キーの一部だけが一致する別局面の
+    //   エントリは、対局中にまず起きず、全ノードで判定する負担 (NPS 約 1%) に見合わないので許容する。
     // - Root は engine.rs 側で root_moves に宣言手を加える形で扱うため、ここでは実施しない。
     // - 王手の有無は問わない（点数法は declaration_win 内で王手を弾く。トライルールは
     //   王手回避しながら入玉する手がありうる）。
     // - 置換表には書き込まない。Move::WIN を ttMove として保持すると probe 側の
-    //   扱いが煩雑になるうえ、再訪問時に再判定して枝刈りされることを期待する。
+    //   扱いが煩雑になる。
     // - excludedMove は条件へ入れない。singular 検証探索は「ttMove 以外の最善」を
     //   問うもので、宣言勝ち（Move::WIN）は ttMove と別の手なので詰みスコアを返すのが正しい。
     //   ただしトライルールでは宣言手が通常の玉移動で、それ自体が除外手になりうるため、
     //   宣言手 == excludedMove のときだけは採用しない。
-    if NT != NodeType::Root as u8 && (tt_move.is_none() || pv_node) {
+    if NT != NodeType::Root as u8
+        && (tt_move.is_none() || pv_node)
+        && pos.declaration_possible(ctx.entering_king_rule)
+    {
         let decl_move = pos.declaration_win(ctx.entering_king_rule);
         if decl_move.is_some() && decl_move != excluded_move {
             // 1手詰めと同様、次の node で指し手がなくなって詰むという解釈

@@ -2021,7 +2021,7 @@ where
     }
 
     // root の入玉宣言勝ちチェック
-    // 探索内の宣言勝ち判定は probe_transposition で行う。
+    // 探索内の宣言勝ち判定は probe_transposition と qsearch で行う。
     let decl_move = pos.declaration_win(worker.entering_king_rule);
     if decl_move != Move::NONE {
         // 宣言勝ち可能: root_moves に追加してスコア MATE を設定

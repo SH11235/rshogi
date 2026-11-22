@@ -1,14 +1,15 @@
-//! 探索内の入玉宣言勝ち判定（probe_transposition で行う）。
+//! 探索内の入玉宣言勝ち判定（probe_transposition と qsearch で行う）。
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::eval::EvalHash;
 use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::position::Position;
-use crate::search::alpha_beta::{ProbeOutcome, SearchContext, SearchWorker};
+use crate::search::alpha_beta::{ProbeOutcome, SearchContext, SearchState, SearchWorker};
 use crate::search::types::NodeType;
-use crate::search::{LimitsType, Search, SearchInfo, SearchTuneParams};
+use crate::search::{LimitsType, Search, SearchInfo, SearchTuneParams, TimeManagement};
 use crate::tt::TranspositionTable;
-use crate::types::{EnteringKingRule, Move, Value};
+use crate::types::{Bound, EnteringKingRule, Move, Value};
 
 /// 先手が今すぐ 27 点法で宣言できる局面。
 const DECLARABLE: &str = "KGG6/SS7/PPPPPP3/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
@@ -31,14 +32,11 @@ fn position(sfen: &str) -> Position {
     pos
 }
 
-/// 空の置換表で probe_transposition を 1 回呼び、結果と置換表への書き込み有無を返す。
-fn probe<const NT: u8>(
-    sfen: &str,
+/// 空の置換表を持つ探索 worker を作り、その状態と context で `f` を呼ぶ。
+fn with_context<R>(
     rule: EnteringKingRule,
-    ply: i32,
-    pv_node: bool,
-    excluded_move: Move,
-) -> (Option<Value>, bool) {
+    f: impl FnOnce(&mut SearchState, &SearchContext<'_>, &LimitsType) -> R,
+) -> R {
     let tt = Arc::new(TranspositionTable::new(1));
     let mut worker = SearchWorker::new(
         Arc::clone(&tt),
@@ -48,11 +46,11 @@ fn probe<const NT: u8>(
         SearchTuneParams::default(),
     );
     worker.entering_king_rule = rule;
-    worker.prepare_search(&LimitsType {
+    let limits = LimitsType {
         depth: 1,
         ..Default::default()
-    });
-    let mut pos = position(sfen);
+    };
+    worker.prepare_search(&limits);
     let ctx = SearchContext {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
@@ -68,28 +66,83 @@ fn probe<const NT: u8>(
         draw_value_table: worker.draw_value_table,
         entering_king_rule: worker.entering_king_rule,
     };
-    let in_check = pos.in_check();
-    let outcome = super::super::eval_helpers::probe_transposition::<NT>(
-        &mut worker.state,
-        &ctx,
-        &mut pos,
-        4,
-        Value::ZERO,
-        ply,
-        pv_node,
-        in_check,
-        excluded_move,
-        !pv_node,
+    f(&mut worker.state, &ctx, &limits)
+}
+
+/// 宣言判定を経ていない置換表のエントリ (通常の手と、そのままなら β カットする下限値) を書く。
+fn seed_stale_entry(ctx: &SearchContext<'_>, pos: &Position) {
+    let mv = pos.to_move(Move::from_usi("4c4b").unwrap()).unwrap();
+    let written = ctx.tt.probe(pos.key(), pos).write(
+        pos.key(),
+        Value::new(100),
+        false,
+        Bound::Lower,
+        20,
+        mv,
+        Value::NONE,
+        ctx.tt.generation(),
     );
-    let value = match outcome {
-        ProbeOutcome::Cutoff { value, tt_move, .. } => {
-            // 宣言勝ちカットオフは ttMove を返さない（ヒストリ更新を起こさない）。
-            assert_eq!(tt_move, Move::NONE);
-            Some(value)
-        }
-        ProbeOutcome::Continue(_) => None,
-    };
-    (value, tt.probe(pos.key(), &pos).found)
+    assert!(written);
+}
+
+/// 空の置換表で probe_transposition を 1 回呼び、結果と呼んだ後の置換表のエントリの有無を返す。
+fn probe<const NT: u8>(
+    sfen: &str,
+    rule: EnteringKingRule,
+    ply: i32,
+    pv_node: bool,
+    excluded_move: Move,
+) -> (Option<Value>, bool) {
+    with_context(rule, |state, ctx, _| {
+        let mut pos = position(sfen);
+        let in_check = pos.in_check();
+        let outcome = super::super::eval_helpers::probe_transposition::<NT>(
+            state,
+            ctx,
+            &mut pos,
+            4,
+            Value::ZERO,
+            ply,
+            pv_node,
+            in_check,
+            excluded_move,
+            !pv_node,
+        );
+        let value = match outcome {
+            ProbeOutcome::Cutoff { value, tt_move, .. } => {
+                // 宣言勝ちカットオフは ttMove を返さない（ヒストリ更新を起こさない）。
+                assert_eq!(tt_move, Move::NONE);
+                Some(value)
+            }
+            ProbeOutcome::Continue(_) => None,
+        };
+        (value, ctx.tt.probe(pos.key(), &pos).found)
+    })
+}
+
+#[test]
+fn qsearch_declaration_not_hidden_by_stale_tt_entry() {
+    on_large_stack(|| {
+        let value = with_context(EnteringKingRule::Point27, |state, ctx, limits| {
+            let mut pos = position(DECLARABLE);
+            seed_stale_entry(ctx, &pos);
+            let mut tm = TimeManagement::new(
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            super::super::qsearch::qsearch::<{ NodeType::NonPV as u8 }>(
+                state,
+                ctx,
+                &mut pos,
+                Value::new(-1),
+                Value::ZERO,
+                3,
+                limits,
+                &mut tm,
+            )
+        });
+        assert_eq!(value, Value::mate_in(4));
+    });
 }
 
 #[test]
@@ -248,9 +301,8 @@ fn in_tree_declaration_finds_own_declaration_in_two() {
     on_large_stack(|| {
         // 先手は敵陣の駒が 9 枚で今は宣言できないが、大駒を敵陣に打つと 10 枚 29 点になり、
         // 後手のどの応手の後でも宣言できる。
-        // 先手の盤上に歩を置かないのは、静止探索が歩の成りを bestMove として置換表に残すと
-        // 非 PV ノードでは宣言判定が省かれる（`!ttMove || PvNode` 条件）ため。
-        let sfen = "KGG6/+S+S7/+P+P+P+P+P4/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
+        // 盤上に不成の歩・銀を置き、宣言できる局面の手前で静止探索に入る手順を含める。
+        let sfen = "KGG6/SS7/PPPPP4/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
         let root = position(sfen);
         assert_eq!(root.declaration_win(EnteringKingRule::Point27), Move::NONE);
 
@@ -268,4 +320,41 @@ fn in_tree_declaration_finds_own_declaration_in_two() {
         let (_, result) = search(sfen, EnteringKingRule::None, 5);
         assert!(!result.score.is_win(), "score={}", result.score.raw());
     });
+}
+
+#[test]
+fn declaration_possible_is_necessary_for_declaration() {
+    const RULES: [EnteringKingRule; 6] = [
+        EnteringKingRule::None,
+        EnteringKingRule::Point24,
+        EnteringKingRule::Point24H,
+        EnteringKingRule::Point27,
+        EnteringKingRule::Point27H,
+        EnteringKingRule::TryRule,
+    ];
+    let start = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+    assert!(!position(start).declaration_possible(EnteringKingRule::Point27));
+    // DECLARABLE を盤ごと反転した、後手が今すぐ宣言できる局面
+    let declarable_white = "LN2K4/LN1GG1SS1/1PPPPPP2/9/9/9/3pppppp/7ss/6ggk w 2r2b3P 1";
+    assert_eq!(position(declarable_white).declaration_win(EnteringKingRule::Point27), Move::WIN);
+    for root_sfen in [DECLARABLE, declarable_white, TRY_READY, start] {
+        let root = position(root_sfen);
+        let mut legal = MoveList::new();
+        generate_legal_all_with_pass(&root, &mut legal);
+        let children = legal.as_slice().iter().map(|&mv| {
+            let mut pos = root.clone();
+            let check = pos.gives_check(mv);
+            pos.do_move(mv, check);
+            pos
+        });
+        for pos in std::iter::once(root.clone()).chain(children) {
+            for rule in RULES {
+                if pos.declaration_win(rule) != Move::NONE {
+                    assert!(pos.declaration_possible(rule), "{} {rule:?}", pos.to_sfen());
+                }
+            }
+        }
+    }
+    assert!(position(DECLARABLE).declaration_possible(EnteringKingRule::Point27));
+    assert!(position(TRY_READY).declaration_possible(EnteringKingRule::TryRule));
 }
