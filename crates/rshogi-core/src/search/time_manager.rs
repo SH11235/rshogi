@@ -1024,6 +1024,15 @@ mod tests {
     }
 
     #[test]
+    fn test_init_counts_elapsed_from_given_start_time() {
+        let mut tm = create_time_manager();
+        let mut limits = LimitsType::new();
+        limits.set_start_time_at(Instant::now() - Duration::from_millis(300));
+        tm.init(&limits, Color::Black, 1, DEFAULT_MAX_MOVES_TO_DRAW);
+        assert!(tm.elapsed() >= 300, "elapsed={}", tm.elapsed());
+    }
+
+    #[test]
     fn test_time_manager_rtime_sets_budget() {
         let mut tm = create_time_manager();
         let mut limits = LimitsType::new();

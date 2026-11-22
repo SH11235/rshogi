@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use rshogi_book::BookValueTieBreak;
@@ -141,6 +142,9 @@ struct UsiEngine {
     last_position_cmd: Option<String>,
     /// 直近の go コマンド文字列（Stochastic_Ponder の再始動用）
     last_go_cmd: Option<String>,
+    /// 次の go の探索開始時刻。Stochastic_Ponder の ponderhit では受信時刻を入れ、
+    /// 先読みの停止と局面の再設定にかかった時間も消費時間に数える。
+    go_start_time_override: Option<Instant>,
     /// EvalFile の明示指定状態
     /// None: 未指定（eval/nn.bin 自動ロード対象）
     /// Some(true): 明示指定されロード成功
@@ -258,6 +262,7 @@ impl UsiEngine {
             stochastic_ponder: false,
             last_position_cmd: None,
             last_go_cmd: None,
+            go_start_time_override: None,
             eval_file_explicit: None,
             eval_file_path: None,
             ls_bucket_mode: None,
@@ -1848,6 +1853,7 @@ impl UsiEngine {
 
     /// goコマンド: 探索開始
     fn cmd_go(&mut self, tokens: &[&str]) -> Result<()> {
+        let start_time_override = self.go_start_time_override.take();
         // 既存の探索を停止（bestmove出力を抑制する）
         // GUIがstopを送らずにposition+goを送ってきた場合、前のponder探索の
         // bestmoveがstdoutに出力されるとGUIが混乱する
@@ -1859,7 +1865,10 @@ impl UsiEngine {
         self.reload_net_deltas_if_dirty()?;
 
         // 制限を解析
-        let limits = self.parse_go_options(tokens);
+        let mut limits = self.parse_go_options(tokens);
+        if let Some(start_time) = start_time_override {
+            limits.set_start_time_at(start_time);
+        }
 
         // 定跡 probe（探索の外・root で 1 回）。
         // go infinite / go ponder では probe しない（Phase 1 の単純化、設計メモ §3）。
@@ -2226,6 +2235,7 @@ impl UsiEngine {
 
     /// Stochastic_Ponder の ponderhit 後に通常探索へ切り替える
     fn restart_after_ponderhit(&mut self) -> Result<()> {
+        let received_at = Instant::now();
         self.stop_search_silently();
 
         if let Some(line) = self.last_position_cmd.clone() {
@@ -2241,6 +2251,11 @@ impl UsiEngine {
                 .collect();
             let tokens: Vec<&str> = owned.iter().map(String::as_str).collect();
             if !tokens.is_empty() {
+                println!(
+                    "info string stochastic ponderhit restart delay {}ms",
+                    received_at.elapsed().as_millis()
+                );
+                self.go_start_time_override = Some(received_at);
                 self.cmd_go(&tokens)?;
             }
         }
