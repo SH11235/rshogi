@@ -29,8 +29,9 @@ crates.io の `rshogi-core` は 0.9.1 のままで、今回は公開しない (�
   設定すると、`isready` でエラーになる。そうした net に切り替えるときは、GUI の設定や `engine_options.txt` から
   この 3 つを外す (#1586)。
 - `book_mine master exit-report`: 受付の管理から書き出した写しは `--box` でなく `--queue-box` で渡す (#1638)。
-  分類 `good` は、出口からの一本道が決着した (`--settle-cp`、既定 300 に届いた) ものだけになり、届かないものは
-  新しい分類 `unsettled` になる (#1585)。
+  目標に届いた `tree` の出口のうち、分類 `good` は出口からの一本道が決着した (値の絶対値が `--settle-cp`
+  (既定 300) 以上、同一局面への循環、合法手なしのどれか。`--settle-max-plies` で打ち切ったものは含まない)
+  ものだけになり、決着しないものは新しい分類 `unsettled` になる (#1585)。
 - `book_mine` の受付の行の `opts.settle_rounds` は古い serve に拒否される。全部の台の一式を入れ替えてから
   行に付ける (#1590)。
 - `policy_rollout_psv` は PSV の padding に種からの手数を書かず、常に 0 を書く。padding の bit 1 を探索木標本の
@@ -81,7 +82,8 @@ crates.io の `rshogi-core` は 0.9.1 のままで、今回は公開しない (�
 - `master game-gaps` に、対局の線を両側で舗装する `--line` と、局ごとの優先度の `--game-priority` を足した
   (#1577, #1588)。
 - `tree lines` を足し、延長の線と実戦の手の止まった理由を出す (#1589)。受付の行の `opts.settle_rounds`
-  (0〜50、既定 0) で、伝播の最善の一本道だけを伸ばし直す (#1590)。
+  (0〜50、既定 0) で、通常の展開の後に、根の最善手・根の比較候補・木にある実戦の各手から伝播後の最善手順を
+  辿り、決着していない線を伸ばし直す (#1590)。
 - `master export` の注釈の depths を、取り込んだ台帳の記録からも拾う (#1636)。
 
 ### 教師データ / 評価・計測ツール
@@ -94,9 +96,13 @@ crates.io の `rshogi-core` は 0.9.1 のままで、今回は公開しない (�
 
 ### rshogi-core (未公開)
 
-0.9.1 の公開後に入った、次に core を公開するときに載せる変更。
+0.9.1 の公開後に入った、次に core を公開するときに載せる変更。公開された型の field の型が変わるので、
+次の core は patch でなく minor (0.10.0) にする。追加の API は主なものだけを挙げる。
 
-- `MAX_LAYER_STACK_BUCKETS` を 16 から 64 にした (#1586, #1592)。
+- 互換を壊す変更: `MAX_LAYER_STACK_BUCKETS` を 16 から 64 にし、`AccumulatorLayerStacks::psqt_accumulation` の型を
+  `[[i32; MAX_LAYER_STACK_PSQT_BUCKETS]; 2]` (32) にした (#1586, #1592)。
+- bucket の分け方の `BucketSpec` / `BucketSpec3` / `LayerStackBucketSpec` と `MAX_LAYER_STACK_PSQT_BUCKETS` を
+  足した (#1586, #1592)。
 - 全駒 FT の係数を i16 で読む `piece_weights()` / `piece_weight()` を足した (#1591)。
 - `LimitsType::set_start_time_at` を足した (#1641)。
 - cargo feature `search-tree-sample` (#1576) と `threat-width-512` (#1583) を足した。
