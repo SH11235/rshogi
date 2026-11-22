@@ -14,6 +14,12 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+## v1.10.1 — 2026-11-23
+
+v1.10.0 の、SPSA の値を焼き込んだ build の扱いを変えるリリース。焼き込んだ build は探索定数を固定値として扱い、
+調整用のオプションを `usi` で広告しない。`spsa` は、調整する定数が広告されていなければエラーで止まる。
+crates.io の `rshogi-core` は変えていない (0.9.1 のまま、未公開の core の変更は v1.10.0 の節を参照)。
+
 ### USI エンジン
 
 - `RSHOGI_EMBED_SPSA_PARAMS` で SPSA の値を焼き込んだ build は、探索定数を固定値として扱い、調整用の
