@@ -49,6 +49,22 @@ fn main() {
         result_features.push(id);
     }
     println!("cargo:rustc-env=RSHOGI_USI_RESULT_FEATURES={}", result_features.join(","));
+    println!("cargo:rustc-env=RSHOGI_ENGINE_NAME={}", engine_name());
+}
+
+/// `usi` に返すエンジン名 (`id name`)。`RSHOGI_ENGINE_NAME` で変えられ、指定が無ければ `RAMU`。
+/// 評価関数の大きさ違いを同じ GUI に並べるときに区別するためのもので、探索の結果は変えないので版の材料にしない。
+fn engine_name() -> String {
+    const VAR: &str = "RSHOGI_ENGINE_NAME";
+    println!("cargo:rerun-if-env-changed={VAR}");
+    let name = env::var(VAR).unwrap_or_default();
+    let name = name.trim();
+    if name.is_empty() {
+        return "RAMU".to_owned();
+    }
+    // `id name` は 1 行で返すので、改行などの制御文字は受け付けない
+    assert!(!name.chars().any(char::is_control), "{VAR} に制御文字は使えません: {name:?}");
+    name.to_owned()
 }
 
 /// `RSHOGI_EMBED_SPSA_PARAMS` (`.params` の絶対パス) の名前と値を `OUT_DIR/embedded_spsa.rs` に
