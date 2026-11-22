@@ -356,7 +356,10 @@ fn declaration_possible_is_necessary_for_declaration() {
     ];
     let start = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
     assert!(!position(start).declaration_possible(EnteringKingRule::Point27));
-    for root_sfen in [DECLARABLE, TRY_READY, start] {
+    // DECLARABLE を盤ごと反転した、後手が今すぐ宣言できる局面
+    let declarable_white = "LN2K4/LN1GG1SS1/1PPPPPP2/9/9/9/3pppppp/7ss/6ggk w 2r2b3P 1";
+    assert_eq!(position(declarable_white).declaration_win(EnteringKingRule::Point27), Move::WIN);
+    for root_sfen in [DECLARABLE, declarable_white, TRY_READY, start] {
         let root = position(root_sfen);
         let mut legal = MoveList::new();
         generate_legal_all_with_pass(&root, &mut legal);

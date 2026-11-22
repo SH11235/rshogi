@@ -1945,8 +1945,8 @@ impl Position {
 
     /// 入玉宣言勝ちの必要条件 (ルールがあり、手番側の玉が敵陣三段にいる) だけを判定する。
     ///
-    /// 偽なら `declaration_win` は必ず `Move::NONE` を返す (トライルールもトライ升に隣接する
-    /// 1〜2 段目でしか宣言できない)。探索の全ノードで `declaration_win` を呼ぶ前の絞り込みに使う。
+    /// 偽なら `declaration_win` は必ず `Move::NONE` を返す (トライルールで宣言できるのもトライ升に
+    /// 隣接する玉で、その玉は敵陣三段にいる)。探索の全ノードで `declaration_win` を呼ぶ前の絞り込みに使う。
     #[inline(always)]
     pub fn declaration_possible(&self, rule: EnteringKingRule) -> bool {
         let us = self.side_to_move();
