@@ -245,9 +245,13 @@ TT eval を再利用したノードでは EvalHash hit と同じく NNUE アキ�
 RSHOGI_EMBED_SPSA_PARAMS=/path/to/tuned.params cargo xtask build --edition <preset>
 ```
 
-- 起動時に適用し、`usi` の応答の `SPSA_*` の既定値も焼き込んだ値になります (GUI が既定値を `setoption` で
-  送り返しても焼き込んだ値のまま)。`SPSAParamsFile` で指定したファイルや隣の `spsa.params` は、その上に重ねて読みます。
+- 起動時に適用し、探索定数を固定値として扱います。やねうら王や Stockfish の調整用でない build と同じく、
+  調整用の `SPSA_*` / `SPSA_NET_*` は `usi` で広告しません (GUI の設定画面に出ず、GUI が既定値を送り返して
+  焼き込んだ値を上書きすることもありません)。`setoption` で名前を指定すれば上書きでき、`SPSAParamsFile` で指定した
+  ファイルや隣の `spsa.params` も、その上に重ねて読みます。
+- 値は build 時に数値に直して埋め込み、`.params` のテキストは実行ファイルに残しません。
 - 起動時に `info string SPSA params embedded: N parameters` を標準エラーに出します。知らない名前の行は警告します。
+  値の行が 1 つも無いファイルを指定すると build が止まります。
 - 焼き込んだ値は結果を変えるので、`rshogi-usi --source-version` の末尾に `+embedded-spsa-<内容の hash>` が付きます
   (git の作業木で build してソースの id が分かるときだけ。分からなければ他の feature と同じく `unknown` になります)。
 - 相対パスは build script の作業ディレクトリ (crate の dir) からになり意図とずれるので、絶対パスだけを受け付けます。

@@ -119,7 +119,8 @@ SFEN の手数は正の整数で、省略時は 1 です。指し手の末尾に
 | `LS_PROGRESS_BUCKETS` | 進行度 routing の bucket 数。1〜64、0 は未設定 | 0 |
 | `LS_PROGRESS_COEFF` | 進行度係数のファイルパス | 未設定 |
 | `SPSAParamsFile` | 探索・net の SPSA の値のファイル (`.params`)。`<auto>` なら実行ファイルと同じフォルダの `spsa.params` を読む。build に焼き込んだ値 ([ビルドガイド](../../docs/build.md#spsa-の値を焼き込む)) より優先する | `<auto>` |
-| `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
+| `SPSA_*` | 探索定数の調整用。値を焼き込んだ build では広告しない (`setoption` での指定は受け付ける) | 各定数の既定値 |
+| `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec`。値を焼き込んだ build では広告しない | 0 |
 | `MateHashMB` | `go mate` (df-pn) の置換表サイズ (MB) | 64 |
 | `MateThreads` | `go mate` で 1 局面を解くスレッド数。置換表を全スレッドで共有する。最初の 1 万ノードは 1 スレッドで解き、決まらなければ並列に切り替える (易しい局面は変わらない)。2 以上では難しい問題が速くなる (8 スレッドで 2〜3 倍程度) が、読むノード数は決定的でなくなる | 1 |
 | `GameMateThreads` | 通常対局の詰み探索に使う最大スレッド数。0 で無効。ネイティブ版のみ | 0 |
@@ -165,6 +166,7 @@ LS_BUCKET_MODE progresskpabsq16
 
 - 固定したオプションは、その後の `setoption` では変わりません (`info string ... setoption ignored` を出す)。
   GUI の設定より常にファイルが優先されます。`SPSA_*` を固定した場合は、`SPSAParamsFile` や `spsa.params` でも変わりません。
+  値を焼き込んだ build は `SPSA_*` / `SPSA_NET_*` を広告しないので、このファイルでは固定できません (知らない名前として飛ばします)。
 - ファイルの値を書き換えると、次の `isready` で反映します。行やファイルを消しても、固定はエンジンを起動し直すまで残ります。
 - 同じ名前が複数行にあれば最後の行を使います。値が `usi` で示す型・範囲に合わない行は警告して飛ばします (固定もしない)。
 - `EvalFile` / `LS_PROGRESS_COEFF` / `SPSAParamsFile` / `BookDir` / `BookExploreFile` の相対パスは、

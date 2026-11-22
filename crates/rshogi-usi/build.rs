@@ -12,6 +12,9 @@ use std::path::PathBuf;
 
 include!("build/source_version.rs");
 
+#[path = "src/spsa_params.rs"]
+mod spsa_params;
+
 fn has_feature(name: &str) -> bool {
     env::var_os(format!("CARGO_FEATURE_{}", name.to_ascii_uppercase().replace('-', "_"))).is_some()
 }
@@ -48,12 +51,14 @@ fn main() {
     println!("cargo:rustc-env=RSHOGI_USI_RESULT_FEATURES={}", result_features.join(","));
 }
 
-/// `RSHOGI_EMBED_SPSA_PARAMS` (`.params` の絶対パス) の中身を `OUT_DIR/embedded_spsa.params` に書く。
-/// 指定が無ければ空のファイルを書く。焼き込んだ値は結果を変えるので、中身の hash を版の材料として返す。
+/// `RSHOGI_EMBED_SPSA_PARAMS` (`.params` の絶対パス) の名前と値を `OUT_DIR/embedded_spsa.rs` に
+/// Rust の配列として書く。値をテキストのまま実行ファイルに残さないため、build 時に数値にする。
+/// 指定が無ければ空の配列を書く。焼き込んだ値は結果を変えるので、中身の hash を版の材料として返す。
 fn embed_spsa_params() -> Option<String> {
     const VAR: &str = "RSHOGI_EMBED_SPSA_PARAMS";
     println!("cargo:rerun-if-env-changed={VAR}");
-    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_spsa.params");
+    println!("cargo:rerun-if-changed=src/spsa_params.rs");
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("embedded_spsa.rs");
     let content = match env::var_os(VAR).filter(|v| !v.is_empty()) {
         Some(path) => {
             let path = PathBuf::from(path);
@@ -66,8 +71,18 @@ fn embed_spsa_params() -> Option<String> {
         }
         None => String::new(),
     };
-    std::fs::write(&out, &content).expect("embedded_spsa.params を書けません");
-    (!content.is_empty()).then(|| format!("embedded-spsa-{:016x}", fnv1a64(content.as_bytes())))
+    let entries = spsa_params::parse_spsa_params(&content);
+    assert!(
+        content.is_empty() || !entries.is_empty(),
+        "{VAR} のファイルに SPSA の値の行がありません"
+    );
+    let mut code = String::from("&[\n");
+    for (name, value) in &entries {
+        code.push_str(&format!("    ({name:?}, {value}),\n"));
+    }
+    code.push_str("]\n");
+    std::fs::write(&out, code).expect("embedded_spsa.rs を書けません");
+    (!entries.is_empty()).then(|| format!("embedded-spsa-{:016x}", fnv1a64(content.as_bytes())))
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {

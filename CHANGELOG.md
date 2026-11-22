@@ -14,6 +14,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+### USI エンジン
+
+- `RSHOGI_EMBED_SPSA_PARAMS` で SPSA の値を焼き込んだ build は、探索定数を固定値として扱い、調整用の
+  `SPSA_*` / `SPSA_NET_*` を `usi` で広告しないようにした (以前は焼き込んだ値を既定値として広告していた)。
+  `setoption` での指定と `SPSAParamsFile` は今までどおり受け付ける。値は build 時に数値に直して埋め込み、
+  `.params` のテキストは実行ファイルに残さない。値の行が 1 つも無いファイルを指定すると build が止まる。
+
 ## v1.10.0 — 2026-11-23
 
 v1.9.0 以降の、探索の修正、NNUE の読める形式の拡充と threat 累積の高速化、定跡・教師データのツールの拡充を

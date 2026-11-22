@@ -38,6 +38,9 @@ use serde_json::json;
 
 #[cfg(feature = "allocation-stats")]
 mod allocation_stats;
+mod spsa_params;
+
+use spsa_params::parse_spsa_params;
 
 #[cfg(all(feature = "mimalloc", feature = "allocation-stats"))]
 compile_error!(
@@ -56,8 +59,10 @@ const ENGINE_AUTHOR: &str = "sh11235";
 const SOURCE_ID: &str = env!("RSHOGI_SOURCE_ID");
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
-/// build 時に `RSHOGI_EMBED_SPSA_PARAMS` で指定した `.params` の中身 (未指定なら空)。
-const EMBEDDED_SPSA_PARAMS: &str = include_str!(concat!(env!("OUT_DIR"), "/embedded_spsa.params"));
+/// build 時に `RSHOGI_EMBED_SPSA_PARAMS` で指定した `.params` の名前と値 (未指定なら空)。
+/// 値はテキストでなく数値として埋め込む。
+const EMBEDDED_SPSA_PARAMS: &[(&str, i32)] =
+    include!(concat!(env!("OUT_DIR"), "/embedded_spsa.rs"));
 /// isready で読む、オプションを固定するファイルの名前 (やねうら王と同じ)。
 const ENGINE_OPTIONS_FILE: &str = "engine_options.txt";
 /// engine_options.txt に相対パスで書いたとき、ファイルのあるフォルダを基準にするオプション。
@@ -163,8 +168,9 @@ struct UsiEngine {
     spsa_params_file: Option<String>,
     /// SPSA params ファイルの読み込み済みフラグ
     spsa_params_loaded: bool,
-    /// build に焼き込んだ SPSA の値 (適用後の値)。`usi` の既定値として返す。
-    spsa_defaults: BTreeMap<String, i32>,
+    /// SPSA の値を build に焼き込んだか。焼き込んだ build は探索定数を固定値として扱い、
+    /// 調整用の `SPSA_*` / `SPSA_NET_*` を `usi` で広告しない。
+    spsa_options_hidden: bool,
     /// engine_options.txt で固定したオプション (小文字の名前 → 適用した値)。setoption では変えられない。
     fixed_options: BTreeMap<String, String>,
     /// 起動時 spec から広告する net delta option 名。
@@ -271,7 +277,7 @@ impl UsiEngine {
             ls_progress_coeff_explicit: false,
             spsa_params_file: None,
             spsa_params_loaded: false,
-            spsa_defaults: BTreeMap::new(),
+            spsa_options_hidden: false,
             fixed_options: BTreeMap::new(),
             spsa_net_spec_names,
             net_deltas: BTreeMap::new(),
@@ -473,20 +479,16 @@ impl UsiEngine {
         lines.push("option name IgnoreBookPly type check default true".to_string());
         lines.push("option name FlippedBook type check default true".to_string());
         lines.push("option name BookOnTheFly type check default false".to_string());
-        for spec in SearchTuneParams::option_specs() {
-            lines.push(format!(
-                "option name {} type spin default {} min {} max {}",
-                spec.usi_name,
-                self.spsa_defaults.get(spec.usi_name).copied().unwrap_or(spec.default),
-                spec.min,
-                spec.max
-            ));
-        }
-        for name in &self.spsa_net_spec_names {
-            let default = self.spsa_defaults.get(name).copied().unwrap_or(0);
-            lines.push(format!(
-                "option name {name} type spin default {default} min -32768 max 32767"
-            ));
+        if !self.spsa_options_hidden {
+            for spec in SearchTuneParams::option_specs() {
+                lines.push(format!(
+                    "option name {} type spin default {} min {} max {}",
+                    spec.usi_name, spec.default, spec.min, spec.max
+                ));
+            }
+            for name in &self.spsa_net_spec_names {
+                lines.push(format!("option name {name} type spin default 0 min -32768 max 32767"));
+            }
         }
         lines
     }
@@ -758,15 +760,16 @@ impl UsiEngine {
         report.warn_unknown(&path.display().to_string());
     }
 
-    /// build に焼き込んだ SPSA の値を適用し、`usi` の既定値にする。
-    /// GUI は `usi` の既定値を setoption で送り返すので、既定値を替えないと焼き込んだ値が上書きされる。
-    fn apply_embedded_spsa_params(&mut self, content: &str) {
-        let entries = parse_spsa_params(content);
-        if entries.is_empty() {
+    /// build に焼き込んだ SPSA の値を適用する。焼き込んだ build では調整用のオプションを広告しないので、
+    /// GUI が既定値を `setoption` で送り返して焼き込んだ値を上書きすることもない。
+    fn apply_embedded_spsa_params(&mut self, embedded: &[(&str, i32)]) {
+        if embedded.is_empty() {
             return;
         }
+        let entries: Vec<(String, i32)> =
+            embedded.iter().map(|&(name, value)| (name.to_string(), value)).collect();
         let report = self.apply_spsa_params(&entries);
-        self.spsa_defaults = report.applied_values.iter().cloned().collect();
+        self.spsa_options_hidden = true;
         eprintln!(
             "info string SPSA params embedded: {} parameters (clamped: {})",
             report.applied, report.clamped
@@ -799,10 +802,7 @@ impl UsiEngine {
                 None
             };
             match applied {
-                Some(v) => {
-                    report.applied += 1;
-                    report.applied_values.push((name.clone(), v));
-                }
+                Some(_) => report.applied += 1,
                 None => report.unknown.push(name.clone()),
             }
         }
@@ -2450,7 +2450,6 @@ fn parse_spsa_net_spec(content: &str) -> Result<Vec<String>> {
 struct SpsaApplyReport {
     applied: usize,
     clamped: usize,
-    applied_values: Vec<(String, i32)>,
     unknown: Vec<String>,
 }
 
@@ -2464,36 +2463,6 @@ impl SpsaApplyReport {
             );
         }
     }
-}
-
-/// `.params` (name,type,value,min,max,c_end,r_end [// comment] [[[NOT USED]]]) から名前と値を取り出す。
-fn parse_spsa_params(content: &str) -> Vec<(String, i32)> {
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let val_part = trimmed.split("//").next().unwrap_or(trimmed);
-        let val_part = val_part.replace("[[NOT USED]]", "");
-        let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
-        if cols.len() < 3 {
-            continue;
-        }
-        let parsed = if cols[1].eq_ignore_ascii_case("int") {
-            match cols[2].parse::<f64>() {
-                Ok(v) => v.round() as i32,
-                Err(_) => continue,
-            }
-        } else {
-            match cols[2].parse::<i32>() {
-                Ok(v) => v,
-                Err(_) => continue,
-            }
-        };
-        entries.push((cols[0].to_string(), parsed));
-    }
-    entries
 }
 
 /// engine_options.txt の 1 行: 名前と値、または読めなかった理由。
@@ -3037,23 +3006,32 @@ mod tests {
 
     #[test]
     #[serial]
-    fn embedded_spsa_params_become_usi_defaults() {
+    fn embedded_spsa_params_are_applied_without_advertising_spsa_options() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
             .spawn(|| {
                 let spec = &SearchTuneParams::option_specs()[0];
-                let baked = if spec.default < spec.max { spec.default + 1 } else { spec.default - 1 };
-                let mut engine = UsiEngine::new();
-                engine.apply_embedded_spsa_params(&format!(
-                    "# comment\n{},int,{baked},{},{},1,0.002\nSPSA_NoSuchParam,int,5,0,10,1,0.002\n",
-                    spec.usi_name, spec.min, spec.max
-                ));
-                let line = format!(
-                    "option name {} type spin default {baked} min {} max {}",
-                    spec.usi_name, spec.min, spec.max
+                let baked = if spec.default < spec.max {
+                    spec.default + 1
+                } else {
+                    spec.default - 1
+                };
+                let mut engine = UsiEngine::new_with_spsa_net_spec(vec![format!(
+                    "{NET_DELTA_OPTION_PREFIX}out_w_b0_0"
+                )]);
+                assert!(
+                    engine.usi_option_lines().iter().any(|l| l.starts_with("option name SPSA_"))
                 );
-                assert!(engine.usi_option_lines().contains(&line), "{line}");
-                assert_eq!(engine.spsa_defaults.len(), 1);
+                let mut expected = engine.search.as_ref().unwrap().search_tune_params();
+                expected.set_from_usi_name(spec.usi_name, baked).unwrap();
+
+                engine
+                    .apply_embedded_spsa_params(&[(spec.usi_name, baked), ("SPSA_NoSuchParam", 5)]);
+                assert_eq!(engine.search.as_ref().unwrap().search_tune_params(), expected);
+                assert!(
+                    !engine.usi_option_lines().iter().any(|l| l.starts_with("option name SPSA_")),
+                    "焼き込んだ build は SPSA_* / SPSA_NET_* を広告しない"
+                );
             })
             .unwrap()
             .join()
@@ -3076,9 +3054,8 @@ mod tests {
                 assert_eq!(report.applied, 0);
 
                 let net = format!("{NET_DELTA_OPTION_PREFIX}out_w_b0_0");
-                let report = engine.apply_spsa_params(&[(net.clone(), 40000)]);
-                assert_eq!(report.applied_values, vec![(net, i32::from(i16::MAX))]);
-                assert_eq!(report.clamped, 1);
+                let report = engine.apply_spsa_params(&[(net, 40000)]);
+                assert_eq!((report.applied, report.clamped), (1, 1));
             })
             .unwrap()
             .join()
