@@ -29,9 +29,10 @@ crates.io の `rshogi-core` は 0.9.1 のままで、今回は公開しない (�
   設定すると、`isready` でエラーになる。そうした net に切り替えるときは、GUI の設定や `engine_options.txt` から
   この 3 つを外す (#1586)。
 - `book_mine master exit-report`: 受付の管理から書き出した写しは `--box` でなく `--queue-box` で渡す (#1638)。
-  目標に届いた `tree` の出口のうち、分類 `good` は出口からの一本道が決着した (値の絶対値が `--settle-cp`
-  (既定 300) 以上、同一局面への循環、合法手なしのどれか。`--settle-max-plies` で打ち切ったものは含まない)
-  ものだけになり、決着しないものは新しい分類 `unsettled` になる (#1585)。
+  目標に届いた `tree` の出口のうち、分類 `good` は出口からの一本道が決着したものだけになり、決着しないものは
+  新しい分類 `unsettled` になる。一本道は辿れる手がなくなるまで辿り、直前の手の値の絶対値が `--settle-cp`
+  (既定 300) 以上か、同一局面への循環か、合法手なしで終われば決着とする。`--settle-max-plies` (既定 400) で
+  打ち切ったものは決着としない。細かい扱いは `crates/tools/docs/book_mine.md` の `exit-report` の節 (#1585)。
 - `book_mine` の受付の行の `opts.settle_rounds` は古い serve に拒否される。全部の台の一式を入れ替えてから
   行に付ける (#1590)。
 - `policy_rollout_psv` は PSV の padding に種からの手数を書かず、常に 0 を書く。padding の bit 1 を探索木標本の
