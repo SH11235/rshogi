@@ -14,6 +14,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+## v1.10.2 — 2026-11-23
+
+build 時にエンジン名を変えられるようにするリリース。crates.io の `rshogi-core` は変えていない
+(0.9.1 のまま、未公開の core の変更は v1.10.0 の節を参照)。
+
 ### USI エンジン
 
 - build 時に `RSHOGI_ENGINE_NAME` を渡すと、`usi` に返すエンジン名 (`id name`) を変えられるようにした
