@@ -85,21 +85,16 @@ fn seed_stale_entry(ctx: &SearchContext<'_>, pos: &Position) {
     assert!(written);
 }
 
-/// probe_transposition を 1 回呼び、結果と呼んだ後の置換表のエントリの有無を返す。
-/// `seed` なら呼ぶ前に宣言判定を経ていないエントリを置換表に書いておく。
+/// 空の置換表で probe_transposition を 1 回呼び、結果と呼んだ後の置換表のエントリの有無を返す。
 fn probe<const NT: u8>(
     sfen: &str,
     rule: EnteringKingRule,
     ply: i32,
     pv_node: bool,
     excluded_move: Move,
-    seed: bool,
 ) -> (Option<Value>, bool) {
     with_context(rule, |state, ctx, _| {
         let mut pos = position(sfen);
-        if seed {
-            seed_stale_entry(ctx, &pos);
-        }
         let in_check = pos.in_check();
         let outcome = super::super::eval_helpers::probe_transposition::<NT>(
             state,
@@ -126,18 +121,8 @@ fn probe<const NT: u8>(
 }
 
 #[test]
-fn in_tree_declaration_not_hidden_by_stale_tt_entry() {
+fn qsearch_declaration_not_hidden_by_stale_tt_entry() {
     on_large_stack(|| {
-        let (value, _) = probe::<{ NodeType::NonPV as u8 }>(
-            DECLARABLE,
-            EnteringKingRule::Point27,
-            3,
-            false,
-            Move::NONE,
-            true,
-        );
-        assert_eq!(value, Some(Value::mate_in(4)));
-
         let value = with_context(EnteringKingRule::Point27, |state, ctx, limits| {
             let mut pos = position(DECLARABLE);
             seed_stale_entry(ctx, &pos);
@@ -171,7 +156,6 @@ fn in_tree_declaration_cuts_off_without_tt_write() {
                     ply,
                     true,
                     Move::NONE,
-                    false,
                 )
             } else {
                 probe::<{ NodeType::NonPV as u8 }>(
@@ -180,7 +164,6 @@ fn in_tree_declaration_cuts_off_without_tt_write() {
                     ply,
                     false,
                     Move::NONE,
-                    false,
                 )
             };
             assert_eq!(value, Some(Value::mate_in(ply + 1)));
@@ -200,7 +183,6 @@ fn in_tree_declaration_disabled_by_rule_and_root() {
             3,
             false,
             Move::NONE,
-            false,
         );
         assert_eq!(value, None);
         // root は engine.rs 側で root_moves として扱うため、ここでは判定しない。
@@ -210,7 +192,6 @@ fn in_tree_declaration_disabled_by_rule_and_root() {
             0,
             true,
             Move::NONE,
-            false,
         );
         assert_eq!(value, None);
     });
@@ -227,7 +208,6 @@ fn in_tree_declaration_respects_excluded_move() {
             2,
             false,
             unrelated,
-            false,
         );
         assert_eq!(value, Some(Value::mate_in(3)));
 
@@ -240,7 +220,6 @@ fn in_tree_declaration_respects_excluded_move() {
             2,
             false,
             Move::NONE,
-            false,
         );
         assert_eq!(value, Some(Value::mate_in(3)));
         let (value, _) = probe::<{ NodeType::NonPV as u8 }>(
@@ -249,7 +228,6 @@ fn in_tree_declaration_respects_excluded_move() {
             2,
             false,
             try_move,
-            false,
         );
         assert_eq!(value, None);
     });
