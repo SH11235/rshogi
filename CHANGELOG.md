@@ -14,6 +14,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+### USI エンジン
+
+- build 時に `RSHOGI_ENGINE_NAME` を渡すと、`usi` に返すエンジン名 (`id name`) を変えられるようにした
+  (既定は `RAMU`)。評価関数の大きさ違いの実行ファイルを同じ GUI に並べるときに区別するため (`docs/build.md`)。
+
 ## v1.10.1 — 2026-11-23
 
 v1.10.0 の、SPSA の値を焼き込んだ build の扱いを変えるリリース。焼き込んだ build は探索定数を固定値として扱い、

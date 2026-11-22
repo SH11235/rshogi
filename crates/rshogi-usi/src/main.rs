@@ -51,8 +51,8 @@ compile_error!(
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// エンジン名 (`id name`)
-const ENGINE_NAME: &str = "RAMU";
+/// エンジン名 (`id name`)。build 時に `RSHOGI_ENGINE_NAME` で変えられる (既定は `RAMU`、build.rs)。
+const ENGINE_NAME: &str = env!("RSHOGI_ENGINE_NAME");
 /// エンジン作者
 const ENGINE_AUTHOR: &str = "sh11235";
 /// ビルド時に埋め込んだエンジンのソースの id (build.rs)。

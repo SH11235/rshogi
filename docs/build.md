@@ -259,6 +259,19 @@ RSHOGI_EMBED_SPSA_PARAMS=/path/to/tuned.params cargo xtask build --edition <pres
   (git の作業木で build してソースの id が分かるときだけ。分からなければ他の feature と同じく `unknown` になります)。
 - 相対パスは build script の作業ディレクトリ (crate の dir) からになり意図とずれるので、絶対パスだけを受け付けます。
 
+#### エンジン名を変える
+
+環境変数 `RSHOGI_ENGINE_NAME` を渡して build すると、`usi` に返すエンジン名 (`id name`) を変えられます。
+指定が無ければ `RAMU` です。評価関数の大きさ違いの実行ファイルを同じ GUI に登録するときに区別できます。
+
+```bash
+RSHOGI_ENGINE_NAME="RAMU 2304" cargo xtask build --edition <preset>
+```
+
+- 前後の空白は取り除きます。改行などの制御文字を含む名前 (前後にあるものも) は build が止まります。
+- 名前は UTF-8 のまま出すので、GUI によっては日本語などが文字化けします。ASCII の名前を勧めます。
+- エンジン名は探索の結果を変えないので、`--source-version` には含めません。
+
 #### 命名規則
 
 - native: `engines/rshogi-usi-<edition slug>[+<feature>...][.exe]`
