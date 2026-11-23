@@ -69,17 +69,16 @@ fn validate_feature_combination(
         return Err("threat-width-512 and threat-width-768 are mutually exclusive".to_owned());
     }
     let static_layerstack = mode_specific && layerstack_arch && !runtime_dimensions;
-    let size_2304 = has_feature("layerstacks-2304x16x64");
+    let partial_width_l2_64 = has_feature("layerstacks-1024x16x64")
+        || has_feature("layerstacks-1536x16x64")
+        || has_feature("layerstacks-2304x16x64");
     if threat_width_512
-        && !(static_layerstack
-            && (size_2304 || has_feature("layerstacks-1536x16x32")
-                || has_feature("layerstacks-1536x16x64")
-                || has_feature("layerstacks-1024x16x64")))
+        && !(static_layerstack && (partial_width_l2_64 || has_feature("layerstacks-1536x16x32")))
     {
         return Err("threat-width-512 requires a static 1024x16x64, 1536x16x32, 1536x16x64 or 2304x16x64 edition".to_owned());
     }
-    if threat_width_768 && !(static_layerstack && size_2304) {
-        return Err("threat-width-768 requires a static 2304x16x64 edition".to_owned());
+    if threat_width_768 && !(static_layerstack && partial_width_l2_64) {
+        return Err("threat-width-768 requires a static 1024x16x64, 1536x16x64 or 2304x16x64 edition".to_owned());
     }
 
     if has_feature("nnue-effect-bucket") {

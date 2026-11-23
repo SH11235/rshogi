@@ -180,7 +180,7 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
 - `threat512` は 1024x16x64 / 1536x16x32 / 1536x16x64 / 2304x16x64 で512列の Threat を使う静的 edition。
-  `threat768` は 2304x16x64 で768列の Threat を使う。形式と変換は
+  `threat768` は 1024x16x64 / 1536x16x64 / 2304x16x64 で768列の Threat を使う。形式と変換は
   [`resize_nnue_threat`](../crates/tools/docs/resize_nnue_threat.md) を参照。
 - `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
   `edition-layerstacks-any-any-any` の短縮形。利用可能な preset は `cargo xtask list-editions` で確認する。
@@ -458,8 +458,10 @@ Threat 付きの net は、FT 幅とヘッダーの `ThreatWidth` に合う edit
 |---:|---:|---|
 | 1024 | 全幅 | `layerstacks-halfka_hm_merged-1024x16x64-threat` |
 | 1024 | 512 | `layerstacks-halfka_hm_merged-1024x16x64-threat512` |
+| 1024 | 768 | `layerstacks-halfka_hm_merged-1024x16x64-threat768` |
 | 1536 | 全幅 | `layerstacks-halfka_hm_merged-1536x16x64-threat` |
 | 1536 | 512 | `layerstacks-halfka_hm_merged-1536x16x64-threat512` |
+| 1536 | 768 | `layerstacks-halfka_hm_merged-1536x16x64-threat768` |
 | 2304 | 全幅 | `layerstacks-halfka_hm_merged-2304x16x64-threat` |
 | 2304 | 512 | `layerstacks-halfka_hm_merged-2304x16x64-threat512` |
 | 2304 | 768 | `layerstacks-halfka_hm_merged-2304x16x64-threat768` |
