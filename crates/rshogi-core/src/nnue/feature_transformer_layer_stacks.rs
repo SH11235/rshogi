@@ -3149,7 +3149,9 @@ mod tests {
     #[test]
     fn threat_ancestor_matches_full_refresh() {
         use crate::movegen::{MoveList, generate_legal};
-        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+        const N: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+            1024
+        } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
         } else if cfg!(feature = "threat-width-512") {
             1536
@@ -3372,7 +3374,9 @@ mod tests {
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn full_threat_refresh_matches_scalar_raw_accumulator() {
-        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+        const N: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+            1024
+        } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
         } else if cfg!(feature = "threat-width-512") {
             1536

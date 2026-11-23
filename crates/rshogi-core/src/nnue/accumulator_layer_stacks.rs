@@ -679,6 +679,8 @@ pub enum LayerStacksAccStack {
     L1024x16x32(AccumulatorStackLayerStacks<1024>),
     #[cfg(feature = "layerstacks-3072x16x32")]
     L3072x16x32(AccumulatorStackLayerStacks<3072>),
+    #[cfg(feature = "layerstacks-1024x16x64")]
+    L1024x16x64(AccumulatorStackLayerStacks<1024>),
     #[cfg(feature = "layerstacks-2304x16x64")]
     L2304x16x64(AccumulatorStackLayerStacks<2304>),
     #[cfg(feature = "layerstacks-3072x16x64")]
@@ -714,6 +716,8 @@ macro_rules! ls_match {
             Self::L1024x16x32($pat) => $body,
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32($pat) => $body,
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -728,6 +732,7 @@ macro_rules! ls_match {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"
@@ -769,6 +774,8 @@ impl LayerStacksAccStack {
             Self::L1024x16x32(_) => 1024,
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32(_) => 3072,
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => 1024,
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => 2304,
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -783,6 +790,7 @@ impl LayerStacksAccStack {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"
@@ -808,6 +816,8 @@ impl LayerStacksAccStack {
             Self::L1024x16x32(_) => (1024, 16, 32),
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32(_) => (3072, 16, 32),
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => (1024, 16, 64),
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => (2304, 16, 64),
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -822,6 +832,7 @@ impl LayerStacksAccStack {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"
@@ -870,6 +881,8 @@ pub enum LayerStacksAccCache {
     L1024x16x32(AccumulatorCacheLayerStacks<1024>),
     #[cfg(feature = "layerstacks-3072x16x32")]
     L3072x16x32(AccumulatorCacheLayerStacks<3072>),
+    #[cfg(feature = "layerstacks-1024x16x64")]
+    L1024x16x64(AccumulatorCacheLayerStacks<1024>),
     #[cfg(feature = "layerstacks-2304x16x64")]
     L2304x16x64(AccumulatorCacheLayerStacks<2304>),
     #[cfg(feature = "layerstacks-3072x16x64")]
@@ -906,6 +919,8 @@ impl LayerStacksAccCache {
             Self::L1024x16x32(_) => 1024,
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32(_) => 3072,
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => 1024,
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => 2304,
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -920,6 +935,7 @@ impl LayerStacksAccCache {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"
@@ -945,6 +961,8 @@ impl LayerStacksAccCache {
             Self::L1024x16x32(_) => (1024, 16, 32),
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32(_) => (3072, 16, 32),
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => (1024, 16, 64),
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => (2304, 16, 64),
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -959,6 +977,7 @@ impl LayerStacksAccCache {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"
@@ -984,6 +1003,8 @@ impl LayerStacksAccCache {
             Self::L1024x16x32(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32(c) => c.invalidate(),
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -998,6 +1019,7 @@ impl LayerStacksAccCache {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"

@@ -68,7 +68,7 @@ Threat モデルの旧計測をそのまま合成後の値と比較しないで�
 build feature・モデルと局面集合を確認し、同条件で再計測して差を判断します。
 過去の数値を現在のソースだけから無効と断定したり、自動的に置き換えたりはしません。
 
-L2=64 モデルの検証には、ビルド時に `--features layerstacks-3072x16x64`、`--features layerstacks-2304x16x64`
-または `--features layerstacks-1536x16x64` をモデルに合わせて追加する。
+L2=64 モデルの検証には、ビルド時に `--features layerstacks-1024x16x64`、`--features layerstacks-1536x16x64`、
+`--features layerstacks-2304x16x64` または `--features layerstacks-3072x16x64` をモデルに合わせて追加する。
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

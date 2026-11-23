@@ -29,7 +29,9 @@ fn partial_threat_width_requires_supported_static_size() {
                         || (width == "threat-width-512"
                             && matches!(
                                 *size,
-                                "layerstacks-1536x16x32" | "layerstacks-1536x16x64"
+                                "layerstacks-1024x16x64"
+                                    | "layerstacks-1536x16x32"
+                                    | "layerstacks-1536x16x64"
                             )));
                 assert_eq!(
                     validate_feature_combination(&lookup(&features)).is_ok(),
@@ -623,6 +625,7 @@ fn fused_1536_requires_a_single_measured_architecture() {
         "layerstacks-512x16x32",
         "layerstacks-1024x16x32",
         "layerstacks-3072x16x32",
+        "layerstacks-1024x16x64",
         "layerstacks-2304x16x64",
         "layerstacks-3072x16x64",
         "layerstacks-1536x16x64",

@@ -1784,13 +1784,13 @@ mod tests {
 
     #[test]
     fn runtime_l2_32_and_64_match_static_and_refresh() {
-        fn compare<const WIDTH: usize>() {
+        fn compare<const FT_OUT: usize, const WIDTH: usize>() {
             use crate::nnue::accumulator_layer_stacks::AccumulatorLayerStacks;
             use crate::nnue::network_layer_stacks::NetworkLayerStacks;
             let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
                 "HalfKaHmMerged",
                 HalfKaHmMergedFeatureSet::DIMENSIONS,
-                64,
+                FT_OUT,
                 16,
                 WIDTH,
                 8,
@@ -1803,7 +1803,7 @@ mod tests {
             )
             .unwrap();
             let fixed =
-                NetworkLayerStacks::<64, 16, 30, 32, HalfKaHmMergedSpec, WIDTH>::read_with_source(
+                NetworkLayerStacks::<FT_OUT, 16, 30, 32, HalfKaHmMergedSpec, WIDTH>::read_with_source(
                     &mut Cursor::new(&model.bytes),
                     None,
                     #[cfg(feature = "prepacked-nnue")]
@@ -1818,7 +1818,7 @@ mod tests {
             pos.set_sfen(SFEN_HIRATE).unwrap();
             let mut stack = dynamic.new_stack();
             dynamic.refresh(&pos, &mut stack);
-            let mut acc = AccumulatorLayerStacks::<64>::new();
+            let mut acc = AccumulatorLayerStacks::<FT_OUT>::new();
             for move_text in ["7g7f", "3c3d", "8h2b+", "3a2b", "B*7g", "B*3c", "5i6h"] {
                 let mv = pos.to_move(Move::from_usi(move_text).unwrap()).unwrap();
                 assert!(pos.is_legal(mv));
@@ -1842,8 +1842,8 @@ mod tests {
         crate::nnue::reset_layer_stack_progress_kpabs_weights();
         crate::nnue::configure_layer_stack_routing(LayerStackBucketMode::ProgressKPAbs, 8, Some(8))
             .unwrap();
-        compare::<32>();
-        compare::<64>();
+        compare::<64, 32>();
+        compare::<1024, 64>();
         crate::nnue::reset_layer_stack_progress_buckets();
     }
 

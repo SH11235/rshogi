@@ -167,14 +167,14 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 |---|---|:---:|:---:|
 | activation (HalfKX) | `crelu` / `screlu` / `pairwise` | ✗ | ✓ |
 | ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
-| size (LS) | [対応する10構成](./nnue-supported-architectures.md#layerstacks)から選択 | ✗ | ✓ |
+| size (LS) | [対応する11構成](./nnue-supported-architectures.md#layerstacks)から選択 | ✗ | ✓ |
 | ext (LS) | `psqt` / `threat` / `psqt_threat` / `threat512` / `threat768` | ✓ | ✓ |
 
 - slot の省略は alias `edition-halfkx` / `edition-layerstacks` 以外では不可。全候補を
   dispatch したいときは `any` を書く。
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
-- `threat512` は 1536x16x32 / 1536x16x64 / 2304x16x64 で512列の Threat を使う静的 edition。
+- `threat512` は 1024x16x64 / 1536x16x32 / 1536x16x64 / 2304x16x64 で512列の Threat を使う静的 edition。
   `threat768` は 2304x16x64 で768列の Threat を使う。形式と変換は
   [`resize_nnue_threat`](../crates/tools/docs/resize_nnue_threat.md) を参照。
 - `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
@@ -432,23 +432,27 @@ tools (`rescore_psv` 等) も `--no-default-features` と atomic feature で
 ## L2=64 の LayerStacks
 
 `layerstacks-halfka_hm_merged-3072x16x64-none`、
-`layerstacks-halfka_hm_merged-2304x16x64-none` と
-`layerstacks-halfka_hm_merged-1536x16x64-none` は、L1 層の出力 16、L2 層の出力 64 (ヘッダーの `l2=16,l3=64`) の専用 edition。
-いずれも `nnue-progress-diff` を含む。FT 幅と L2 幅がモデルに一致する edition を選ぶ。
+`layerstacks-halfka_hm_merged-2304x16x64-none`、
+`layerstacks-halfka_hm_merged-1536x16x64-none`、
+`layerstacks-halfka_hm_merged-1024x16x64-none` は、L1 層の出力 16、L2 層の出力 64 (ヘッダーの `l2=16,l3=64`) の専用 edition。
+FT 幅と L2 幅がモデルに一致する edition を選ぶ。
 `edition-universal` はヘッダーから寸法を読み、L2=32 / 64 の両方を扱う。
 
 ```sh
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-3072x16x64-none --profile production
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-none --profile production
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1024x16x64-none --profile production
 ```
 
 Threat 付きの net は、FT 幅とヘッダーの `ThreatWidth` に合う edition を選ぶ。
-全幅の行には `ThreatWidth` 省略時と FT 幅を明記した場合が該当する。以下の edition は
-いずれも `nnue-progress-diff` を含む。
+全幅の行には `ThreatWidth` 省略時と FT 幅を明記した場合が該当する。
+この節で挙げる FT 幅 1536・2304・3072 の edition には `nnue-progress-diff` が含まれる。
 
 | FT 幅 | Threat 幅 | edition |
 |---:|---:|---|
+| 1024 | 全幅 | `layerstacks-halfka_hm_merged-1024x16x64-threat` |
+| 1024 | 512 | `layerstacks-halfka_hm_merged-1024x16x64-threat512` |
 | 1536 | 全幅 | `layerstacks-halfka_hm_merged-1536x16x64-threat` |
 | 1536 | 512 | `layerstacks-halfka_hm_merged-1536x16x64-threat512` |
 | 2304 | 全幅 | `layerstacks-halfka_hm_merged-2304x16x64-threat` |

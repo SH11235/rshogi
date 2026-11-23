@@ -901,7 +901,11 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "nnue-psqt", feature = "nnue-threat"))]
+#[cfg(all(
+    test,
+    feature = "nnue-threat",
+    any(feature = "nnue-psqt", feature = "layerstacks-1024x16x64")
+))]
 mod extension_tests {
     use super::*;
     use crate::nnue::expected_threat_width;
@@ -913,8 +917,10 @@ mod extension_tests {
     use crate::nnue::network_layer_stacks::NetworkLayerStacks;
 
     #[test]
-    fn prepacked_preserves_piece_ft_psqt_and_threat() {
-        const L1: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+    fn prepacked_preserves_piece_ft_and_extensions() {
+        const L1: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+            1024
+        } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
         } else if expected_threat_width(32) != 32 {
             768
@@ -922,15 +928,25 @@ mod extension_tests {
             32
         };
         let width = expected_threat_width(L1);
-        type Net = NetworkLayerStacks<L1, 8, 14, 32, HalfKaHmMergedSpec>;
+        const L2: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+            16
+        } else {
+            8
+        };
+        const L3: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+            64
+        } else {
+            32
+        };
+        type Net = NetworkLayerStacks<L1, L2, { 2 * (L2 - 1) }, 32, HalfKaHmMergedSpec, L3>;
         let fixture = super::tests::Fixture::new(SyntheticFtEncoding::Leb128Combined);
         let dimensions = HalfKaHmMergedSpec::DIMENSIONS;
         let base = build_synthetic_layer_stacks_with_ft_values(
             "HalfKaHmMerged",
             dimensions,
             L1,
-            8,
-            32,
+            L2,
+            L3,
             2,
             SyntheticFtConfig {
                 encoding: SyntheticFtEncoding::Leb128Combined,
@@ -942,7 +958,9 @@ mod extension_tests {
         let threat_dims = crate::nnue::threat_features::THREAT_DIMENSIONS;
         let profile = crate::nnue::threat_exclusion::THREAT_PROFILE_ID;
         let mut arch =
-            format!("{},PSQT=2,Threat={threat_dims},ThreatProfile={profile}", layout.architecture);
+            format!("{},Threat={threat_dims},ThreatProfile={profile}", layout.architecture);
+        #[cfg(feature = "nnue-psqt")]
+        arch.push_str(",PSQT=2");
         if width != L1 {
             use std::fmt::Write;
             write!(arch, ",ThreatWidth={width}").unwrap();
@@ -952,11 +970,14 @@ mod extension_tests {
         bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
         bytes.extend_from_slice(arch.as_bytes());
         bytes.extend_from_slice(&base[old_header_end..layout.feature_transformer.weights.end]);
-        for value in [-1234i32, 5678] {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        for index in 0..dimensions * 2 {
-            bytes.extend_from_slice(&((index as i32 % 257) - 128).to_le_bytes());
+        #[cfg(feature = "nnue-psqt")]
+        {
+            for value in [-1234i32, 5678] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for index in 0..dimensions * 2 {
+                bytes.extend_from_slice(&((index as i32 % 257) - 128).to_le_bytes());
+            }
         }
         bytes.extend_from_slice(&profile.to_le_bytes());
         bytes.extend((0..threat_dims * width).map(|index| ((index % 255) as i16 - 127) as u8));
@@ -985,14 +1006,17 @@ mod extension_tests {
                 .piece_weights()
                 .eq(packed.feature_transformer.piece_weights())
         );
-        assert_eq!(
-            original.feature_transformer.psqt_biases(),
-            packed.feature_transformer.psqt_biases()
-        );
-        assert_eq!(
-            original.feature_transformer.psqt_weights(),
-            packed.feature_transformer.psqt_weights()
-        );
+        #[cfg(feature = "nnue-psqt")]
+        {
+            assert_eq!(
+                original.feature_transformer.psqt_biases(),
+                packed.feature_transformer.psqt_biases()
+            );
+            assert_eq!(
+                original.feature_transformer.psqt_weights(),
+                packed.feature_transformer.psqt_weights()
+            );
+        }
         assert_eq!(
             &*original.feature_transformer.threat_weights,
             &*packed.feature_transformer.threat_weights
