@@ -200,6 +200,33 @@ impl DynamicAffine {
         debug_assert!(input.len() >= self.padded_input);
         debug_assert!(output.len() >= self.output_dim);
 
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        // SAFETY: `input` is re-sliced to `input_dim` and every weight row is a bounds-checked
+        // slice of `padded_input >= input_dim` elements. `end` is a multiple of 16 no larger
+        // than `input_dim`, so each 128-bit load stays in range.
+        unsafe {
+            use std::arch::x86_64::*;
+            let input = &input[..self.input_dim];
+            let end = self.input_dim / 16 * 16;
+            for (o, out) in output[..self.output_dim].iter_mut().enumerate() {
+                let row = &self.weights[o * self.padded_input..(o + 1) * self.padded_input];
+                let mut acc = _mm256_setzero_si256();
+                for i in (0..end).step_by(16) {
+                    let x = _mm256_cvtepu8_epi16(_mm_loadu_si128(input.as_ptr().add(i).cast()));
+                    let w = _mm256_cvtepi8_epi16(_mm_loadu_si128(row.as_ptr().add(i).cast()));
+                    acc = _mm256_add_epi32(acc, _mm256_madd_epi16(x, w));
+                }
+                let mut lanes = [0i32; 8];
+                _mm256_storeu_si256(lanes.as_mut_ptr().cast(), acc);
+                let mut sum = lanes.into_iter().fold(self.biases[o], i32::wrapping_add);
+                for (&x, &w) in input[end..].iter().zip(&row[end..self.input_dim]) {
+                    sum = sum.wrapping_add(i32::from(x) * i32::from(w));
+                }
+                *out = sum;
+            }
+            return;
+        }
+
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         // SAFETY: `input` covers `padded_input`, every weight row has exactly that padded
         // length, and the four-row/output loops only load or store complete 16-byte groups.
