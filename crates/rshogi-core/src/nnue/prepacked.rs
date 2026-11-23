@@ -904,7 +904,12 @@ mod tests {
 #[cfg(all(
     test,
     feature = "nnue-threat",
-    any(feature = "nnue-psqt", feature = "layerstacks-1024x16x64")
+    any(
+        feature = "nnue-psqt",
+        feature = "threat-width-512",
+        feature = "threat-width-768",
+        feature = "layerstacks-1024x16x64"
+    )
 ))]
 mod extension_tests {
     use super::*;
@@ -918,30 +923,30 @@ mod extension_tests {
 
     #[test]
     fn prepacked_preserves_piece_ft_and_extensions() {
+        const WIDE_L2: bool = cfg!(any(
+            feature = "layerstacks-1024x16x64",
+            feature = "layerstacks-1536x16x64",
+            feature = "layerstacks-2304x16x64"
+        ));
         const L1: usize = if cfg!(feature = "layerstacks-1024x16x64") {
             1024
         } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
-        } else if expected_threat_width(32) != 32 {
+        } else if cfg!(feature = "layerstacks-1536x16x64") {
+            1536
+        } else if expected_threat_width(64) != 64 {
             768
         } else {
-            32
+            // 評価経路の活性化は L1 が 64 の倍数であることを要求する。
+            64
         };
         let width = expected_threat_width(L1);
-        const L2: usize = if cfg!(feature = "layerstacks-1024x16x64") {
-            16
-        } else {
-            8
-        };
-        const L3: usize = if cfg!(feature = "layerstacks-1024x16x64") {
-            64
-        } else {
-            32
-        };
+        const L2: usize = if WIDE_L2 { 16 } else { 8 };
+        const L3: usize = if WIDE_L2 { 64 } else { 32 };
         type Net = NetworkLayerStacks<L1, L2, { 2 * (L2 - 1) }, 32, HalfKaHmMergedSpec, L3>;
         let fixture = super::tests::Fixture::new(SyntheticFtEncoding::Leb128Combined);
         let dimensions = HalfKaHmMergedSpec::DIMENSIONS;
-        let base = build_synthetic_layer_stacks_with_ft_values(
+        let mut fixture_model = build_synthetic_layer_stacks_with_ft_values(
             "HalfKaHmMerged",
             dimensions,
             L1,
@@ -952,13 +957,18 @@ mod extension_tests {
                 encoding: SyntheticFtEncoding::Leb128Combined,
                 values: SyntheticFtValues::SingleByteEven,
             },
-        )
-        .bytes;
+        );
+        let second_bucket = &fixture_model.buckets[1];
+        fixture_model.bytes[second_bucket.output_bias..second_bucket.output_weights]
+            .copy_from_slice(&(1i32 << 20).to_le_bytes());
+        let base = fixture_model.bytes;
         let layout = LayerStacksBinLayout::from_bytes(&base).unwrap();
         let threat_dims = crate::nnue::threat_features::THREAT_DIMENSIONS;
         let profile = crate::nnue::threat_exclusion::THREAT_PROFILE_ID;
-        let mut arch =
-            format!("{},Threat={threat_dims},ThreatProfile={profile}", layout.architecture);
+        let mut arch = format!(
+            "{},Threat={threat_dims},ThreatProfile={profile},ls_bucket=ownking:2",
+            layout.architecture
+        );
         #[cfg(feature = "nnue-psqt")]
         arch.push_str(",PSQT=2");
         if width != L1 {
@@ -999,6 +1009,8 @@ mod extension_tests {
         };
         for net in [&original, &packed] {
             assert_eq!(net.feature_transformer.piece_ft_storage(), expected_storage);
+            assert_eq!(net.bucket_spec(), Some("ownking:2".parse().unwrap()));
+            assert_eq!(net.feature_transformer.threat_weights.len(), threat_dims * width);
         }
         assert!(
             original
@@ -1021,5 +1033,19 @@ mod extension_tests {
             &*original.feature_transformer.threat_weights,
             &*packed.feature_transformer.threat_weights
         );
+        for (sfen, bucket) in [
+            ("4k4/9/9/9/9/9/9/9/4K4 b - 1", 0),
+            ("4k4/9/9/9/9/9/9/4K4/9 b - 1", 1),
+        ] {
+            let mut pos = crate::position::Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut acc = crate::nnue::accumulator_layer_stacks::AccumulatorLayerStacks::new();
+            original.feature_transformer.refresh_accumulator(&pos, &mut acc);
+            let expected = original.evaluate_with_bucket(&pos, &acc, bucket);
+            assert_ne!(expected, original.evaluate_with_bucket(&pos, &acc, 1 - bucket));
+            assert_eq!(original.evaluate(&pos, &acc), expected);
+            packed.feature_transformer.refresh_accumulator(&pos, &mut acc);
+            assert_eq!(packed.evaluate(&pos, &acc), expected);
+        }
     }
 }

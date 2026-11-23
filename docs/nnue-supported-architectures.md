@@ -127,12 +127,14 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 | 3072 | 16×32、16×64 |
 
 部分幅の Threat は固定 edition で扱います。`ThreatWidth=512` は 1024×16×64 / 1536×16×32 /
-1536×16×64 / 2304×16×64 の `threat512`、`ThreatWidth=768` は 2304×16×64 の
+1536×16×64 / 2304×16×64 の `threat512`、`ThreatWidth=768` は 1024×16×64 / 1536×16×64 / 2304×16×64 の
 `threat768` を選びます。`ThreatWidth` を省略したヘッダーは FT と同じ全幅を表します。
 
 ### 振り分け方式の設定
 
-学習時と同じ `LS_BUCKET_MODE` を指定します。
+ヘッダーに `ls_bucket=` があるモデルでは、その指定でバケットを選びます。
+`LS_BUCKET_MODE`、`LS_PROGRESS_BUCKETS`、`LS_PROGRESS_COEFF` は未指定にします。
+`ls_bucket=` がないモデルでは、学習時と同じ `LS_BUCKET_MODE` を指定します。
 
 | モデルの方式 | `LS_BUCKET_MODE` | 追加設定 |
 |--------------|-----------------|----------|

@@ -25,14 +25,13 @@ fn partial_threat_width_requires_supported_static_size() {
                     width,
                 ];
                 let supported = mode == "mode-specific"
-                    && (*size == "layerstacks-2304x16x64"
-                        || (width == "threat-width-512"
-                            && matches!(
-                                *size,
-                                "layerstacks-1024x16x64"
-                                    | "layerstacks-1536x16x32"
-                                    | "layerstacks-1536x16x64"
-                            )));
+                    && match *size {
+                        "layerstacks-1024x16x64"
+                        | "layerstacks-1536x16x64"
+                        | "layerstacks-2304x16x64" => true,
+                        "layerstacks-1536x16x32" => width == "threat-width-512",
+                        _ => false,
+                    };
                 assert_eq!(
                     validate_feature_combination(&lookup(&features)).is_ok(),
                     supported,

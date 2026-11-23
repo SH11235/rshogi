@@ -3355,7 +3355,7 @@ mod tests {
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
-    fn loader_rejects_wrong_threat_width_before_reading_ft() {
+    fn loader_checks_threat_width_before_reading_ft() {
         const N: usize = if cfg!(feature = "layerstacks-1024x16x64") {
             1024
         } else if cfg!(feature = "layerstacks-2304x16x64") {
@@ -3373,11 +3373,8 @@ mod tests {
             32
         };
         for width in [512, 768, N] {
-            if width == super::super::expected_threat_width(N) {
-                continue;
-            }
             let mut arch = format!(
-                "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720"
+                "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720,ls_bucket=ownking:2"
             );
             if width != N {
                 use std::fmt::Write;
@@ -3390,7 +3387,7 @@ mod tests {
             bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
             bytes.extend_from_slice(arch.as_bytes());
-            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(&2u32.to_le_bytes());
             let error = NetworkLayerStacks::<
                 N,
                 16,
@@ -3401,8 +3398,12 @@ mod tests {
             >::read(&mut std::io::Cursor::new(bytes))
             .err()
             .unwrap();
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-            assert!(error.to_string().contains("Threat width mismatch"), "{error}");
+            if width == super::super::expected_threat_width(N) {
+                assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+            } else {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert!(error.to_string().contains("Threat width mismatch"), "{error}");
+            }
         }
     }
 
@@ -3839,14 +3840,16 @@ mod tests {
                         #[cfg(feature = "nnue-threat")]
                         let (a, b) = if use_threat {
                             let threat = acc.get_threat(perspective as usize);
-                            (
-                                values[i].wrapping_add(super::super::threat_width::value::<N>(
-                                    threat, i,
-                                )),
-                                values[i + N / 2].wrapping_add(
-                                    super::super::threat_width::value::<N>(threat, i + N / 2),
-                                ),
-                            )
+                            let width = super::super::expected_threat_width(N);
+                            assert_eq!(threat.len(), width);
+                            if i < width / 2 {
+                                (
+                                    values[i].wrapping_add(threat[i]),
+                                    values[i + N / 2].wrapping_add(threat[width / 2 + i]),
+                                )
+                            } else {
+                                (values[i], values[i + N / 2])
+                            }
                         } else {
                             (values[i], values[i + N / 2])
                         };
@@ -3879,8 +3882,16 @@ mod tests {
 
     #[cfg(feature = "nnue-threat")]
     #[test]
-    fn synthetic_fused_threat_evaluate_matches_legacy_both_sides() {
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(true);
+    fn synthetic_threat_evaluation_matches_scalar_for_both_sides() {
+        if cfg!(feature = "layerstacks-1024x16x64") {
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(true);
+        } else if cfg!(feature = "layerstacks-1536x16x64") {
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(true);
+        } else if cfg!(feature = "layerstacks-2304x16x64") {
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(true);
+        } else {
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(true);
+        }
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト

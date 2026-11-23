@@ -986,6 +986,7 @@ mod tests {
             "layerstacks-halfka_hm_merged-1024x16x64-none",
             "layerstacks-halfka_hm_merged-1024x16x64-threat",
             "layerstacks-halfka_hm_merged-1024x16x64-threat512",
+            "layerstacks-halfka_hm_merged-1024x16x64-threat768",
             "layerstacks-halfka_hm_merged-2304x16x64-none",
             "layerstacks-halfka_hm_merged-2304x16x64-threat",
             "layerstacks-halfka_hm_merged-2304x16x64-threat512",
@@ -994,6 +995,7 @@ mod tests {
             "layerstacks-halfka_hm_merged-1536x16x64-none",
             "layerstacks-halfka_hm_merged-1536x16x64-threat",
             "layerstacks-halfka_hm_merged-1536x16x64-threat512",
+            "layerstacks-halfka_hm_merged-1536x16x64-threat768",
         ] {
             let edition = normalize_edition(edition);
             assert!(core_editions.contains(&edition), "{edition}");

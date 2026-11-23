@@ -3153,15 +3153,18 @@ mod tests {
             1024
         } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
-        } else if cfg!(feature = "threat-width-512") {
+        } else if cfg!(any(feature = "threat-width-512", feature = "threat-width-768")) {
             1536
         } else {
             64
         };
         let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
         ft.has_threat = true;
+        let width = super::super::expected_threat_width(N);
+        assert_eq!(ft.threat_weights.len(), THREAT_DIMENSIONS * width);
+        assert_eq!(AccumulatorLayerStacks::<N>::new().get_threat(0).len(), width);
         for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
-            *w = ((i * 73 + i / threat_width(N) * 19) % 255) as i8;
+            *w = ((i * 73 + i / width * 19) % 255) as i8;
         }
         for (i, w) in ft.weights.make_mut().iter_mut().enumerate() {
             *w = ((i * 17 + i / N * 23) % 511) as i16 - 255;
@@ -3378,15 +3381,17 @@ mod tests {
             1024
         } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
-        } else if cfg!(feature = "threat-width-512") {
+        } else if cfg!(any(feature = "threat-width-512", feature = "threat-width-768")) {
             1536
         } else {
             256
         };
         let mut ft = FeatureTransformerLayerStacks::<N, TestSpec>::for_accumulator_tests();
         ft.has_threat = true;
+        let width = super::super::expected_threat_width(N);
+        assert_eq!(ft.threat_weights.len(), THREAT_DIMENSIONS * width);
         for (i, w) in ft.threat_weights.make_mut().iter_mut().enumerate() {
-            *w = (i as u8).wrapping_mul(73).wrapping_add((i / threat_width(N)) as u8) as i8;
+            *w = (i as u8).wrapping_mul(73).wrapping_add((i / width) as u8) as i8;
         }
         for sfen in [
             "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
@@ -3395,7 +3400,7 @@ mod tests {
         ] {
             let mut pos = Position::new();
             pos.set_sfen(sfen).unwrap();
-            let mut expected = [super::super::threat_width::zero::<N>(); 2];
+            let mut expected = [vec![0i16; width], vec![0i16; width]];
             for perspective in [Color::Black, Color::White] {
                 threat_features::for_each_active_threat_index(
                     &pos,
@@ -3404,7 +3409,7 @@ mod tests {
                     |index| {
                         for (a, &w) in expected[perspective.index()]
                             .iter_mut()
-                            .zip(ft.threat_weight_row(index))
+                            .zip(&ft.threat_weights[index * width..(index + 1) * width])
                         {
                             *a = a.wrapping_add(i16::from(w));
                         }
@@ -3413,13 +3418,16 @@ mod tests {
             }
             let mut actual = AccumulatorLayerStacks::<N>::new();
             ft.refresh_accumulator(&pos, &mut actual);
-            assert_eq!(actual.threat_accumulation, expected);
+            assert_eq!(actual.threat_accumulation.each_ref().map(|v| v.as_slice()), expected);
             let mut cache = AccumulatorCacheLayerStacks::<N>::new();
             ft.refresh_accumulator_with_cache(&pos, &mut actual, &mut cache);
-            assert_eq!(actual.threat_accumulation, expected);
+            assert_eq!(actual.threat_accumulation.each_ref().map(|v| v.as_slice()), expected);
             let mut stack = AccumulatorStackLayerStacks::<N>::new();
             ft.update_with_threat_ancestor(&pos, &mut stack, Some(&mut cache));
-            assert_eq!(stack.current().accumulator.threat_accumulation, expected);
+            assert_eq!(
+                stack.current().accumulator.threat_accumulation.each_ref().map(|v| v.as_slice()),
+                expected
+            );
         }
     }
 
