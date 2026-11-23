@@ -93,7 +93,7 @@ cargo run --release -p tools --bin shuffle_psv -- \
 `gensfen` は終了時に局面数を表示し、指定先へ PSV と結果 JSONL を保存します。
 `search-tree-sample` feature では、探索木内の局面を別の PSV に採取することもできます。
 採取した局面はマーカーを保持したまま再評価・展開できます。
-[rescore_psv](docs/rescore_psv.md) は ONNX の全 PSV への追記再開時に既存出力を照合します。
+[rescore_psv](docs/rescore_psv.md) は ONNX の全 PSV への追記再開時に既存出力を照合します。valueだけのONNX（`output_policy`なし）も読みます。
 [expand_psv_from_policy](docs/expand_psv_from_policy.md) は展開先の局面にも親のマーカーを引き継ぎます。
 LayerStacks の routing・進行度係数が必要なモデルは
 [起動時の設定条件](docs/nnue-routing.md#起動時の設定条件)に従って指定してください。
