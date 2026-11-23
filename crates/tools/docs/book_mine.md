@@ -262,7 +262,7 @@ book_mine tree serve --state /path/to/state --out-root /path/to/trees \
 
 スレッド数は読み条件の指紋に含まれます。`--engine-option Threads=N` を併記する場合は `--threads` と同じ値を指定してください。2 以上では、同じ読み条件でも探索ごとに評価値や読み筋が変わることがあります。そのため同じ条件で読んだ台帳どうしを合流すると、同じ局面の値の違いが食い違いとして扱われます (`import-journal` の既定の `--on-conflict reject` では止まります)。木の標準の読みには既定の 1 を使ってください。
 
-指紋が違っても、台帳は条件の違う読みを使い回します。`require_condition` の無い木や `borrow value` は、同じ局面に複数の読みがあると `nodes_limit` の大きい読みを優先し、`import-journal` は既定で全条件の読みを取り込みます。標準の読みと混ぜたくない 2 以上の読みは、別の state・別の台帳・別の出力先で読み、標準の台帳へ取り込まず、その木を標準の元データに登録しないでください。取り込む場合は `--fingerprint` か `--exclude-readings` で選びます。同時に全 worker が探索するときのスレッド数は、稼働中の worker 数 × `--threads` です。
+指紋が違っても、台帳は条件の違う読みを使い回します。`require_condition` の無い木は、自分の読み条件と同じ指紋の読みが無い局面で、別の条件の読みのうち `nodes_limit` の大きい読みを使います。`borrow value` も `--fingerprint` を省くと同じ選び方をします (指定すればその条件の行だけを読みます)。`import-journal` は既定で全条件の読みを取り込みます。標準の読みと混ぜたくない 2 以上の読みは、別の state・別の台帳・別の出力先で読み、標準の台帳へ取り込まず、その木を標準の元データに登録しないでください。取り込む場合は `--fingerprint` か `--exclude-readings` で選びます。同時に全 worker が探索するときのスレッド数は、稼働中の worker 数 × `--threads` です。
 
 `--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--extend` (0、0〜200)・`--extend-rounds` (1、0〜10)・`--settle-rounds` (0、0〜50)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件は state に固定しません。エンジン・モデル・SPSA パラメータ・nodes・MultiPV・千日手の値・Hash・Threads を変えても、同じ state と台帳で再開できます。保存済みの読みは、それぞれ読んだときの条件を保持します。
 
