@@ -158,6 +158,9 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 
 既定の build は `edition-universal` で、NNUE の寸法をモデルの header から読む汎用の実装を使う。
 1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build の方が速い。
+rshogi-core の NNUE の評価・探索を直接呼ぶほかのツール (`gensfen` の NativeBackend、`rescore_hcpe`、
+`yardstick_label`、`label_bench_positions`、`preprocess_psv`) も `--bin` を替えて同じ指定で build できる。
+`--no-default-features` で ONNX のモードも外れるので、ONNX も使う build には `dlshogi-onnx` を足す。
 
 `--no-default-features` を付けて、その構成の feature だけを指定する。各軸の slot は 1 つずつ選ぶ。
 `--target-dir` を分けると、汎用の build と並べて置ける。
@@ -184,7 +187,9 @@ cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-ls1
 ```
 
 上の 2 つの build では、水匠5 と progresskpabs の LayerStacks の net を深さ 9 の探索でリスコアした出力が、
-汎用の build と byte 単位で一致した。ほかの構成で同じ値になることは試験していないので、
+汎用の build と byte 単位で一致した。`gensfen` も同じ feature の build で、
+progresskpabs の LayerStacks 1536x16x32 の net と同じ seed の対局から、汎用の build と同じ教師局面を出した
+(並列の対局では出力の順が変わるので、局面の集合で比べた)。ほかの構成で同じ値になることは試験していないので、
 教師を作る前に少数の局面で汎用の build と出力を比べる。
 
 HalfKX は rshogi-core の preset edition (`rshogi-core/edition-halfkp-crelu` など、

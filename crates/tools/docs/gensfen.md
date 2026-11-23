@@ -14,6 +14,23 @@ cargo build -p tools --bin gensfen --release
 
 リリースビルドのバイナリは `target/release/gensfen` に生成される。
 
+この既定の build は、NNUE の寸法をモデルの header から読む汎用の実装を使う。
+NativeBackend で 1 つの構成の NNUE だけを使うなら、その構成の静的な実装だけを入れた build の方が
+対局が速い。LayerStacks HalfKA_hm 1536x16x32 (拡張なし) の例:
+
+```bash
+cargo build --release -p tools --bin gensfen --target-dir target/gensfen-ls1536 \
+  --no-default-features \
+  --features rshogi-core/layerstack-arch,layerstacks-1536x16x32,ft-halfka_hm_merged
+```
+
+バイナリは `target/gensfen-ls1536/release/gensfen` に生成される。
+`--resume` は実行ファイルが変わると続行を拒否するので ([生成条件 fingerprint](#生成条件-fingerprint))、
+汎用の build で始めた生成の途中では替えず、新しい生成から使う。
+ほかの構成の feature と、汎用の build と同じ値を出すための注意は
+[rescore_psv の単一構成の build](rescore_psv.md#単一構成の-build) を参照。
+USI モード (`--native=false`) の速さは外部エンジンの build で決まり、この指定は効かない。
+
 ## クイックスタート
 
 ```bash
