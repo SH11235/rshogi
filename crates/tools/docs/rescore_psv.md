@@ -156,8 +156,14 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 
 ### 単一構成の build
 
-既定の build は `edition-universal` で、NNUE の寸法をモデルの header から読む汎用の実装を使う。
-1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build の方が速い。
+既定の `nnue-arch` は汎用実装と 1536x16x32・5 種の FT の静的実装を含み、
+対応する拡張なしの LayerStacks を静的に読む。PSQT・Threat・effect bucket・
+`ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使う。
+別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読める。
+NativeBackend の読み込みログに `NNUE LayerStack implementation=static|dynamic` を出す。
+
+1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build がさらに速い。
+単一構成の build では、既定にない寸法や PSQT・Threat つきの net も静的に読める。
 rshogi-core の NNUE の評価・探索を直接呼ぶほかのツール (`gensfen` の NativeBackend、`rescore_hcpe`、
 `yardstick_label`、`label_bench_positions`、`preprocess_psv`) も `--bin` を替えて同じ指定で build できる。
 `--no-default-features` で ONNX のモードも外れるので、ONNX も使う build には `dlshogi-onnx` を足す。

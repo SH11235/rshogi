@@ -387,9 +387,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
     eprintln!("Loading NNUE: {:?}", cli.nnue);
-    // 静的 LayerStacks network を直接読む。`NNUENetwork::load` は feature 統合で
-    // `nnue-runtime-dimensions` が有効になったビルドでは dynamic 版を返すため、
-    // 静的 net の中間層を dump する本ツールでは使えない。
+    // 中間層を dump するため静的 network の内部にアクセスする。
     let ls_net = NNUENetwork::load_static_layer_stacks(&cli.nnue)
         .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
     if ls_net.bucket_spec().is_some() {

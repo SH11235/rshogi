@@ -65,6 +65,12 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 既定で有効です。TUI・ONNX 依存を外す場合は
 `--no-default-features --features nnue-arch` をビルド引数に追加します。
 `prepack_nnue` は追加の `--features prepacked-nnue` が必要です。
+既定の `nnue-arch` は汎用実装と 1536x16x32・5 種の FT の静的実装を含み、
+対応する拡張なしの LayerStacks を静的に読みます。PSQT・Threat・effect bucket・
+`ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使います。
+別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読めます。
+gensfen と rescore_psv の NativeBackend は読み込みログに
+`NNUE LayerStack implementation=static|dynamic` を出力します。
 1 つの NNUE 構成だけを入れた速い build (`rescore_psv`・`gensfen` など、rshogi-core の NNUE の評価・探索を直接呼ぶツール) は
 [rescore_psv の単一構成の build](docs/rescore_psv.md#単一構成の-build) を参照してください。
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` / `eval_sfens` / `nnue_saturation` /

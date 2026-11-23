@@ -741,10 +741,7 @@ fn run_eval(args: &EvalArgs) -> Result<()> {
         args.progress_buckets,
         &args.eval_file,
     )?;
-    // acc_cache (Finny Tables) は静的 LayerStacks variant 専用の API で、
-    // runtime-dimensions ビルドでは同じ net でも DynamicLayerStacks として load され
-    // `as_layer_stacks()` が panic する (`is_layer_stacks()` は Dynamic でも true)。
-    // `evaluate_dispatch` は None でも全 variant を正しく評価するため cache は使わない。
+    // cache は静的 variant 専用のため、汎用 variant にも対応する評価では使わない。
     let mut acc_cache: Option<LayerStacksAccCache> = None;
 
     let mut builder = EvalMetricBuilder::default();

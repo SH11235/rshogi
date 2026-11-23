@@ -1143,6 +1143,9 @@ fn main() -> Result<()> {
         init_nnue(nnue).context("Failed to load NNUE model")?;
         eprintln!("NNUE model loaded: {}", nnue.display());
         let network = get_network().context("NNUE was not initialized")?;
+        if let Some(implementation) = network.layer_stack_implementation() {
+            eprintln!("NNUE LayerStack implementation={implementation}");
+        }
         let mut loaded_coeff_sha: Option<String> = None;
         let mode = cli
             .ls_bucket_mode

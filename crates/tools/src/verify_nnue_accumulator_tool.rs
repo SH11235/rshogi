@@ -188,10 +188,7 @@ pub fn run() -> Result<()> {
             cli.ls_bucket_mode
         )
     })?;
-    // NNUE モデル読み込み。
-    // 静的 LayerStacks network を直接読む。`NNUENetwork::load` は feature 統合で
-    // `nnue-runtime-dimensions` が有効になったビルドでは dynamic 版を返すため、
-    // 静的 net の accumulator 実装を検証する本ツールでは使えない。
+    // 静的 network の accumulator 実装を検証する。
     let net = NNUENetwork::load_static_layer_stacks(&cli.nnue_file).with_context(|| {
         format!("静的 LayerStacks NNUE を読み込めません: {}", cli.nnue_file.display())
     })?;
