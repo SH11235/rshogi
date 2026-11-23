@@ -6,6 +6,25 @@ SFEN テキスト（1 行 1 局面）を LayerStacks NNUE で静的評価し、T
 
 progress 係数の保持・再読込みの契約は [routing 対応表](nnue-routing.md) を参照してください。
 
+### ヘッダに `ls_bucket=` があるネット
+
+`ls_bucket=ownking:2/3/7+oppking:2/3/7` のような spec をモデルが持つ場合は、
+エンジンと同じ routing で bucket を自動選択する。
+
+```sh
+cargo run --release -p tools --bin eval_sfens -- \
+  --nnue "$SHOGI_DATA/nnue/<spec-model>.bin" \
+  --sfens sfens.txt
+```
+
+`--bucket-mode` は省略できる。`progresskpabs` を明示した場合もヘッダの spec を使う。
+`--bucket-mode progresskpabsq16`、`--progress-buckets`、`--progress-coeff` は競合エラーになる。
+
+### ヘッダに spec がないネット
+
+ネットに spec がない場合は `--progress-buckets` が必須で、`--bucket-mode` は
+`progresskpabs`（既定）または `progresskpabsq16` を選ぶ。
+
 ```sh
 cargo run --release -p tools --bin eval_sfens -- \
   --nnue "$SHOGI_DATA/nnue/<model>.bin" \
@@ -15,10 +34,8 @@ cargo run --release -p tools --bin eval_sfens -- \
   --count 10
 ```
 
-ネットに `ls_bucket=` がある場合は、その spec で自動的に bucket を選ぶ。
-`--bucket-mode`、`--progress-buckets`、`--progress-coeff` を指定すると競合エラーになる。
-ネットに spec がない場合は `--progress-buckets` が必須で、`--bucket-mode` は
-`progresskpabs`（既定）または `progresskpabsq16` を選ぶ。
+### 出力と診断
+
 `--count` の既定値は 10 で、入力の先頭から読む行数を制限する（空行も数えるが評価はしない）。
 出力列は `sfen`、`bucket`、`raw`、`score`（歩=90 の内部スケール）、
 `score_cp`（歩=100 の cp）。
@@ -36,6 +53,17 @@ Linux で共有メモリの新規確保に失敗した重みは、プロセス�
 `--features layerstacks-1024x16x64`、`--features layerstacks-1536x16x64`、
 `--features layerstacks-2304x16x64` または `--features layerstacks-3072x16x64`
 をビルド時に追加する。L2 の中間出力も指定した幅で計算する。
+
+HalfKA_hm merged 1536x16x64、Threat 幅 512 のモデル向けのビルド例。
+
+```sh
+cargo build --release -p tools --bin eval_sfens --no-default-features \
+  --features layerstack-arch,layerstacks-1536x16x64,ft-halfka_hm_merged,nnue-threat,rshogi-core/threat-width-512,rshogi-core/mode-specific
+```
+
+Threat 付きモデルでは、`score` (と `score_cp`) はエンジンと同じく Threat を含むが、TSV の `raw` 列と
+`--dump-debug-first` の中間値は駒特徴だけから計算する。tatara の `eval_sfen` と照合するときは `bucket` と `score` を比べ、
+`raw` は Threat・PSQT なしのモデルでだけ比べる。
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。
 

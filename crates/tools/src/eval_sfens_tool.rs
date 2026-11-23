@@ -39,7 +39,7 @@ struct Cli {
     #[arg(long, default_value_t = 10)]
     count: usize,
 
-    /// Output bucket mode (progresskpabs / progresskpabsq16)
+    /// 進行度方式（既定: progresskpabs）。ヘッダに ls_bucket= があれば spec を使う。
     #[arg(long, value_enum)]
     bucket_mode: Option<BucketMode>,
 
@@ -391,13 +391,14 @@ pub fn run() -> Result<()> {
     let ls_net = NNUENetwork::load_static_layer_stacks(&cli.nnue)
         .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
     if ls_net.bucket_spec().is_some() {
-        if cli.bucket_mode.is_some()
-            || cli.progress_buckets.is_some()
-            || cli.progress_coeff.is_some()
-        {
-            anyhow::bail!(
-                "NNUE ls_bucket routing conflicts with --bucket-mode, --progress-buckets or --progress-coeff"
-            );
+        if matches!(cli.bucket_mode, Some(BucketMode::ProgressKpabsQ16)) {
+            anyhow::bail!("NNUE ls_bucket routing conflicts with --bucket-mode progresskpabsq16");
+        }
+        if cli.progress_buckets.is_some() {
+            anyhow::bail!("NNUE ls_bucket routing conflicts with --progress-buckets");
+        }
+        if cli.progress_coeff.is_some() {
+            anyhow::bail!("NNUE ls_bucket routing conflicts with --progress-coeff");
         }
     } else {
         let buckets = cli

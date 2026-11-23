@@ -80,6 +80,7 @@ gensfen と rescore_psv の NativeBackend は読み込みログに
 [`eval_sfens`](docs/eval_sfens.md)、[`nnue_saturation`](docs/nnue_saturation.md)、
 [`bench_nnue_eval`](docs/bench_nnue_eval.md) は、ネットに `ls_bucket=` がある場合に
 その routing を自動選択します。LayerStacks は最大 64 bucket（PSQT 付きは最大 32）、`ls_bucket=` は最大 3 軸です。
+`eval_sfens` は既定の `--bucket-mode progresskpabs` を明示した場合もヘッダの spec を使います。
 
 ## クイックスタート
 

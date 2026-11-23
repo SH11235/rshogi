@@ -10,9 +10,12 @@ native 評価経路で選べる mode は `progresskpabs`（tatara の f32）、`
 `bench_nnue_eval`、`verify_nnue_accumulator`、`ek_testset`、`nyugyoku_metrics` です。
 
 `eval_sfens`、`nnue_saturation`、`bench_nnue_eval` は、ネットのヘッダに `ls_bucket=` が
-ある場合、USI と同じ spec で bucket を自動選択します。`--bucket-mode`、
-`--progress-buckets`、`--progress-coeff`（`bench_nnue_eval` では各オプション名に
-`ls-` が付く）を指定すると競合エラーになります。
+ある場合、USI と同じ spec で bucket を自動選択します。`--progress-buckets` と
+`--progress-coeff`（`bench_nnue_eval` では各オプション名に `ls-` が付く）は
+競合エラーになります。`eval_sfens` は `--bucket-mode progresskpabs` を明示しても
+spec を使い、`--bucket-mode progresskpabsq16` は競合エラーになります。
+`nnue_saturation` の `--bucket-mode` と `bench_nnue_eval` の `--ls-bucket-mode` は
+明示すると競合エラーになります。
 
 spec のないネットでは、`eval_sfens` と `nnue_saturation` の `--bucket-mode` に
 `progresskpabs`（既定）または `progresskpabsq16` を指定できます。

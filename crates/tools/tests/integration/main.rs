@@ -45,6 +45,13 @@ mod tournament_shutdown_integration;
 
 mod csa_terminal_outcomes;
 
+#[cfg(all(
+    feature = "layerstack-arch",
+    feature = "layerstacks-1536x16x64",
+    feature = "ft-halfka_hm_merged"
+))]
+mod eval_sfens_spec;
+
 mod preprocess_output_safety;
 
 mod data_output_safety;
