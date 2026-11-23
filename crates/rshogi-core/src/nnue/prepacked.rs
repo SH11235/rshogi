@@ -934,10 +934,11 @@ mod extension_tests {
             2304
         } else if cfg!(feature = "layerstacks-1536x16x64") {
             1536
-        } else if expected_threat_width(32) != 32 {
+        } else if expected_threat_width(64) != 64 {
             768
         } else {
-            32
+            // 評価経路の活性化は L1 が 64 の倍数であることを要求する。
+            64
         };
         let width = expected_threat_width(L1);
         const L2: usize = if WIDE_L2 { 16 } else { 8 };
