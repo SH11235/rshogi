@@ -6209,6 +6209,9 @@ fn initialize_native_backend(
 ) -> Result<Option<usize>> {
     init_nnue_from_bytes(eval_bytes).map_err(|e| anyhow!("NNUE init failed: {e}"))?;
     eprintln!("NativeBackend: NNUE loaded from {}", eval_path.display());
+    if let Some(implementation) = get_network().and_then(|net| net.layer_stack_implementation()) {
+        eprintln!("NativeBackend: NNUE LayerStack implementation={implementation}");
+    }
     let layer_stack_buckets =
         get_network().as_deref().and_then(|network| network.layer_stack_num_buckets());
     let mode = bucket_mode.map(parse_native_layer_stack_bucket_mode).transpose()?;

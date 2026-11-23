@@ -28,8 +28,9 @@ cargo build -p tools --bin yardstick_label --release \
   --features layerstacks-1536x16x32,nnue-threat,ft-halfka_hm_merged
 ```
 
-LS サイズ slot（`layerstacks-1536x16x32` など）は同時に 1 つだけ有効にします。default feature は
-1536 を含むため、別サイズ（1024 等）のモデルを使う時は `--no-default-features` で切り替えます。
+default feature は LS サイズ slot として `layerstacks-1536x16x32`・`layerstacks-1536x16x64`・
+`layerstacks-2304x16x64` を含みます。それ以外のサイズ（1024 等）や Threat モデルを使う時は
+`--no-default-features` で、そのモデルのサイズの slot を指定します。
 
 ONNX labeler モード（`--onnx-model`）は `dlshogi-onnx` feature（default 有効）でビルドすれば動きます
 （NNUE arch には依存しないので default build で可）。

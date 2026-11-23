@@ -460,6 +460,68 @@ pub enum NNUENetwork {
     LayerStacks(Arc<LayerStacksNetwork>),
 }
 
+#[cfg(all(feature = "nnue-runtime-dimensions", feature = "layerstack-arch"))]
+fn layer_stacks_uses_static_slot<R: Read + Seek>(
+    reader: &mut R,
+    arch_override: NNUEArchitectureOverride,
+    packed: bool,
+) -> io::Result<bool> {
+    // progress-diff と effect は静的側の評価が汎用側と異なり得る。
+    // override と packed は専用の読み込み経路で解釈する。
+    if cfg!(feature = "nnue-progress-diff")
+        || cfg!(feature = "nnue-effect-bucket")
+        || !matches!(arch_override, NNUEArchitectureOverride::Auto)
+        || packed
+    {
+        return Ok(false);
+    }
+    reader.seek(SeekFrom::Start(0))?;
+    let result = (|| {
+        let mut buf = [0; 4];
+        reader.read_exact(&mut buf)?;
+        let version = u32::from_le_bytes(buf);
+        reader.read_exact(&mut buf)?;
+        reader.read_exact(&mut buf)?;
+        let len = u32::from_le_bytes(buf) as usize;
+        if len == 0 || len > MAX_ARCH_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid architecture string length",
+            ));
+        }
+        let mut bytes = vec![0; len];
+        reader.read_exact(&mut bytes)?;
+        let arch = std::str::from_utf8(&bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let buckets = if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS {
+            reader.read_exact(&mut buf)?;
+            u32::from_le_bytes(buf) as usize
+        } else {
+            super::constants::DEFAULT_NUM_BUCKETS
+        };
+        let routing = super::bucket_spec::BucketRouting::from_arch(arch, buckets)?;
+        let invalid = |e| io::Error::new(io::ErrorKind::InvalidData, e);
+        let threat = super::spec::validate_layer_stacks_architecture_header(arch)
+            .map_err(invalid)?
+            .unwrap_or(0);
+        let feature = super::spec::detect_layer_stacks_feature(arch).map_err(invalid)?;
+        let dims = super::spec::parse_arch_dimensions(arch);
+        // 汎用 reader が寸法省略を受理しない場合は静的側にも振り分けない。
+        if super::spec::validate_layer_stacks_dimensions(dims.0, dims.1, dims.2).is_err() {
+            return Ok(false);
+        }
+        // PSQT・Threat と header の routing は静的側で同じ評価を保証できない。
+        Ok(!arch.contains("PSQT=")
+            && !arch.contains("ThreatProfile=")
+            && threat == 0
+            && routing.spec().is_none()
+            && super::dynamic_layer_stacks::static_compatible_input_dimensions(arch, feature)
+            && super::network_layer_stacks::static_slot_available(feature, dims))
+    })();
+    reader.seek(SeekFrom::Start(0))?;
+    result
+}
+
 impl NNUENetwork {
     /// 重みを含めて丸ごと複製する。重みの確保に失敗したら abort せずに `OutOfMemory` を返す。
     ///
@@ -626,11 +688,8 @@ impl NNUENetwork {
 
     /// 静的 (const-generic) LayerStacks network を直接読み込む。
     ///
-    /// `load` は `nnue-runtime-dimensions` が有効なビルドでは LayerStacks net を
-    /// `Self::DynamicLayerStacks` として返す。cargo の feature 統合で
-    /// `nnue-runtime-dimensions` が有効になるビルドでも静的 `LayerStacksNetwork` を
-    /// 必要とする呼び出し元 (静的 net の内部構造を直接参照する診断・解析系) はこの API を
-    /// 使う。engine の評価経路 (`load` / `read`) の挙動は変えない。
+    /// 汎用実装を含む build でも静的 `LayerStacksNetwork` を直接必要とする
+    /// 診断・解析系の呼び出し元はこの API を使う。
     ///
     /// 非 LayerStacks net を渡した場合は `InvalidData` エラーを返す。
     #[cfg(feature = "layerstack-arch")]
@@ -858,6 +917,23 @@ impl NNUENetwork {
                     effective_feature_set,
                     FeatureSet::LayerStacks | FeatureSet::HalfKaHmMergedEffectBucket
                 ) {
+                    #[cfg(all(feature = "nnue-runtime-dimensions", feature = "layerstack-arch"))]
+                    {
+                        reader.seek(SeekFrom::Start(0))?;
+                        #[cfg(feature = "prepacked-nnue")]
+                        let has_packed = packed.is_some();
+                        #[cfg(not(feature = "prepacked-nnue"))]
+                        let has_packed = false;
+                        if layer_stacks_uses_static_slot(reader, arch_override, has_packed)? {
+                            let network = LayerStacksNetwork::read_auto_dims_with_source(
+                                reader,
+                                None,
+                                #[cfg(feature = "prepacked-nnue")]
+                                packed,
+                            )?;
+                            return Ok(Self::LayerStacks(Arc::new(network)));
+                        }
+                    }
                     if cfg!(feature = "nnue-runtime-dimensions") {
                         #[cfg(feature = "nnue-runtime-dimensions")]
                         {
@@ -1068,6 +1144,17 @@ impl NNUENetwork {
         }
     }
 
+    /// LayerStacks なら `"static"` または `"dynamic"`、それ以外なら `None` を返す。
+    pub fn layer_stack_implementation(&self) -> Option<&'static str> {
+        match self {
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            Self::DynamicLayerStacks(_) => Some("dynamic"),
+            #[cfg(feature = "layerstack-arch")]
+            Self::LayerStacks(_) => Some("static"),
+            _ => None,
+        }
+    }
+
     /// LayerStacks ネットに記録された bucket spec を返す。
     pub fn layer_stack_bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
         match self {
@@ -1135,7 +1222,9 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.architecture_name(),
             Self::HalfKaHmSplit(net) => net.architecture_name(),
             Self::HalfKP(net) => net.architecture_name(),
-            #[cfg(feature = "layerstack-arch")]
+            #[cfg(all(feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
+            Self::LayerStacks(net) => net.architecture_spec().name(),
+            #[cfg(all(feature = "layerstack-arch", not(feature = "nnue-runtime-dimensions")))]
             Self::LayerStacks(_) => "LayerStacks".to_string(),
         }
     }
@@ -2632,6 +2721,65 @@ mod tests {
     use super::*;
     use crate::nnue::constants::DEFAULT_NUM_BUCKETS;
     use crate::position::SFEN_HIRATE;
+
+    #[cfg(all(
+        feature = "nnue-runtime-dimensions",
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32",
+        feature = "ft-halfka_hm_merged"
+    ))]
+    #[test]
+    fn static_dispatch_rejects_unsupported_headers() {
+        fn header(arch: &str) -> Cursor<Vec<u8>> {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(arch.as_bytes());
+            bytes.extend_from_slice(&8u32.to_le_bytes());
+            Cursor::new(bytes)
+        }
+        let base = "Features=HalfKaHmMerged[73305->1536x2],LayerStacks,l2=16,l3=32";
+        for arch in [
+            base.replace("1536x2", "128x2"),
+            format!("{base},PSQT=8"),
+            format!("{base},ThreatProfile=0"),
+            format!("{base},ls_bucket=ownking:2/3/4/5/6/7/8"),
+        ] {
+            let mut reader = header(&arch);
+            assert!(
+                !layer_stacks_uses_static_slot(&mut reader, NNUEArchitectureOverride::Auto, false)
+                    .unwrap()
+            );
+            assert_eq!(reader.position(), 0);
+        }
+        let mut reader = header(base);
+        assert_eq!(
+            layer_stacks_uses_static_slot(&mut reader, NNUEArchitectureOverride::Auto, false)
+                .unwrap(),
+            !cfg!(feature = "nnue-progress-diff") && !cfg!(feature = "nnue-effect-bucket")
+        );
+        assert!(
+            !layer_stacks_uses_static_slot(
+                &mut reader,
+                NNUEArchitectureOverride::LayerStacks,
+                false
+            )
+            .unwrap()
+        );
+        assert!(
+            !layer_stacks_uses_static_slot(&mut reader, NNUEArchitectureOverride::Auto, true)
+                .unwrap()
+        );
+        assert!(
+            layer_stacks_uses_static_slot(
+                &mut Cursor::new(vec![0]),
+                NNUEArchitectureOverride::Auto,
+                false
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn progress_weights_snapshot_survives_replacement_and_reset() {

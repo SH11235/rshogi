@@ -1646,6 +1646,19 @@ fn invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
 
+#[cfg(feature = "layerstack-arch")]
+pub(super) fn static_compatible_input_dimensions(arch: &str, feature: FeatureSet) -> bool {
+    let feature = match feature {
+        FeatureSet::HalfKP => RuntimeLsFeature::HalfKP,
+        FeatureSet::HalfKaHmMerged => RuntimeLsFeature::HalfKaHmMerged,
+        FeatureSet::HalfKaSplit => RuntimeLsFeature::HalfKaSplit,
+        FeatureSet::HalfKaMerged => RuntimeLsFeature::HalfKaMerged,
+        FeatureSet::HalfKaHmSplit => RuntimeLsFeature::HalfKaHmSplit,
+        _ => return false,
+    };
+    parse_ft_input_dimensions(arch, feature, 0).is_ok()
+}
+
 fn parse_ft_input_dimensions(
     arch: &str,
     feature: RuntimeLsFeature,
@@ -1996,6 +2009,337 @@ mod tests {
         compare::<64, 32>();
         compare::<1024, 64>();
         crate::nnue::reset_layer_stack_progress_buckets();
+    }
+
+    #[cfg(all(
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32",
+        feature = "ft-halfka_hm_merged"
+    ))]
+    #[test]
+    fn static_dispatch_matches_dynamic() {
+        use crate::nnue::accumulator_layer_stacks::AccumulatorLayerStacks;
+        use crate::nnue::network_layer_stacks::NetworkLayerStacks;
+        let _guard = crate::nnue::network::layer_stack_routing_test_guard();
+        let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            HalfKaHmMergedFeatureSet::DIMENSIONS,
+            1536,
+            16,
+            32,
+            9,
+        );
+        let static_net = LayerStacksNetwork::read_auto_dims_with_source(
+            &mut Cursor::new(&model.bytes),
+            None,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+        .unwrap();
+        let static_net = Arc::new(NNUENetwork::LayerStacks(Arc::new(static_net)));
+        let dynamic = Arc::new(
+            DynamicLayerStacksNetwork::read_with_source(
+                &mut Cursor::new(&model.bytes),
+                None,
+                #[cfg(feature = "prepacked-nnue")]
+                None,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            static_net.architecture_name(),
+            NNUENetwork::DynamicLayerStacks(Arc::clone(&dynamic)).architecture_name()
+        );
+        let fixed = NetworkLayerStacks::<1536, 16, 30, 32, HalfKaHmMergedSpec>::read_with_source(
+            &mut Cursor::new(&model.bytes),
+            None,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+        .unwrap();
+        for mode in [
+            LayerStackBucketMode::ProgressKPAbs,
+            LayerStackBucketMode::ProgressKPAbsQ16,
+            LayerStackBucketMode::KingRank9,
+        ] {
+            crate::nnue::reset_layer_stack_progress_kpabs_weights();
+            if matches!(mode, LayerStackBucketMode::ProgressKPAbs) {
+                crate::nnue::set_layer_stack_progress_kpabs_weights(
+                    vec![0.125; crate::nnue::SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+                )
+                .unwrap();
+            }
+            if matches!(mode, LayerStackBucketMode::ProgressKPAbsQ16) {
+                crate::nnue::set_layer_stack_progress_kpabs_q16_weights(
+                    (0..crate::nnue::SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS)
+                        .map(|i| ((i * 7919 % 20001) as i32) - 10000)
+                        .collect(),
+                )
+                .unwrap();
+            }
+            crate::nnue::configure_layer_stack_routing(
+                mode,
+                9,
+                if matches!(mode, LayerStackBucketMode::KingRank9) {
+                    None
+                } else {
+                    Some(8)
+                },
+            )
+            .unwrap();
+            let mut pos = Position::new();
+            pos.set_sfen(SFEN_HIRATE).unwrap();
+            let mut stack = dynamic.new_stack();
+            dynamic.refresh(&pos, &mut stack);
+            let mut acc = AccumulatorLayerStacks::<1536>::new();
+            let mut static_incremental =
+                crate::nnue::search_evaluator::SearchEvaluator::from_network(&static_net);
+            let mut seen_buckets = std::collections::HashSet::new();
+            for move_text in ["7g7f", "3c3d", "8h2b+", "3a2b", "B*7g", "B*3c", "5i6h"] {
+                if matches!(mode, LayerStackBucketMode::ProgressKPAbsQ16) {
+                    let weights = super::super::progress_q16::snapshot_weights();
+                    seen_buckets.insert(super::super::progress_q16::bucket_with_weights(
+                        &pos,
+                        9,
+                        weights.as_deref(),
+                    ));
+                }
+                fixed.refresh_accumulator(&pos, &mut acc);
+                let expected = fixed.evaluate(&pos, &acc);
+                assert_eq!(static_incremental.evaluate(&pos), expected);
+                assert_eq!(dynamic.evaluate(&pos, &mut stack), expected);
+                let mut fresh = dynamic.new_stack();
+                dynamic.refresh(&pos, &mut fresh);
+                assert_eq!(dynamic.evaluate(&pos, &mut fresh), expected);
+                let mv = pos.to_move(Move::from_usi(move_text).unwrap()).unwrap();
+                let dirty = pos.do_move(mv, pos.gives_check(mv));
+                static_incremental.push(dirty);
+                stack.push(dirty);
+                dynamic.ensure(&pos, &mut stack);
+            }
+            if matches!(mode, LayerStackBucketMode::ProgressKPAbsQ16) {
+                assert!(seen_buckets.len() > 1, "Q16 routing did not change bucket");
+            }
+            for (sfen, moves) in [
+                (
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+                    ["3c3d", "2g2f"],
+                ),
+                (
+                    "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3",
+                    ["2g2f", "8c8d"],
+                ),
+            ] {
+                pos.set_sfen(sfen).unwrap();
+                let mut dynamic_stack = dynamic.new_stack();
+                dynamic.refresh(&pos, &mut dynamic_stack);
+                let mut static_stack =
+                    crate::nnue::search_evaluator::SearchEvaluator::from_network(&static_net);
+                for mv in moves {
+                    fixed.refresh_accumulator(&pos, &mut acc);
+                    let expected = fixed.evaluate(&pos, &acc);
+                    assert_eq!(dynamic.evaluate(&pos, &mut dynamic_stack), expected);
+                    assert_eq!(static_stack.evaluate(&pos), expected);
+                    let mv = pos.to_move(Move::from_usi(mv).unwrap()).unwrap();
+                    assert!(pos.is_legal(mv));
+                    let dirty = pos.do_move(mv, pos.gives_check(mv));
+                    dynamic_stack.push(dirty);
+                    dynamic.ensure(&pos, &mut dynamic_stack);
+                    static_stack.push(dirty);
+                }
+                fixed.refresh_accumulator(&pos, &mut acc);
+                let expected = fixed.evaluate(&pos, &acc);
+                assert_eq!(dynamic.evaluate(&pos, &mut dynamic_stack), expected);
+                assert_eq!(static_stack.evaluate(&pos), expected);
+            }
+        }
+        crate::nnue::reset_layer_stack_progress_kpabs_weights();
+        crate::nnue::reset_layer_stack_progress_kpabs_q16_weights();
+        crate::nnue::reset_layer_stack_progress_buckets();
+    }
+
+    #[cfg(all(
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32",
+        feature = "ft-halfka_hm_merged"
+    ))]
+    #[test]
+    fn static_dispatch_selection() {
+        let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            HalfKaHmMergedFeatureSet::DIMENSIONS,
+            1536,
+            16,
+            32,
+            9,
+        );
+        let selected = NNUENetwork::read(&mut Cursor::new(&model.bytes)).unwrap();
+        if cfg!(feature = "nnue-progress-diff") || cfg!(feature = "nnue-effect-bucket") {
+            assert!(matches!(selected, NNUENetwork::DynamicLayerStacks(_)));
+        } else {
+            assert!(matches!(selected, NNUENetwork::LayerStacks(_)));
+        }
+    }
+
+    #[cfg(all(
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32",
+        feature = "ft-halfka_hm_merged"
+    ))]
+    #[test]
+    fn static_dispatch_material_prepare() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            HalfKaHmMergedFeatureSet::DIMENSIONS,
+            1536,
+            16,
+            32,
+            9,
+        );
+        let fixed = LayerStacksNetwork::read_auto_dims_with_source(
+            &mut Cursor::new(&model.bytes),
+            None,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+        .unwrap();
+        let selected = NNUENetwork::LayerStacks(Arc::new(fixed));
+        crate::eval::material::set_material_level(crate::eval::material::MaterialLevel::Lv1);
+        let mut evaluator = crate::nnue::search_evaluator::SearchEvaluator::Uninitialized;
+        evaluator.prepare(Some(Arc::new(selected)));
+        assert!(matches!(
+            evaluator,
+            crate::nnue::search_evaluator::SearchEvaluator::Material { .. }
+        ));
+    }
+
+    #[cfg(all(
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32",
+        feature = "ft-halfka_hm_merged"
+    ))]
+    #[test]
+    fn static_dispatch_header_and_delta_equivalence() {
+        use crate::nnue::net_delta::{NetCoefficientId, NetDelta, NetTensorKind};
+        let _guard = crate::nnue::network::layer_stack_routing_test_guard();
+        for (feature, dimensions, buckets, legacy) in [
+            ("HalfKA_hm", HalfKaHmMergedFeatureSet::DIMENSIONS, 9, true),
+            ("HalfKaHmMerged", HalfKaHmMergedFeatureSet::DIMENSIONS, 8, false),
+            #[cfg(feature = "ft-halfkp")]
+            ("HalfKP", HalfKPFeatureSet::DIMENSIONS, 9, false),
+        ] {
+            let mut bytes = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+                feature, dimensions, 1536, 16, 32, buckets,
+            )
+            .bytes;
+            let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            let end = 12 + len;
+            let extra = ",fv_scale=28";
+            bytes.splice(end..end, extra.bytes());
+            bytes[8..12].copy_from_slice(&((len + extra.len()) as u32).to_le_bytes());
+            if legacy {
+                bytes[..4].copy_from_slice(&0x7AF32F20u32.to_le_bytes());
+                bytes.drain(end + extra.len()..end + extra.len() + 4);
+            }
+            let fixed = LayerStacksNetwork::read_auto_dims_with_source(
+                &mut Cursor::new(&bytes),
+                None,
+                #[cfg(feature = "prepacked-nnue")]
+                None,
+            )
+            .unwrap();
+            let dynamic = DynamicLayerStacksNetwork::read_with_source(
+                &mut Cursor::new(&bytes),
+                None,
+                #[cfg(feature = "prepacked-nnue")]
+                None,
+            )
+            .unwrap();
+            let mut fixed = NNUENetwork::LayerStacks(Arc::new(fixed));
+            let mut dynamic = NNUENetwork::DynamicLayerStacks(Arc::new(dynamic));
+            let deltas: Vec<_> = (0..buckets)
+                .map(|bucket| NetDelta {
+                    id: NetCoefficientId {
+                        kind: NetTensorKind::OutputBias,
+                        bucket: Some(bucket),
+                        index: 0,
+                    },
+                    delta: 320,
+                })
+                .collect();
+            fixed.apply_net_deltas(&deltas).unwrap();
+            dynamic.apply_net_deltas(&deltas).unwrap();
+            crate::nnue::configure_layer_stack_routing(
+                LayerStackBucketMode::ProgressKPAbs,
+                buckets,
+                Some(buckets),
+            )
+            .unwrap();
+            let mut pos = Position::new();
+            pos.set_sfen(SFEN_HIRATE).unwrap();
+            let mut a =
+                crate::nnue::search_evaluator::SearchEvaluator::from_network(&Arc::new(fixed));
+            let mut b =
+                crate::nnue::search_evaluator::SearchEvaluator::from_network(&Arc::new(dynamic));
+            assert_eq!(a.evaluate(&pos), b.evaluate(&pos));
+        }
+        crate::nnue::reset_layer_stack_progress_buckets();
+    }
+
+    #[cfg(all(
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32",
+        feature = "ft-halfka_hm_merged"
+    ))]
+    #[test]
+    fn static_dispatch_falls_back_to_dynamic() {
+        fn replace_arch(bytes: &mut Vec<u8>, extra: &str) {
+            let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            let mut arch = String::from_utf8(bytes[12..12 + len].to_vec()).unwrap();
+            arch.push_str(extra);
+            bytes.splice(12..12 + len, arch.bytes());
+            bytes[8..12].copy_from_slice(&(arch.len() as u32).to_le_bytes());
+        }
+        let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            HalfKaHmMergedFeatureSet::DIMENSIONS,
+            1536,
+            16,
+            32,
+            9,
+        );
+        let mut routing = model.bytes.clone();
+        replace_arch(&mut routing, ",ls_bucket=ownking:1/2/3/4/5/6/7/8");
+        assert!(matches!(
+            NNUENetwork::read(&mut Cursor::new(routing)).unwrap(),
+            NNUENetwork::DynamicLayerStacks(_)
+        ));
+        let layout =
+            super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+        let mut psqt = model.bytes;
+        let offset = layout.buckets[0].fc_hash.start;
+        psqt.splice(
+            offset..offset,
+            std::iter::repeat_n(0u8, (1 + HalfKaHmMergedFeatureSet::DIMENSIONS) * 9 * 4),
+        );
+        replace_arch(&mut psqt, ",PSQT=9");
+        assert!(matches!(
+            NNUENetwork::read(&mut Cursor::new(psqt)).unwrap(),
+            NNUENetwork::DynamicLayerStacks(_)
+        ));
+        let other = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+            "HalfKaHmMerged",
+            HalfKaHmMergedFeatureSet::DIMENSIONS,
+            128,
+            8,
+            16,
+            9,
+        );
+        assert!(matches!(
+            NNUENetwork::read(&mut Cursor::new(other.bytes)).unwrap(),
+            NNUENetwork::DynamicLayerStacks(_)
+        ));
     }
 
     #[cfg_attr(

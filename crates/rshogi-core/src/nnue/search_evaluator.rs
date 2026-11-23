@@ -137,8 +137,8 @@ pub(crate) enum SearchEvaluator {
 impl SearchEvaluator {
     /// `network` は探索スレッドが読む重み (通常は `get_network()`、NUMA 有効時は node の写し)。
     pub(crate) fn prepare(&mut self, network: Option<Arc<NNUENetwork>>) {
-        // 静的 LayerStacks の探索はロード済み net を MaterialLevel より優先する。
-        #[cfg(feature = "layerstack-arch")]
+        // 固定 edition ではロード済みの静的 LayerStacks を MaterialLevel より優先する。
+        #[cfg(all(feature = "layerstack-arch", not(feature = "nnue-runtime-dimensions")))]
         if let Some(net) = &network
             && matches!(&**net, NNUENetwork::LayerStacks(_))
         {

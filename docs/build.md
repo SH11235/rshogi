@@ -130,7 +130,7 @@ build target で、5 カテゴリ × 複数 concrete preset の構造を持つ�
 | LS 系を size 違いで切替えたい | `edition-layerstacks-any-any-any` | size / ext を runtime dispatch |
 | 全 arch / 任意 size をまとめて動作確認したい | `edition-universal` | header 駆動で対応 family を 1 binary に集約できる |
 
-`edition-universal` は HalfKX と LayerStacks の寸法に合わせてバッファおよび dense layer を
+`edition-universal` の汎用実装は HalfKX と LayerStacks の寸法に合わせてバッファおよび dense layer を
 動的に構成する。HalfKX は既知の payload サイズを優先し、未一致時は header の寸法を使う。
 LayerStacks は header の寸法を使う。従って、新しい次元を
 追加するたびに Cargo feature とバイナリを増やす必要はない。HalfKP / HalfKaSplit /
@@ -138,6 +138,11 @@ HalfKaMerged / HalfKaHmSplit / HalfKaHmMerged、HalfKX の CReLU / SCReLU /
 PairwiseCReLU、LayerStacks の PSQT / Threat profile 0 / EffectBucket、および
 KingRank9 / ProgressKPAbs / ProgressKPAbsQ16 bucket mode を扱う。
 寸法の範囲や形式の制約は [NNUE 対応表](./nnue-supported-architectures.md)を参照。
+
+静的 slot が併存する build では、対応する FT と寸法の拡張なし net を静的実装で読む。
+PSQT・Threat・effect bucket・`ls_bucket=` 指定、prepacked、architecture override、
+`nnue-progress-diff` 有効時は汎用実装を使う。rshogi-usi の読み込みログの
+`NNUE LayerStack implementation=static|dynamic` で実装を確認できる。
 
 一方、family / specific preset は従来どおり const-generic 実装を使う。大会、selfplay、
 SPRT など同じモデルを長時間使う用途では、SIMD 最適化と dispatch 除去を得られる
@@ -426,7 +431,7 @@ PGO build は `scripts/build_pgo.sh` 参照 (NPS +6-7% を狙う、本番計測�
 新規 user は preset edition (`cargo xtask build --edition <name>`) 経由を推奨。
 
 tools (`rescore_psv`・`gensfen` など、rshogi-core の NNUE の評価・探索を直接呼ぶツール) も
-`--no-default-features` と atomic feature で 1 構成だけの build にできる。汎用の build より速い。手順は
+`--no-default-features` と atomic feature で 1 構成だけの build にできる。既定の build より速い。手順は
 [rescore_psv の単一構成の build](../crates/tools/docs/rescore_psv.md#単一構成の-build) を参照。
 
 ## L2=64 の LayerStacks

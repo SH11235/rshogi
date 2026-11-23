@@ -156,14 +156,20 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 
 ### 単一構成の build
 
-既定の build は `edition-universal` で、NNUE の寸法をモデルの header から読む汎用の実装を使う。
-1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build の方が速い。
+既定の `nnue-arch` は汎用実装と 1536x16x32・1536x16x64・2304x16x64、5 種の FT の静的実装を含み、
+対応する拡張なしの LayerStacks を静的に読む。PSQT・Threat・effect bucket・
+`ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使う。
+別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読める。
+NativeBackend の読み込みログに `NNUE LayerStack implementation=static|dynamic` を出す。
+
+1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build がさらに速い。
+単一構成の build では、既定にない寸法や PSQT・Threat つきの net も静的に読める。
 rshogi-core の NNUE の評価・探索を直接呼ぶほかのツール (`gensfen` の NativeBackend、`rescore_hcpe`、
 `yardstick_label`、`label_bench_positions`、`preprocess_psv`) も `--bin` を替えて同じ指定で build できる。
 `--no-default-features` で ONNX のモードも外れるので、ONNX も使う build には `dlshogi-onnx` を足す。
 
 `--no-default-features` を付けて、その構成の feature だけを指定する。各軸の slot は 1 つずつ選ぶ。
-`--target-dir` を分けると、汎用の build と並べて置ける。
+`--target-dir` を分けると、既定の build と並べて置ける。
 
 | 構成 | feature |
 |---|---|
@@ -187,16 +193,16 @@ cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-ls1
 ```
 
 上の 2 つの build では、水匠5 と progresskpabs の LayerStacks の net を深さ 9 の探索でリスコアした出力が、
-汎用の build と byte 単位で一致した。`gensfen` も同じ feature の build で、
-progresskpabs の LayerStacks 1536x16x32 の net と同じ seed の対局から、汎用の build と同じ教師局面を出した
+既定の build と byte 単位で一致した。`gensfen` も同じ feature の build で、
+progresskpabs の LayerStacks 1536x16x32 の net と同じ seed の対局から、既定の build と同じ教師局面を出した
 (並列の対局では出力の順が変わるので、局面の集合で比べた)。ほかの構成で同じ値になることは試験していないので、
-教師を作る前に少数の局面で汎用の build と出力を比べる。
+教師を作る前に少数の局面で既定の build と出力を比べる。
 
 HalfKX は rshogi-core の preset edition (`rshogi-core/edition-halfkp-crelu` など、
 `cargo xtask list-editions` で一覧) を指定しても同じ build になる。LayerStacks の preset のうち
 寸法が 1536 / 2304 / 3072 系のものは `nnue-progress-diff` を含み、progresskpabs の bucket を
-f32 の差分更新で求める。全駒から計算する汎用の build とは丸めが違うので、progresskpabs の net では
-bucket の境界付近の局面で評価値が変わる。汎用の build と同じ値が要る教師のリスコアでは、これらの preset を使わない。
+f32 の差分更新で求める。全駒から計算する既定の build とは丸めが違うので、progresskpabs の net では
+bucket の境界付近の局面で評価値が変わる。既定の build と同じ値が要る教師のリスコアでは、これらの preset を使わない。
 
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` 等) も同じ構成で build するときは、
 LayerStacks の行の `rshogi-core/layerstack-arch` を tools の `layerstack-arch` に替える。

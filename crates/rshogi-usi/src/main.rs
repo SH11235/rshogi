@@ -847,6 +847,10 @@ impl UsiEngine {
         if let Some(storage) = get_network().and_then(|net| net.layer_stack_piece_ft_storage()) {
             eprintln!("info string NNUE LayerStack piece FT storage={storage}");
         }
+        if let Some(implementation) = get_network().and_then(|net| net.layer_stack_implementation())
+        {
+            eprintln!("info string NNUE LayerStack implementation={implementation}");
+        }
         if !deltas.is_empty() || self.net_deltas_dirty {
             eprintln!(
                 "info string net deltas applied: {} coefficients (clamped: {})",
@@ -1315,16 +1319,11 @@ impl UsiEngine {
                             eprintln!("info string {payload}");
                             // LayerStack ネットなら net に格納された bucket 数を出力
                             // (file/option desync 検知用)。
-                            if let Some(net) = get_network().as_deref()
-                                && net.is_layer_stacks()
+                            if let Some(n) = get_network()
+                                .as_deref()
+                                .and_then(|net| net.layer_stack_num_buckets())
                             {
-                                #[cfg(feature = "layerstack-arch")]
-                                {
-                                    let n = net.as_layer_stacks().num_buckets();
-                                    eprintln!(
-                                        "info string NNUE LayerStack stored_bucket_count={n}"
-                                    );
-                                }
+                                eprintln!("info string NNUE LayerStack stored_bucket_count={n}");
                             }
                         }
                         Err(e) => {

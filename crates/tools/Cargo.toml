@@ -16,7 +16,7 @@ search-tree-sample = ["rshogi-core/search-tree-sample"]
 # 表現でき、CI もその構成 (ONNX 無効フォールバック経路) を lint できる。
 default = ["nnue-arch", "dlshogi-onnx", "kifu-player"]
 
-# 解析対象 NNUE アーキテクチャ (LayerStack L1 サイズ + FT variant 5 種) の既定集合。
+# 解析対象 NNUE アーキテクチャ (LayerStack のサイズ 3 種 + FT variant 5 種) の既定集合。
 # gensfen / rescore_psv / teacher_labeler 等は任意の net を `NNUENetwork::load` で読んで評価する
 # ため、header 駆動の汎用経路 (edition-universal) も明示的に含める。静的 LS の内部を解析する
 # 診断ツールは下の size / FT slot の静的実装を使う。
@@ -24,6 +24,8 @@ nnue-arch = [
     "rshogi-core/edition-universal",
     "layerstack-arch",
     "layerstacks-1536x16x32",
+    "layerstacks-1536x16x64",
+    "layerstacks-2304x16x64",
     "ft-halfkp",
     "ft-halfka_split",
     "ft-halfka_merged",

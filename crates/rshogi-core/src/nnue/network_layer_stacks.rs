@@ -3018,6 +3018,33 @@ impl LayerStacksNetwork {
     }
 }
 
+#[cfg(all(feature = "nnue-runtime-dimensions", feature = "layerstack-arch"))]
+pub(super) fn static_slot_available(
+    feature: super::spec::FeatureSet,
+    dims: (usize, usize, usize),
+) -> bool {
+    use super::spec::FeatureSet;
+    // 指定された FT と寸法の組が build に含まれなければ静的型を生成できない。
+    let ft = (matches!(feature, FeatureSet::HalfKP) && cfg!(feature = "ft-halfkp"))
+        || (matches!(feature, FeatureSet::HalfKaSplit) && cfg!(feature = "ft-halfka_split"))
+        || (matches!(feature, FeatureSet::HalfKaMerged) && cfg!(feature = "ft-halfka_merged"))
+        || (matches!(feature, FeatureSet::HalfKaHmSplit) && cfg!(feature = "ft-halfka_hm_split"))
+        || (matches!(feature, FeatureSet::HalfKaHmMerged) && cfg!(feature = "ft-halfka_hm_merged"));
+    ft && match dims {
+        (1536, 16, 32) => cfg!(feature = "layerstacks-1536x16x32"),
+        (1536, 32, 32) => cfg!(feature = "layerstacks-1536x32x32"),
+        (768, 16, 32) => cfg!(feature = "layerstacks-768x16x32"),
+        (768, 8, 32) => cfg!(feature = "layerstacks-768x8x32"),
+        (512, 16, 32) => cfg!(feature = "layerstacks-512x16x32"),
+        (1024, 16, 32) => cfg!(feature = "layerstacks-1024x16x32"),
+        (3072, 16, 32) => cfg!(feature = "layerstacks-3072x16x32"),
+        (2304, 16, 64) => cfg!(feature = "layerstacks-2304x16x64"),
+        (3072, 16, 64) => cfg!(feature = "layerstacks-3072x16x64"),
+        (1536, 16, 64) => cfg!(feature = "layerstacks-1536x16x64"),
+        _ => false,
+    }
+}
+
 /// reader の現在位置から LayerStacks ヘッダ (version / hash / arch_len / arch) を peek する。
 ///
 /// 戻り値は `(version, arch_str)`。arch_len は `MAX_ARCH_LEN` で検証する。
