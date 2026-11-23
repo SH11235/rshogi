@@ -625,6 +625,7 @@ mod tests {
             nodes,
             multipv: 1,
             hash: 16,
+            threads: 1,
         }
     }
 

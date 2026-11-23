@@ -220,6 +220,7 @@ fn settings() -> Settings {
         nodes: 100,
         multipv: 3,
         hash: 16,
+        threads: 1,
     })
     .unwrap()
 }

@@ -527,6 +527,7 @@ fn spawn_worker(
     id: usize,
     args: &ServeArgs,
     settings: &Settings,
+    threads: usize,
     events: mpsc::Sender<Event>,
 ) -> Worker {
     let (tx, rx) = mpsc::channel::<Option<Job>>();
@@ -542,7 +543,7 @@ fn spawn_worker(
         let cfg = EngineConfig {
             path: reading_args.engine.clone(),
             args: Vec::new(),
-            threads: 1,
+            threads,
             hash_mb: settings.hash,
             network_delay: None,
             network_delay2: None,
@@ -670,7 +671,7 @@ fn spawn_worker(
                             nodes_limit: cond.nodes,
                             nodes,
                             sec: started.elapsed().as_secs_f64(),
-                            threads: 1,
+                            threads: cfg.threads,
                             hash: cond.hash,
                             draw: cond.draw(),
                             multipv,
@@ -1302,6 +1303,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         torn: false,
     });
     let mut settings = Settings::new(&args.reading)?;
+    let threads = settings.threads()?;
     settings.engine_version = super::transfer::engine_source_version(&args.reading.engine);
     super::transfer::warn_unknown_version(&args.reading.engine, &settings.engine_version);
     println!("fingerprint={}", settings.fingerprint);
@@ -1702,9 +1704,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 }
             }
             for id in 0..desired {
-                workers
-                    .entry(id)
-                    .or_insert_with(|| spawn_worker(id, args, &settings, events_tx.clone()));
+                workers.entry(id).or_insert_with(|| {
+                    spawn_worker(id, args, &settings, threads, events_tx.clone())
+                });
             }
             let running: BTreeSet<_> = workers
                 .values()
@@ -3307,6 +3309,7 @@ mod tests {
             nodes: 100,
             multipv: 1,
             hash: 16,
+            threads: 1,
         };
         let settings = Settings::new(&args).unwrap();
         verify_inputs(&args, &settings).unwrap();

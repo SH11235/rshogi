@@ -100,7 +100,7 @@ cargo run -p tools --release --bin book_mine -- expand \
 | `--resume` | | `--journal` 内の現設定一致レコードを再利用する |
 | `--report <path>` | なし | Markdown レポート |
 
-エンジンは各 worker で `Threads=1` / `Hash=256` を既定に起動し、`--engine-option` で上書きできます。`MultiPV` は探索ごとに `setoption` で設定します。MultiPV を 2 以上にしうる設定 (`--multipv` が 2 以上、または `--multipv-delta` が正で `--multipv-max` が `--multipv` より大きい) で、エンジンが `usi` 応答で `MultiPV` オプションを広告しない場合はエラーにします。MultiPV 非対応エンジンでは `--multipv 1 --multipv-delta 0` (または `--multipv-max 1`) を指定してください。
+`book_mine expand` が worker ごとに起動するエンジンの既定値は `Threads=1` / `Hash=256` です。`--engine-option` で上書きできます。`MultiPV` は探索ごとに `setoption` で設定します。MultiPV を 2 以上にしうる設定 (`--multipv` が 2 以上、または `--multipv-delta` が正で `--multipv-max` が `--multipv` より大きい) で、エンジンが `usi` 応答で `MultiPV` オプションを広告しない場合はエラーにします。MultiPV 非対応エンジンでは `--multipv 1 --multipv-delta 0` (または `--multipv-max 1`) を指定してください。
 
 ### 探索
 
@@ -254,9 +254,17 @@ book_mine tree serve --state /path/to/state --out-root /path/to/trees \
   --nodes 1000000000 --multipv 3 --hash 1024 --workers 16
 ```
 
-`EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads=1` と `USI_Hash=--hash` は起動ごとに指定します。MultiPV と nodes は木ごとの `opts` を使い、省略時は `--multipv` / `--nodes` を使います。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。値の順序は詰め直しません。受理する読みの中で手が重複した場合は検査エラーにします。mate は符号付き `30000 - |n|` です。
+`EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads` と `USI_Hash` は、起動時にそれぞれ `--threads` と `--hash` の値を設定します。MultiPV と nodes は木ごとの `opts` を使い、省略時は `--multipv` / `--nodes` を使います。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。値の順序は詰め直しません。受理する読みの中で手が重複した場合は検査エラーにします。mate は符号付き `30000 - |n|` です。
 
-`--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--extend` (0、0〜200)・`--extend-rounds` (1、0〜10)・`--settle-rounds` (0、0〜50)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件は state に固定しません。エンジン・モデル・SPSA パラメータ・nodes・MultiPV・千日手の値・Hash を変えても、同じ state と台帳で再開できます。保存済みの読みは、それぞれ読んだときの条件を保持します。
+| オプション | 既定 | 内容 |
+|---|---|---|
+| `--threads <N>` | `1` | worker で起動するエンジン 1 プロセスあたりの探索スレッド数 (1 以上) |
+
+スレッド数は読み条件の指紋に含まれます。`--engine-option Threads=N` を併記する場合は `--threads` と同じ値を指定してください。2 以上では、同じ読み条件でも探索ごとに評価値や読み筋が変わることがあります。そのため同じ条件で読んだ台帳どうしを合流すると、同じ局面の値の違いが食い違いとして扱われます (`import-journal` の既定の `--on-conflict reject` では止まります)。木の標準の読みには既定の 1 を使ってください。
+
+指紋が違っても、台帳は条件の違う読みを使い回します。`require_condition` の無い木は、自分の読み条件と同じ指紋の読みがあれば `nodes_limit` によらずそれを使い、無い局面だけ別の条件の読みのうち `nodes_limit` の大きい読みを使います。`borrow value` は `--fingerprint` を省くと優先する条件が無く、局面ごとに全条件の読みから `nodes_limit` の大きい読みを選びます (指定すればその条件の行だけを読みます)。`import-journal` は既定で全条件の読みを取り込みます。標準の読みと混ぜたくない 2 以上の読みは、別の state・別の台帳・別の出力先で読み、標準の台帳へ取り込まず、その木を標準の元データに登録しないでください。取り込む場合は `--fingerprint` か `--exclude-readings` で選びます。同時に全 worker が探索するときのスレッド数は、稼働中の worker 数 × `--threads` です。
+
+`--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--extend` (0、0〜200)・`--extend-rounds` (1、0〜10)・`--settle-rounds` (0、0〜50)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件は state に固定しません。エンジン・モデル・SPSA パラメータ・nodes・MultiPV・千日手の値・Hash・Threads を変えても、同じ state と台帳で再開できます。保存済みの読みは、それぞれ読んだときの条件を保持します。
 
 木は実行中、各局面で最初に使った読みを保持します。後からその木自身の条件の読みが届いても差し替えず、再構築した木では優先条件を選び直します。同じ局面を異なる条件で読む要求は順に処理します。`require_condition` のない木が先に読みを要求し、後の `require_condition` のある木が自身の条件で読み直すことがあります。
 
@@ -1072,7 +1080,7 @@ BOOK_TREE_SIM_INPUT=/path/to/input.tsv cargo test -p tools --lib \
 
 ### 別の台帳の読みの取り込み
 
-別のマシンの台帳 (複製したもの) の読みを、それぞれ元の条件を保持して足します。条件の違いでは取り込みを拒否しません。
+別のマシンの台帳 (複製したもの) の読みを、それぞれ元の条件を保持して足します。指定した `--threads` (既定 1) は表示用の指紋の計算に使います。取り込みの可否は各行に記録された読み条件で検査します。
 
 ```bash
 book_mine tree import-journal --from-journal /path/to/other-machine-journal.jsonl \
@@ -2768,7 +2776,7 @@ book_mine borrow cut --book big.db --roots roots.jsonl --out cut1 \
 
 ### 読み
 
-`tree serve` は段 0 の行の根 (`root` と `roots`) を読むだけで伸ばしません。既定では条件を問わず、他の木や別の切り出しの読みも同じ台帳で使い回します。特定条件の読みだけが必要な木では `opts.require_condition:true` を指定し、MultiPV・nodes も指定できます (例: `--nodes 1000000000 --multipv 3 --hash 1024`、`DrawValueBlack=-70` / `DrawValueWhite=70`、Threads は 1 に固定)。
+`tree serve` は段 0 の行の根 (`root` と `roots`) を読むだけで伸ばしません。既定では条件を問わず、他の木や別の切り出しの読みも同じ台帳で使い回します。特定条件の読みだけが必要な木では `opts.require_condition:true` を指定し、MultiPV・nodes も指定できます (例: `--nodes 1000000000 --multipv 3 --hash 1024`、`DrawValueBlack=-70` / `DrawValueWhite=70`)。重要な分岐を深く読むには、常駐時にたとえば `--workers 1 --threads 30 --nodes 10000000000 --multipv 5 --hash 4096 --trace-dir /path/to/traces` (Hash も指紋に入るので明示する) を指定できます。完了した読みは台帳に、探索中の info 行は trace に記録されます。標準の読みと分ける手順は「常駐」の節の `--threads` の説明を見てください。
 
 ```bash
 receipt=$(book_mine tree enqueue --state "$STATE" --from cut1/targets.jsonl)

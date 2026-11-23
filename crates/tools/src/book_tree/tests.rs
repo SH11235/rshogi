@@ -18,6 +18,7 @@ pub(super) fn settings() -> Settings {
         nodes: 100,
         multipv: 3,
         hash: 16,
+        threads: 1,
     })
     .unwrap()
 }
@@ -638,7 +639,8 @@ fn explicit_model_is_required_and_invalid_paths_leave_outputs_untouched() {
             engine_options: vec![],
             nodes: 100,
             multipv: 3,
-            hash: 16
+            hash: 16,
+            threads: 1,
         })
         .is_err()
     );
@@ -668,6 +670,7 @@ fn model_and_implicit_parameters_are_content_fingerprints() {
         nodes: 100,
         multipv: 3,
         hash: 16,
+        threads: 1,
     };
     let first = Settings::new(&args).unwrap();
     let params = dir.path().join("spsa.params");
@@ -955,6 +958,7 @@ pub(super) fn serve_args(
             nodes: 100,
             multipv: 3,
             hash: 16,
+            threads: 1,
         },
         workers: 0,
         stall_secs: 1,

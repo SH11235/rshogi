@@ -2462,6 +2462,47 @@ fn live_import_satisfies_queued_requests_and_finishes_tree_without_workers() {
 }
 
 #[test]
+fn serve_threads_reaches_engine_journal_and_trace() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    let trees = dir.path().join("trees");
+    let trace = dir.path().join("trace");
+    std::fs::create_dir(state).unwrap();
+    let config = fast_fixture(state);
+    let mut command = serve_command(state, &config, 0, 3, &trees);
+    command.args(["--threads", "0"]);
+    assert!(exits_with_failure(command));
+    assert!(std::fs::read_to_string(state.join("server.log")).unwrap().contains("--threads"));
+
+    enqueue(
+        state,
+        json!({"id":"threaded","root":format!("sfen {ROOT} 1"),"own":"b","depth":0,
+            "opts":{"require_condition":true}}),
+    );
+    let mut server = Server(
+        serve_command(state, &config, 0, 3, &trees)
+            .args(["--threads", "2", "--trace-dir"])
+            .arg(&trace)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(|| status(&trees.join("threaded/b/g1")) == "DONE\n");
+    stop(state, &mut server);
+
+    assert_eq!(searches(state), 1);
+    let log = protocol(state);
+    assert!(log.iter().any(|(_, line)| line == "setoption name Threads value 2"));
+    assert!(!log.iter().any(|(_, line)| line == "setoption name Threads value 1"));
+    let rows = journal_rows(state);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["settings"]["options"]["Threads"], "2");
+    assert_eq!(rows[0]["reading"]["threads"], 2);
+    let path = std::fs::read_dir(&trace).unwrap().next().unwrap().unwrap().path();
+    let trace_row: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(trace_row["fingerprint"], rows[0]["settings"]["fingerprint"]);
+}
+
+#[test]
 fn mixed_conditions_share_default_reads_and_exact_trees_read_their_overrides() {
     let dir = tempfile::tempdir().unwrap();
     let state = &dir.path().join("state");

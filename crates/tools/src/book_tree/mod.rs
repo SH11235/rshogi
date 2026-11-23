@@ -101,6 +101,10 @@ struct ReadingArgs {
     multipv: usize,
     #[arg(long, default_value_t = 1024)]
     hash: u32,
+    /// エンジン 1 プロセスあたりの探索スレッド数
+    #[arg(long, value_name = "N", default_value_t = 1,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+    threads: usize,
 }
 
 fn parse_accepted_fingerprint(value: &str) -> std::result::Result<String, String> {
