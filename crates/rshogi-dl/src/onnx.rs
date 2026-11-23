@@ -14,7 +14,7 @@ use crate::features::{
     FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, MAX_MOVE_LABEL_NUM,
     make_input_features,
 };
-use crate::{EncodedBatch, EncodedInput};
+use crate::{EncodedBatch, EncodedInput, InputFormat};
 
 #[cfg(feature = "inference-diagnostics")]
 use crate::diagnostics::{ForwardTimer, InferenceStage};
@@ -172,6 +172,7 @@ fn create_session(
     cfg: &OnnxConfig,
     profile: Option<&Path>,
     cuda_tf32: bool,
+    input_format: InputFormat,
 ) -> Result<EvaluatorSession> {
     use ort::ep::ExecutionProvider;
 
@@ -198,14 +199,20 @@ fn create_session(
         if cfg.use_tensorrt {
             eprintln!("Using TensorRT (FP16) on GPU {}", cfg.gpu_id);
 
-            let trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
+            let mut trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
                 .with_device_id(cfg.gpu_id)
                 .with_fp16(true)
                 .with_engine_cache(cfg.tensorrt_cache.is_some());
+            if input_format == InputFormat::StmTokensV1 {
+                trt_ep = trt_ep.with_builder_optimization_level(2);
+            }
             // 形状の範囲を 1..=batch_size に固定する。未指定だと TensorRT EP は見たことのない
             // batch 数が来るたびに engine を作り直し、batch 数が毎回変わる呼び出し側で数秒ずつ止まる。
-            let shapes = |n: usize| {
-                format!("input1:{n}x{INPUT1_CHANNELS}x9x9,input2:{n}x{INPUT2_CHANNELS}x9x9")
+            let shapes = |n: usize| match input_format {
+                InputFormat::Basic => {
+                    format!("input1:{n}x{INPUT1_CHANNELS}x9x9,input2:{n}x{INPUT2_CHANNELS}x9x9")
+                }
+                InputFormat::StmTokensV1 => format!("tokens:{n}x{}", crate::tokens::TOKEN_COUNT),
             };
             let trt_ep = trt_ep
                 .with_profile_min_shapes(shapes(1))
@@ -240,10 +247,12 @@ fn create_session(
             }
 
             // TensorRT EP が局面形状をサポートしない場合に備え CUDA EP を後段に登録する
-            let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
-                .with_device_id(cfg.gpu_id)
-                .build()
-                .error_on_failure();
+            let mut cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
+                .with_device_id(cfg.gpu_id);
+            if !cuda_tf32 {
+                cuda_ep = cuda_ep.with_tf32(false);
+            }
+            let cuda_ep = cuda_ep.build().error_on_failure();
             let trt_ep = trt_ep.build().error_on_failure();
 
             builder
@@ -300,7 +309,7 @@ fn create_session(
 impl OnnxEvaluator {
     /// 基本形式のモデルを読み込む。token形式は受理しない。
     pub fn new(cfg: &OnnxConfig) -> Result<Self> {
-        let session = create_session(cfg, None, true)?;
+        let session = create_session(cfg, None, true, InputFormat::Basic)?;
         Self::from_session(
             session,
             cfg,
@@ -327,7 +336,7 @@ impl OnnxEvaluator {
             && batch_size > 1
             && options.profiling.is_none()
         {
-            let session = create_session(cfg, None, options.cuda_tf32)?;
+            let session = create_session(cfg, None, options.cuda_tf32, InputFormat::Basic)?;
             validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
             eprintln!("CUDA single-row session enabled");
             Some(Box::new(session))
@@ -740,16 +749,26 @@ impl Default for ModelOptions {
 }
 
 impl ModelEvaluator {
-    /// モデルの入力形式を検証して読み込む。TensorRT は legacy API で指定する。
+    /// モデルの入力形式を検証して読み込む。この API の TensorRT は token 入力を対象にする。
     pub fn new(cfg: &OnnxConfig) -> Result<Self> {
         Self::with_options(cfg, &ModelOptions::default())
     }
 
     /// 精度設定と任意の ORT profile を指定して、モデルを読み込む。
     pub fn with_options(cfg: &OnnxConfig, options: &ModelOptions) -> Result<Self> {
-        anyhow::ensure!(!cfg.use_tensorrt, "automatic model dispatch supports CPU/CUDA only");
-        let session = create_session(cfg, options.profiling.as_deref(), options.cuda_tf32)?;
-        match model_format(&session.inner)? {
+        anyhow::ensure!(!cfg.use_tensorrt || cfg.gpu_id >= 0, "TensorRT requires a CUDA device");
+        let session = create_session(
+            cfg,
+            options.profiling.as_deref(),
+            options.cuda_tf32,
+            InputFormat::StmTokensV1,
+        )?;
+        let format = model_format(&session.inner)?;
+        anyhow::ensure!(
+            !cfg.use_tensorrt || format == InputFormat::StmTokensV1,
+            "TensorRT requires token inputs in the automatic evaluator"
+        );
+        match format {
             crate::InputFormat::Basic => Ok(Self::Basic(OnnxEvaluator::from_session(
                 session,
                 cfg,

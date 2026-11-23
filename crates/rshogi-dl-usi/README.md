@@ -40,6 +40,8 @@ go nodes 128
 | ModelFile | model.onnx | ONNX モデル |
 | Device | 0 | CUDA device id。-1 は CPU |
 | CudaTF32 | true | false で CUDA TF32 を無効化。true は runtime の既定設定を維持。CPU では無効 |
+| TensorRT | false | token 入力のモデルを NVIDIA TensorRT の FP16 で実行 |
+| TensorRTCacheDir | 空 | TensorRT エンジンのキャッシュ先ディレクトリ |
 | NNCacheMiB | 0 | raw policy/value キャッシュの上限 MiB。0 は無効、最大1024 |
 | NNBatchSize | 1 | 同期推論にまとめる葉の上限。1〜256。1 は scalar 探索 |
 | TreeMemoryMB | 16 | node / edge arena の上限 MiB |
@@ -94,9 +96,13 @@ MCTS の workspace は batch 探索を始める際に確保し、arena の容量
 | rshogi.policy_format | direction-destination-2187-v1 |
 | rshogi.value_format | stm-expected-score-sigmoid-v1 |
 
-value は手番側の期待スコア（勝ち1、引き分け0.5、負け0）です。モデルの学習ルールと `EnteringKingRule` 等の設定を揃えて使ってください。token形式のモデル定義・export は [Python package](../../python/rshogi-dl/README.md) を参照してください。USI の形式自動選択は CPU/CUDA に対応します。既存 tools の basic 専用 API では token モデルを受理しません。
+value は手番側の期待スコア（勝ち1、引き分け0.5、負け0）です。モデルの学習ルールと `EnteringKingRule` 等の設定を揃えて使ってください。token形式のモデル定義・export は [Python package](../../python/rshogi-dl/README.md) を参照してください。既存 tools の basic 専用 API では token モデルを受理しません。
 
-`CudaTF32` は `true` / `false` を受理し、変更時はモデルと cache を再構築します。厳密な FP32 出力の照合には `false` を使います。runtime の既定 precision は TF32 を許可する場合があるため、同じ float32 入出力でも CPU と差が出ることがあります。
+`TensorRT=true` には GPU 対応の ONNX Runtime と、その TensorRT execution provider に対応する NVIDIA TensorRT ライブラリが必要です。token 入力のモデルを指定し、`Device` に CUDA device id を設定してください。TensorRT が担当しない演算には ONNX Runtime の CUDA 等が使われます。TensorRT の FP16 と通常の CUDA では推論値に差が出る場合があります。
+
+初回の `isready` では、1〜`NNBatchSize` の入力に対する TensorRT エンジンを構築します。複数プロセスで使う場合は、モデル、設定、GPU を揃えた1プロセスで先にキャッシュを作成してください。同じ名前でモデルを差し替える場合も含め、モデルの内容、プロファイル設定、ONNX Runtime・TensorRT の版、または GPU を変更したら新しいキャッシュ先を指定してください。
+
+`CudaTF32` は `true` / `false` を受理し、変更時はモデルと cache を再構築します。厳密な FP32 出力の照合には `CudaTF32=false` と `TensorRT=false` を使います。runtime の既定 precision は TF32 を許可する場合があるため、同じ float32 入出力でも CPU と差が出ることがあります。
 
 Unix では正常終了時に探索 worker を stop / join し、session を破棄して標準出力・標準エラーを
 flush した後、`_exit` で終了します。ORT の process-global なライブラリ終了処理を回避するためです。

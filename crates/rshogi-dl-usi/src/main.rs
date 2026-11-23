@@ -23,6 +23,8 @@ struct Engine {
     model: PathBuf,
     device: i32,
     cuda_tf32: bool,
+    use_tensorrt: bool,
+    tensorrt_cache: Option<PathBuf>,
     cache_mib: usize,
     overhead: u64,
     runtime: Option<Runtime>,
@@ -94,6 +96,8 @@ impl Engine {
             model: "model.onnx".into(),
             device: 0,
             cuda_tf32: true,
+            use_tensorrt: false,
+            tensorrt_cache: None,
             cache_mib: 0,
             overhead: 50,
             runtime: None,
@@ -137,8 +141,8 @@ impl Engine {
         OnnxConfig {
             model_path: self.model.clone(),
             gpu_id: self.device,
-            use_tensorrt: false,
-            tensorrt_cache: None,
+            use_tensorrt: self.use_tensorrt,
+            tensorrt_cache: self.tensorrt_cache.clone(),
             batch_size: self.config.batch_size,
         }
     }
@@ -160,6 +164,15 @@ impl Engine {
             }
             "CudaTF32" => {
                 self.cuda_tf32 = value.parse()?;
+            }
+            "TensorRT" => {
+                self.use_tensorrt = value.parse()?;
+            }
+            "TensorRTCacheDir" => {
+                self.tensorrt_cache = match value {
+                    "" | "<empty>" => None,
+                    path => Some(path.into()),
+                };
             }
             "NNCacheMiB" => {
                 let v = value.parse()?;
@@ -263,6 +276,8 @@ impl Engine {
                     "ModelFile type string default model.onnx",
                     "Device type spin default 0 min -1 max 15",
                     "CudaTF32 type check default true",
+                    "TensorRT type check default false",
+                    "TensorRTCacheDir type string default <empty>",
                     "NNCacheMiB type spin default 0 min 0 max 1024",
                     NN_BATCH_OPTION,
                     "TreeMemoryMB type spin default 16 min 1 max 1024",
@@ -544,6 +559,25 @@ mod tests {
             assert_eq!(engine.config.batch_size, 4);
             assert_eq!(engine.model_config().batch_size, 4);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tensorrt_options_reach_model_configuration() -> Result<()> {
+        let mut engine = Engine::new()?;
+        assert!(!engine.model_config().use_tensorrt);
+        assert_eq!(engine.model_config().tensorrt_cache, None);
+        engine.option("setoption name TensorRT value true")?;
+        engine.option("setoption name TensorRTCacheDir value engine cache")?;
+        assert!(engine.model_config().use_tensorrt);
+        assert_eq!(engine.model_config().tensorrt_cache, Some("engine cache".into()));
+        engine.option("setoption name Device value -1")?;
+        let error = engine.initialize().unwrap_err();
+        assert_eq!(error.to_string(), "TensorRT requires a CUDA device");
+        engine.option("setoption name TensorRTCacheDir value <empty>")?;
+        engine.option("setoption name TensorRT value false")?;
+        assert!(!engine.model_config().use_tensorrt);
+        assert_eq!(engine.model_config().tensorrt_cache, None);
         Ok(())
     }
 
