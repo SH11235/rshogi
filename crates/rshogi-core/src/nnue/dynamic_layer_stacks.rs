@@ -1244,6 +1244,24 @@ fn read_i32s<R: Read>(reader: &mut R, dst: &mut [i32]) -> io::Result<()> {
     Ok(())
 }
 fn add_i16(a: &mut [i16], b: &[i16]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    // SAFETY: `end` is a multiple of 16 no larger than the shortest slice, so every 256-bit
+    // load/store covers 16 in-range i16 elements; the scalar tail handles the rest.
+    unsafe {
+        use std::arch::x86_64::*;
+        let len = a.len().min(b.len());
+        let end = len / 16 * 16;
+        for offset in (0..end).step_by(16) {
+            let v = _mm256_loadu_si256(a.as_ptr().add(offset).cast());
+            let b = _mm256_loadu_si256(b.as_ptr().add(offset).cast());
+            _mm256_storeu_si256(a.as_mut_ptr().add(offset).cast(), _mm256_add_epi16(v, b));
+        }
+        for i in end..len {
+            a[i] = a[i].wrapping_add(b[i]);
+        }
+        return;
+    }
+
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     // SAFETY: `chunks` is bounded by both slices; each v128 access covers eight in-range
     // i16 elements and the scalar tail starts immediately after the last vector.
@@ -1267,6 +1285,24 @@ fn add_i16(a: &mut [i16], b: &[i16]) {
     }
 }
 fn sub_i16(a: &mut [i16], b: &[i16]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    // SAFETY: `end` is a multiple of 16 no larger than the shortest slice, so every 256-bit
+    // load/store covers 16 in-range i16 elements; the scalar tail handles the rest.
+    unsafe {
+        use std::arch::x86_64::*;
+        let len = a.len().min(b.len());
+        let end = len / 16 * 16;
+        for offset in (0..end).step_by(16) {
+            let v = _mm256_loadu_si256(a.as_ptr().add(offset).cast());
+            let b = _mm256_loadu_si256(b.as_ptr().add(offset).cast());
+            _mm256_storeu_si256(a.as_mut_ptr().add(offset).cast(), _mm256_sub_epi16(v, b));
+        }
+        for i in end..len {
+            a[i] = a[i].wrapping_sub(b[i]);
+        }
+        return;
+    }
+
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     // SAFETY: `chunks` is bounded by both slices; each v128 access covers eight in-range
     // i16 elements and the scalar tail starts immediately after the last vector.
@@ -1290,6 +1326,28 @@ fn sub_i16(a: &mut [i16], b: &[i16]) {
     }
 }
 fn sub_add_i16(a: &mut [i16], sub: &[i16], add: &[i16]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    // SAFETY: `end` is a multiple of 16 no larger than the shortest slice, so every 256-bit
+    // load/store covers 16 in-range i16 elements; the scalar tail handles the rest.
+    unsafe {
+        use std::arch::x86_64::*;
+        let len = a.len().min(sub.len()).min(add.len());
+        let end = len / 16 * 16;
+        for offset in (0..end).step_by(16) {
+            let v = _mm256_loadu_si256(a.as_ptr().add(offset).cast());
+            let sub = _mm256_loadu_si256(sub.as_ptr().add(offset).cast());
+            let add = _mm256_loadu_si256(add.as_ptr().add(offset).cast());
+            _mm256_storeu_si256(
+                a.as_mut_ptr().add(offset).cast(),
+                _mm256_add_epi16(_mm256_sub_epi16(v, sub), add),
+            );
+        }
+        for i in end..len {
+            a[i] = a[i].wrapping_sub(sub[i]).wrapping_add(add[i]);
+        }
+        return;
+    }
+
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     // SAFETY: all slices have the same validated L1 length. Each v128 access covers
     // eight in-range i16 elements and the scalar tail follows the last vector.
@@ -1316,6 +1374,37 @@ fn sub_add_i16(a: &mut [i16], sub: &[i16], add: &[i16]) {
     }
 }
 fn double_sub_add_i16(a: &mut [i16], sub0: &[i16], add0: &[i16], sub1: &[i16], add1: &[i16]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    // SAFETY: `end` is a multiple of 16 no larger than the shortest slice, so every 256-bit
+    // load/store covers 16 in-range i16 elements; the scalar tail handles the rest.
+    unsafe {
+        use std::arch::x86_64::*;
+        let len = a.len().min(sub0.len()).min(add0.len()).min(sub1.len()).min(add1.len());
+        let end = len / 16 * 16;
+        for offset in (0..end).step_by(16) {
+            let v = _mm256_loadu_si256(a.as_ptr().add(offset).cast());
+            let sub0 = _mm256_loadu_si256(sub0.as_ptr().add(offset).cast());
+            let add0 = _mm256_loadu_si256(add0.as_ptr().add(offset).cast());
+            let sub1 = _mm256_loadu_si256(sub1.as_ptr().add(offset).cast());
+            let add1 = _mm256_loadu_si256(add1.as_ptr().add(offset).cast());
+            _mm256_storeu_si256(
+                a.as_mut_ptr().add(offset).cast(),
+                _mm256_add_epi16(
+                    _mm256_sub_epi16(_mm256_add_epi16(_mm256_sub_epi16(v, sub0), add0), sub1),
+                    add1,
+                ),
+            );
+        }
+        for i in end..len {
+            a[i] = a[i]
+                .wrapping_sub(sub0[i])
+                .wrapping_add(add0[i])
+                .wrapping_sub(sub1[i])
+                .wrapping_add(add1[i]);
+        }
+        return;
+    }
+
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     // SAFETY: all slices have the same validated L1 length. Each v128 access covers
     // eight in-range i16 elements and the scalar tail follows the last vector.
@@ -1363,9 +1452,17 @@ fn sub_i32(a: &mut [i32], b: &[i32]) {
 
 fn sqr_transform_without_threat(us: &[i16], them: &[i16], output: &mut [u8]) {
     let half = us.len() / 2;
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    let processed = {
+        sqr_transform_avx2(us, None, them, None, output);
+        half
+    };
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     let mut processed = 0;
-    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    #[cfg(not(any(
+        all(target_arch = "wasm32", target_feature = "simd128"),
+        all(target_arch = "x86_64", target_feature = "avx2")
+    )))]
     let processed = 0;
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -1424,9 +1521,17 @@ fn sqr_transform_with_threat(
     output: &mut [u8],
 ) {
     let half = us.len() / 2;
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    let processed = {
+        sqr_transform_avx2(us, Some(us_threat), them, Some(them_threat), output);
+        half
+    };
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     let mut processed = 0;
-    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    #[cfg(not(any(
+        all(target_arch = "wasm32", target_feature = "simd128"),
+        all(target_arch = "x86_64", target_feature = "avx2")
+    )))]
     let processed = 0;
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -1489,6 +1594,52 @@ fn sqr_transform_with_threat(
         output[half + i] = ((u32::from(them0.clamp(0, 127) as u16)
             * u32::from(them1.clamp(0, 127) as u16))
             >> 7) as u8;
+    }
+}
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn sqr_transform_avx2(
+    us: &[i16],
+    us_threat: Option<&[i16]>,
+    them: &[i16],
+    them_threat: Option<&[i16]>,
+    output: &mut [u8],
+) {
+    use std::arch::x86_64::*;
+    let half = us.len() / 2;
+    let (us, them) = (&us[..half * 2], &them[..half * 2]);
+    let us_threat = us_threat.map(|t| &t[..half * 2]);
+    let them_threat = them_threat.map(|t| &t[..half * 2]);
+    let output = &mut output[..half * 2];
+    // SAFETY: every slice was re-sliced to exactly `2 * half` elements above. `end` is a multiple of 16 no larger than `half`, so each 256-bit load
+    // and 128-bit store stays inside its half.
+    unsafe {
+        let zero = _mm256_setzero_si256();
+        let max = _mm256_set1_epi16(127);
+        for (acc, threat, out_offset) in [(us, us_threat, 0), (them, them_threat, half)] {
+            let end = half / 16 * 16;
+            for i in (0..end).step_by(16) {
+                let mut a = _mm256_loadu_si256(acc.as_ptr().add(i).cast());
+                let mut b = _mm256_loadu_si256(acc.as_ptr().add(half + i).cast());
+                if let Some(t) = threat {
+                    a = _mm256_add_epi16(a, _mm256_loadu_si256(t.as_ptr().add(i).cast()));
+                    b = _mm256_add_epi16(b, _mm256_loadu_si256(t.as_ptr().add(half + i).cast()));
+                }
+                a = _mm256_min_epi16(_mm256_max_epi16(a, zero), max);
+                b = _mm256_min_epi16(_mm256_max_epi16(b, zero), max);
+                let product = _mm256_srli_epi16(_mm256_mullo_epi16(a, b), 7);
+                let packed = _mm_packus_epi16(
+                    _mm256_castsi256_si128(product),
+                    _mm256_extracti128_si256::<1>(product),
+                );
+                _mm_storeu_si128(output.as_mut_ptr().add(out_offset + i).cast(), packed);
+            }
+            for i in end..half {
+                let a = acc[i].wrapping_add(threat.map_or(0, |t| t[i])).clamp(0, 127) as u32;
+                let b = acc[half + i].wrapping_add(threat.map_or(0, |t| t[half + i])).clamp(0, 127)
+                    as u32;
+                output[out_offset + i] = ((a * b) >> 7) as u8;
+            }
+        }
     }
 }
 fn invalid(msg: impl Into<String>) -> io::Error {
@@ -2315,6 +2466,113 @@ mod tests {
             let mut refreshed = net.new_stack();
             net.refresh(&pos, &mut refreshed);
             assert_current_accumulators_equal(&incremental, &refreshed, net.spec.l1);
+        }
+    }
+
+    #[test]
+    fn simd_kernels_match_scalar_reference_at_boundaries() {
+        let values = [i16::MIN, i16::MAX, -129, -1, 0, 1, 126, 127, 128, 255];
+        let pick = |len: usize, mul: usize, add: usize| -> Vec<i16> {
+            (0..len).map(|i| values[(i * mul + add) % values.len()]).collect()
+        };
+        for len in [0, 1, 15, 16, 17, 31, 32, 33, 65, 1536] {
+            let input = pick(len, 1, 0);
+            let (b, c, d, e) = (pick(len, 3, 1), pick(len, 7, 2), pick(len, 9, 3), pick(len, 1, 5));
+            let mut a = input.clone();
+            add_i16(&mut a, &b);
+            assert_eq!(a, (0..len).map(|i| input[i].wrapping_add(b[i])).collect::<Vec<_>>());
+            let mut a = input.clone();
+            sub_i16(&mut a, &b);
+            assert_eq!(a, (0..len).map(|i| input[i].wrapping_sub(b[i])).collect::<Vec<_>>());
+            let mut a = input.clone();
+            sub_add_i16(&mut a, &b, &c);
+            assert_eq!(
+                a,
+                (0..len)
+                    .map(|i| input[i].wrapping_sub(b[i]).wrapping_add(c[i]))
+                    .collect::<Vec<_>>()
+            );
+            let mut a = input.clone();
+            double_sub_add_i16(&mut a, &b, &c, &d, &e);
+            assert_eq!(
+                a,
+                (0..len)
+                    .map(|i| input[i]
+                        .wrapping_sub(b[i])
+                        .wrapping_add(c[i])
+                        .wrapping_sub(d[i])
+                        .wrapping_add(e[i]))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for half in [1, 7, 15, 16, 17, 31, 32, 33, 768] {
+            let (us, them) = (pick(half * 2, 1, 0), pick(half * 2, 3, 1));
+            let (us_threat, them_threat) = (pick(half * 2, 7, 2), pick(half * 2, 9, 3));
+            for use_threat in [false, true] {
+                let mut out = vec![0; half * 2];
+                if use_threat {
+                    sqr_transform_with_threat(&us, &us_threat, &them, &them_threat, &mut out);
+                } else {
+                    sqr_transform_without_threat(&us, &them, &mut out);
+                }
+                for (side, (acc, threat)) in
+                    [(&us, &us_threat), (&them, &them_threat)].into_iter().enumerate()
+                {
+                    let value = |j: usize| {
+                        let t = if use_threat { threat[j] } else { 0 };
+                        acc[j].wrapping_add(t).clamp(0, 127) as u32
+                    };
+                    for i in 0..half {
+                        assert_eq!(out[side * half + i], ((value(i) * value(half + i)) >> 7) as u8);
+                    }
+                }
+            }
+        }
+        // wasm の経路は padded_input まで積和するので、パディング領域は 0 にする。
+        for (dim, outputs) in [
+            (1usize, 1usize),
+            (15, 3),
+            (16, 1),
+            (17, 3),
+            (30, 32),
+            (33, 3),
+            (1536, 16),
+        ] {
+            let padded = dim.div_ceil(32) * 32;
+            let inputs: Vec<u8> = (0..padded)
+                .map(|i| {
+                    if i < dim {
+                        [0, 127, 128, 255][i % 4]
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let biases: Vec<i32> = (0..outputs as i32).map(|o| o * 1_000_003 - 7).collect();
+            let weight = |o: usize, i: usize| -> i8 {
+                if i < dim {
+                    [0i8, 127, -128, -1, 64][(o * 5 + i * 7 + 1) % 5]
+                } else {
+                    0
+                }
+            };
+            let mut bytes = Vec::new();
+            for bias in &biases {
+                bytes.extend(bias.to_le_bytes());
+            }
+            for o in 0..outputs {
+                bytes.extend((0..padded).map(|i| weight(o, i) as u8));
+            }
+            let affine =
+                DynamicAffine::read(&mut std::io::Cursor::new(&bytes), dim, outputs).unwrap();
+            let mut out = vec![0; outputs];
+            affine.propagate(&inputs, &mut out);
+            for o in 0..outputs {
+                let expected = (0..dim).fold(biases[o], |sum, i| {
+                    sum.wrapping_add(i32::from(inputs[i]) * i32::from(weight(o, i)))
+                });
+                assert_eq!(out[o], expected, "dim={dim} outputs={outputs} row={o}");
+            }
         }
     }
 
