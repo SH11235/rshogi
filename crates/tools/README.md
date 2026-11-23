@@ -65,7 +65,7 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 既定で有効です。TUI・ONNX 依存を外す場合は
 `--no-default-features --features nnue-arch` をビルド引数に追加します。
 `prepack_nnue` は追加の `--features prepacked-nnue` が必要です。
-既定の `nnue-arch` は汎用実装と 1536x16x32・5 種の FT の静的実装を含み、
+既定の `nnue-arch` は汎用実装と 1536x16x32・1536x16x64・2304x16x64、5 種の FT の静的実装を含み、
 対応する拡張なしの LayerStacks を静的に読みます。PSQT・Threat・effect bucket・
 `ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使います。
 別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読めます。

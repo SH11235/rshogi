@@ -156,7 +156,7 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 
 ### 単一構成の build
 
-既定の `nnue-arch` は汎用実装と 1536x16x32・5 種の FT の静的実装を含み、
+既定の `nnue-arch` は汎用実装と 1536x16x32・1536x16x64・2304x16x64、5 種の FT の静的実装を含み、
 対応する拡張なしの LayerStacks を静的に読む。PSQT・Threat・effect bucket・
 `ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使う。
 別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読める。
