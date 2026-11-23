@@ -468,6 +468,9 @@ python -m rshogi_dl.export \
 
 opset 18、batch 軸だけが動的な ONNX を書きます。書く前に次を検査し、合わなければ file を作りません。
 
+ONNX Runtime で使う場合は `--ort-fusion` で残差加算・正規化や BiasGELU の融合を適用できます。
+この出力は ONNX Runtime の拡張演算を使います。推論速度はモデル、batch 幅、実行環境に応じて確認してください。
+
 | 名前 | 型 | shape |
 | --- | --- | --- |
 | 入力 `tokens` | int64 | `[B, 96]` |
