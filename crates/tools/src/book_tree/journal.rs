@@ -55,8 +55,8 @@ pub(super) struct Settings {
 
 impl Settings {
     pub fn new(args: &ReadingArgs) -> Result<Self> {
-        if args.nodes == 0 || args.multipv == 0 || args.hash == 0 {
-            bail!("nodes / multipv / hash は正数が必要です");
+        if args.nodes == 0 || args.multipv == 0 || args.hash == 0 || args.threads == 0 {
+            bail!("nodes / multipv / hash / threads は正数が必要です");
         }
         let mut options = BTreeMap::new();
         let mut names = BTreeSet::new();
@@ -73,7 +73,7 @@ impl Settings {
             options.insert(k.to_owned(), v.trim().to_owned());
         }
         for (k, v) in [
-            ("Threads", "1".to_owned()),
+            ("Threads", args.threads.to_string()),
             ("USI_Hash", args.hash.to_string()),
             ("MultiPV", args.multipv.to_string()),
         ] {
@@ -81,6 +81,9 @@ impl Settings {
                 options.iter().find(|(name, _)| name.eq_ignore_ascii_case(k))
                 && (name != k || value != &v)
             {
+                if k == "Threads" {
+                    bail!("Threads は --threads と同じ値を Threads={v} の形式で指定してください");
+                }
                 bail!("{k} は {v} に固定してください");
             }
             options.insert(k.to_owned(), v);
@@ -164,6 +167,15 @@ impl Settings {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+
+    pub fn threads(&self) -> Result<usize> {
+        // Threads 欄がない台帳との互換性を保つ。
+        self.options
+            .get("Threads")
+            .map_or(Some(1), |value| value.parse().ok())
+            .filter(|&threads| threads > 0)
+            .context("settings の Threads は正数が必要です")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,7 +212,7 @@ impl Reading {
 
     pub fn validate(&self, settings: &Settings) -> Result<()> {
         if self.nodes_limit != settings.nodes
-            || self.threads != 1
+            || self.threads != settings.threads()?
             || self.hash != settings.hash
             || self.draw != settings.draw()
         {
@@ -1536,6 +1548,79 @@ mod tests {
     }
 
     #[test]
+    fn threads_are_part_of_the_fingerprint_and_must_match_engine_option() {
+        use clap::{Args, FromArgMatches};
+
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine");
+        let model = dir.path().join("model.bin");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&model, b"model").unwrap();
+        let eval = format!("EvalFile={}", model.display());
+        let matches = ReadingArgs::augment_args(clap::Command::new("reading"))
+            .try_get_matches_from([
+                "reading",
+                "--engine",
+                engine.to_str().unwrap(),
+                "--engine-option",
+                &eval,
+                "--nodes",
+                "100",
+                "--multipv",
+                "1",
+                "--hash",
+                "16",
+            ])
+            .unwrap();
+        let mut args = ReadingArgs::from_arg_matches(&matches).unwrap();
+        assert_eq!(args.threads, 1);
+        let single = Settings::new(&args).unwrap();
+        assert_eq!(
+            single.fingerprint,
+            "e44f3d1ddea12417b1da8fdeb7c19d6fc87a88a24cfe3085f2ce80982d9b5051"
+        );
+
+        args.threads = 2;
+        let multi = Settings::new(&args).unwrap();
+        assert_eq!(multi.options["Threads"], "2");
+        assert_ne!(single.fingerprint, multi.fingerprint);
+        args.engine_options.push("Threads=2".into());
+        assert_eq!(multi, Settings::new(&args).unwrap());
+        *args.engine_options.last_mut().unwrap() = "Threads=1".into();
+        assert!(Settings::new(&args).unwrap_err().to_string().contains("--threads"));
+    }
+
+    #[test]
+    fn journal_validates_threads_against_each_rows_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let mut single = record("", 0);
+        single.settings.options.insert("Threads".into(), "1".into());
+        single.settings.fingerprint = single.settings.computed_fingerprint().unwrap();
+        let mut multi = record("", 1);
+        multi.settings.options.insert("Threads".into(), "2".into());
+        multi.settings.fingerprint = multi.settings.computed_fingerprint().unwrap();
+        multi.reading.threads = 2;
+        let mut invalid = multi.clone();
+        invalid.reading.threads = 1;
+        assert!(invalid.reading.validate(&invalid.settings).is_err());
+
+        let mut file = File::create(&path).unwrap();
+        for row in [&single, &multi, &invalid] {
+            write_record(&mut file, row);
+        }
+        drop(file);
+        let journal = Journal::open(&path, &single.settings.fingerprint).unwrap();
+        for row in [&single, &multi] {
+            assert_eq!(
+                journal.get_exact(&row.reading.key, &row.settings.fingerprint),
+                Some(&row.reading)
+            );
+        }
+        assert_eq!(journal.skipped_rows[&multi.settings.fingerprint].invalid, 1);
+    }
+
+    #[test]
     fn incremental_slice_collapses_identical_values_and_preserves_prefetch() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source.jsonl");
@@ -2074,6 +2159,7 @@ mod tests {
                 nodes: 100,
                 multipv: 1,
                 hash: 16,
+                threads: 1,
             })
             .unwrap()
         };

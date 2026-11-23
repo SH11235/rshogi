@@ -2731,6 +2731,7 @@ mod tests {
             nodes: 100,
             multipv: 2,
             hash: 16,
+            threads: 1,
         })
         .unwrap();
         let mut second = first.clone();
@@ -2894,6 +2895,7 @@ mod tests {
             nodes: 100,
             multipv: 1,
             hash: 16,
+            threads: 1,
         })
         .unwrap();
         let mut reading = Reading {

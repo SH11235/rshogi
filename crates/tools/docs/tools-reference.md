@@ -9,6 +9,8 @@
 
 自前の定跡と外部定跡の最善・指定点差以内の手の突き合わせは [`book_mine master compare`](book_mine.md#master-compare-自前の定跡と外部定跡の突き合わせ) を使います。
 
+[`book_mine tree serve`](book_mine.md#常駐) の `--threads` で、worker ごとのエンジンの探索スレッド数を指定できます。
+
 定跡の書き出しは [`book_mine master export`](book_mine.md#master-export-定跡プリセット注釈の書き出し) の `--threads` で台帳の読み込み・検証と応手グラフ構築を並列化できます (台帳の採用順とバッファ上限を維持)。
 
 台帳から片側の一本道の区間や指定手順の上位二手を一覧にするには [`book_mine master one-way`](book_mine.md#master-one-way-台帳から一本道の区間を探す) を使います。追加のエンジン探索は行わず、区間の走査量は `--max-visits` で制限できます。

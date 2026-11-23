@@ -3,8 +3,14 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
 
+fn log_command(path: &str, line: &str) -> io::Result<()> {
+    let mut log = OpenOptions::new().create(true).append(true).open(path)?;
+    log.write_all(format!("[{}, {:?}]\n", std::process::id(), line).as_bytes())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = BTreeMap::new();
+    let mut config = BTreeMap::<String, String>::new();
+    let mut initial_threads: Option<String> = None;
     let mut key = String::new();
     let mut multipv = usize::MAX;
     let mut newgame = false;
@@ -20,8 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Ok(line) = rx.recv() {
         let line = line?;
         if let Some(path) = config.get("log") {
-            let mut log = OpenOptions::new().create(true).append(true).open(path)?;
-            log.write_all(format!("[{}, {:?}]\n", std::process::id(), line).as_bytes())?;
+            log_command(path, &line)?;
+        } else if line.starts_with("setoption name Threads value ") {
+            initial_threads = Some(line.clone());
         }
         if line == "usi" {
             for name in [
@@ -41,6 +48,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter_map(|l| l.split_once('\t'))
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
                 .collect();
+            if let (Some(path), Some(command)) = (config.get("log"), initial_threads.take()) {
+                log_command(path, &command)?;
+            }
         } else if let Some(value) = line.strip_prefix("setoption name MultiPV value ") {
             multipv = value.parse()?;
         } else if line == "usinewgame" {
