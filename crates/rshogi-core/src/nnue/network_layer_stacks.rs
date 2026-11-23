@@ -39,6 +39,7 @@ use super::constants::{LAYER_STACK_8X32_L1_OUT, LAYER_STACK_8X32_L2_IN};
     feature = "layerstacks-512x16x32",
     feature = "layerstacks-1024x16x32",
     feature = "layerstacks-3072x16x32",
+    feature = "layerstacks-1024x16x64",
     feature = "layerstacks-2304x16x64",
     feature = "layerstacks-3072x16x64",
     feature = "layerstacks-1536x16x64"
@@ -1094,6 +1095,16 @@ pub type NetworkLayerStacks3072x16x32 = NetworkLayerStacks<
     32,
     HalfKaHmMergedSpec,
 >;
+#[cfg(all(feature = "layerstacks-1024x16x64", feature = "ft-halfka_hm_merged"))]
+/// HalfKaHmMerged の固定寸法 1024×16×64 の LayerStacks。
+pub type NetworkLayerStacks1024x16x64 = NetworkLayerStacks<
+    1024,
+    LAYER_STACK_16X32_L1_OUT,
+    LAYER_STACK_16X32_L2_IN,
+    32,
+    HalfKaHmMergedSpec,
+    64,
+>;
 #[cfg(all(feature = "layerstacks-2304x16x64", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks2304x16x64 = NetworkLayerStacks<
     2304,
@@ -1151,6 +1162,12 @@ pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
     L3072x16x32(
         Box<NetworkLayerStacks<3072, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
     ),
+    #[cfg(feature = "layerstacks-1024x16x64")]
+    L1024x16x64(
+        Box<
+            NetworkLayerStacks<1024, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT, 64>,
+        >,
+    ),
     #[cfg(feature = "layerstacks-2304x16x64")]
     L2304x16x64(
         Box<
@@ -1189,6 +1206,7 @@ pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
         feature = "layerstacks-512x16x32",
         feature = "layerstacks-1024x16x32",
         feature = "layerstacks-3072x16x32",
+        feature = "layerstacks-1024x16x64",
         feature = "layerstacks-2304x16x64",
         feature = "layerstacks-3072x16x64",
         feature = "layerstacks-1536x16x64",
@@ -1217,6 +1235,8 @@ macro_rules! ls_match_size {
             LsNetByFt::L1024x16x32($pat) => $body,
             #[cfg(feature = "layerstacks-3072x16x32")]
             LsNetByFt::L3072x16x32($pat) => $body,
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            LsNetByFt::L1024x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-2304x16x64")]
             LsNetByFt::L2304x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -1231,6 +1251,7 @@ macro_rules! ls_match_size {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64",
@@ -1258,6 +1279,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             Self::L1024x16x32(_) => 1024,
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32(_) => 3072,
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => 1024,
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => 2304,
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -1272,6 +1295,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64",
@@ -1297,6 +1321,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             Self::L1024x16x32(_) => (1024, 16, 32),
             #[cfg(feature = "layerstacks-3072x16x32")]
             Self::L3072x16x32(_) => (3072, 16, 32),
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => (1024, 16, 64),
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => (2304, 16, 64),
             #[cfg(feature = "layerstacks-3072x16x64")]
@@ -1311,6 +1337,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64",
@@ -1495,6 +1522,23 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L3072x16x32(Box::new(net)))
             }
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            (1024, 16, 64) => {
+                let net = NetworkLayerStacks::<
+                    1024,
+                    LAYER_STACK_16X32_L1_OUT,
+                    LAYER_STACK_16X32_L2_IN,
+                    32,
+                    FT,
+                    64,
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
+                Ok(Self::L1024x16x64(Box::new(net)))
+            }
             #[cfg(feature = "layerstacks-2304x16x64")]
             (2304, 16, 64) => {
                 let net = NetworkLayerStacks::<
@@ -1664,6 +1708,14 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            (
+                Self::L1024x16x64(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x64(st),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-2304x16x64")]
             (
                 Self::L2304x16x64(net),
@@ -1734,6 +1786,21 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+                all(
+                    feature = "layerstacks-1024x16x64",
+                    any(
+                        feature = "layerstacks-1536x16x32",
+                        feature = "layerstacks-1536x32x32",
+                        feature = "layerstacks-768x16x32",
+                        feature = "layerstacks-768x8x32",
+                        feature = "layerstacks-512x16x32",
+                        feature = "layerstacks-1024x16x32",
+                        feature = "layerstacks-3072x16x32",
+                        feature = "layerstacks-2304x16x64",
+                        feature = "layerstacks-3072x16x64",
+                        feature = "layerstacks-1536x16x64",
+                    )
+                ),
             ))]
             _ => panic!(
                 "LayerStacksNetwork / LayerStacksAccStack の寸法が不一致 (net={:?}, stack={:?})",
@@ -1800,6 +1867,21 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
             all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
             all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+            all(
+                feature = "layerstacks-1024x16x64",
+                any(
+                    feature = "layerstacks-1536x16x32",
+                    feature = "layerstacks-1536x32x32",
+                    feature = "layerstacks-768x16x32",
+                    feature = "layerstacks-768x8x32",
+                    feature = "layerstacks-512x16x32",
+                    feature = "layerstacks-1024x16x32",
+                    feature = "layerstacks-3072x16x32",
+                    feature = "layerstacks-2304x16x64",
+                    feature = "layerstacks-3072x16x64",
+                    feature = "layerstacks-1536x16x64",
+                )
+            ),
         ))]
         let net_dims = self.architecture_dims();
         #[cfg(any(
@@ -1848,6 +1930,21 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
             all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
             all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+            all(
+                feature = "layerstacks-1024x16x64",
+                any(
+                    feature = "layerstacks-1536x16x32",
+                    feature = "layerstacks-1536x32x32",
+                    feature = "layerstacks-768x16x32",
+                    feature = "layerstacks-768x8x32",
+                    feature = "layerstacks-512x16x32",
+                    feature = "layerstacks-1024x16x32",
+                    feature = "layerstacks-3072x16x32",
+                    feature = "layerstacks-2304x16x64",
+                    feature = "layerstacks-3072x16x64",
+                    feature = "layerstacks-1536x16x64",
+                )
+            ),
         ))]
         let stack_dims = stack.architecture_dims();
         macro_rules! do_update {
@@ -1913,6 +2010,13 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x32(st),
             ) => {
                 do_update!(net, st, L3072x16x32);
+            }
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            (
+                Self::L1024x16x64(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x64(st),
+            ) => {
+                do_update!(net, st, L1024x16x64);
             }
             #[cfg(feature = "layerstacks-2304x16x64")]
             (
@@ -1981,6 +2085,21 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+                all(
+                    feature = "layerstacks-1024x16x64",
+                    any(
+                        feature = "layerstacks-1536x16x32",
+                        feature = "layerstacks-1536x32x32",
+                        feature = "layerstacks-768x16x32",
+                        feature = "layerstacks-768x8x32",
+                        feature = "layerstacks-512x16x32",
+                        feature = "layerstacks-1024x16x32",
+                        feature = "layerstacks-3072x16x32",
+                        feature = "layerstacks-2304x16x64",
+                        feature = "layerstacks-3072x16x64",
+                        feature = "layerstacks-1536x16x64",
+                    )
+                ),
             ))]
             _ => panic!(
                 "LayerStacksNetwork / LayerStacksAccStack の寸法が不一致 (net={:?}, stack={:?})",
@@ -2033,6 +2152,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<3072>::new(),
                 )
             }
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x64(
+                    super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1024>::new(),
+                )
+            }
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L2304x16x64(
@@ -2059,6 +2184,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64",
@@ -2111,6 +2237,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<3072>::new(),
                 )
             }
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccCache::L1024x16x64(
+                    super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1024>::new(),
+                )
+            }
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L2304x16x64(
@@ -2137,6 +2269,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64",
@@ -2193,6 +2326,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
+            #[cfg(feature = "layerstacks-1024x16x64")]
+            Self::L1024x16x64(net) => {
+                let mut acc = AccumulatorLayerStacks::<1024>::new();
+                net.refresh_accumulator(pos, &mut acc);
+                net.evaluate_with_diagnostics(pos, &acc)
+            }
             #[cfg(feature = "layerstacks-2304x16x64")]
             Self::L2304x16x64(net) => {
                 let mut acc = AccumulatorLayerStacks::<2304>::new();
@@ -2219,6 +2358,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64",
@@ -2251,7 +2391,7 @@ pub enum LayerStacksNetwork {
 
 /// `LayerStacksNetwork` の FT × 寸法の軸を 1 段 match で展開する公開マクロ。
 ///
-/// 5 FT × 10 寸法 = 50 組合せを `all(ft-*, layerstacks-*)` cfg gate 付きで列挙し、
+/// 5 FT × 11 寸法 = 55 組合せを `all(ft-*, layerstacks-*)` cfg gate 付きで列挙し、
 /// マッチした variant の内部 `&NetworkLayerStacks<L1, ..., FT>` (concrete 型) を
 /// `$inner` として body に渡す。tools crate (bench / eval / verify) の dispatch
 /// マクロをこれに統合することで、FT/寸法の軸が増えたときの 3 ファイル同時更新漏れを防ぐ。
@@ -2259,7 +2399,7 @@ pub enum LayerStacksNetwork {
 /// マッチアームは呼び出し crate 側の cfg を見て展開されるため、`rshogi-core` 側で
 /// 有効な variant を caller 側がすべては有効化していない場合に備えて `_ =>`
 /// fallback を引数として受け取る。caller のすべての (`ft-*`, `layerstacks-*`) feature が
-/// 揃っている = 50 arm (`nnue-effect-bucket` の 10 arm は別) で exhaustive なときは
+/// 揃っている = 55 arm (`nnue-effect-bucket` の 11 arm は別) で exhaustive なときは
 /// fallback arm を cfg gate でドロップし、
 /// `#[allow(unreachable_patterns)]` を不要にする。
 ///
@@ -2302,6 +2442,10 @@ macro_rules! ls_dispatch_ft_size {
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1024x16x64"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
+                $crate::nnue::LsNetByFt::L1024x16x64($inner),
+            ) => $body,
             #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-2304x16x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
@@ -2341,6 +2485,10 @@ macro_rules! ls_dispatch_ft_size {
             #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-3072x16x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1024x16x64"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
+                $crate::nnue::LsNetByFt::L1024x16x64($inner),
             ) => $body,
             #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-2304x16x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
@@ -2382,6 +2530,10 @@ macro_rules! ls_dispatch_ft_size {
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1024x16x64"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
+                $crate::nnue::LsNetByFt::L1024x16x64($inner),
+            ) => $body,
             #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-2304x16x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
@@ -2421,6 +2573,10 @@ macro_rules! ls_dispatch_ft_size {
             #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-3072x16x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1024x16x64"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaMerged(
+                $crate::nnue::LsNetByFt::L1024x16x64($inner),
             ) => $body,
             #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-2304x16x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
@@ -2462,6 +2618,10 @@ macro_rules! ls_dispatch_ft_size {
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1024x16x64"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaSplit(
+                $crate::nnue::LsNetByFt::L1024x16x64($inner),
+            ) => $body,
             #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-2304x16x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
@@ -2502,6 +2662,10 @@ macro_rules! ls_dispatch_ft_size {
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L3072x16x32(
                 $inner,
             )) => $body,
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1024x16x64"))]
+            $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1024x16x64(
+                $inner,
+            )) => $body,
             #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-2304x16x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L2304x16x64(
                 $inner,
@@ -2514,7 +2678,7 @@ macro_rules! ls_dispatch_ft_size {
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1536x16x64(
                 $inner,
             )) => $body,
-            // caller の (ft-*, layerstacks-*) を 5 × 10 全部有効化したときは 50 arm が
+            // caller の (ft-*, layerstacks-*) を 5 × 11 全部有効化したときは 55 arm が
             // exhaustive。そのときだけ fallback arm を cfg gate でドロップして
             // unreachable warning を避ける。
             #[cfg(not(all(
@@ -2530,6 +2694,7 @@ macro_rules! ls_dispatch_ft_size {
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-1024x16x64",
                 feature = "layerstacks-2304x16x64",
                 feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64",
@@ -2983,6 +3148,7 @@ mod tests {
         check_size!(1536, 16, 30, 32, 32, HalfKaHmSplitSpec);
         check_size!(1536, 32, 62, 64, 32, HalfKaHmMergedSpec);
         check_size!(1536, 16, 30, 32, 64, HalfKaHmMergedSpec);
+        check_size!(1024, 16, 30, 32, 64, HalfKaHmMergedSpec);
         check_size!(2304, 16, 30, 32, 64, HalfKaHmMergedSpec);
         check_size!(3072, 16, 30, 32, 32, HalfKaHmMergedSpec);
         check_size!(3072, 16, 30, 32, 64, HalfKaHmMergedSpec);
@@ -3101,7 +3267,9 @@ mod tests {
     #[cfg(all(feature = "nnue-threat", feature = "layerstack-arch"))]
     #[test]
     fn partial_threat_forward_matches_zero_padded_scalar_and_avx512_lane_model() {
-        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+        const N: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+            1024
+        } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
         } else {
             1536
@@ -3161,17 +3329,22 @@ mod tests {
     ))]
     #[test]
     fn loader_rejects_wrong_threat_width_before_reading_ft() {
-        const N: usize = if cfg!(feature = "layerstacks-2304x16x64") {
+        const N: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+            1024
+        } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
         } else {
             1536
         };
-        const L3: usize =
-            if cfg!(any(feature = "layerstacks-2304x16x64", feature = "layerstacks-1536x16x64")) {
-                64
-            } else {
-                32
-            };
+        const L3: usize = if cfg!(any(
+            feature = "layerstacks-1024x16x64",
+            feature = "layerstacks-2304x16x64",
+            feature = "layerstacks-1536x16x64"
+        )) {
+            64
+        } else {
+            32
+        };
         for width in [512, 768, N] {
             if width == super::super::expected_threat_width(N) {
                 continue;

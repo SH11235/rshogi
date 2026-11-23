@@ -52,6 +52,7 @@
         feature = "layerstacks-512x16x32",
         feature = "layerstacks-1024x16x32",
         feature = "layerstacks-3072x16x32",
+        feature = "layerstacks-1024x16x64",
         feature = "layerstacks-2304x16x64",
         feature = "layerstacks-3072x16x64",
         feature = "layerstacks-1536x16x64"

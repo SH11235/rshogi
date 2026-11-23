@@ -295,8 +295,8 @@ pub mod test_utils {
             feature = "nnue-runtime-dimensions",
             all(
                 feature = "prepacked-nnue",
-                feature = "nnue-psqt",
-                feature = "nnue-threat"
+                feature = "nnue-threat",
+                any(feature = "nnue-psqt", feature = "layerstacks-1024x16x64")
             )
         ))]
         SingleByteEven,
@@ -420,8 +420,8 @@ pub mod test_utils {
                 feature = "nnue-runtime-dimensions",
                 all(
                     feature = "prepacked-nnue",
-                    feature = "nnue-psqt",
-                    feature = "nnue-threat"
+                    feature = "nnue-threat",
+                    any(feature = "nnue-psqt", feature = "layerstacks-1024x16x64")
                 )
             ))]
             SyntheticFtValues::SingleByteEven => {

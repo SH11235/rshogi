@@ -983,6 +983,9 @@ mod tests {
         let core_editions = preset_editions(CORE_CARGO_TOML).unwrap();
         let usi_editions = preset_editions(USI_CARGO_TOML).unwrap();
         for edition in [
+            "layerstacks-halfka_hm_merged-1024x16x64-none",
+            "layerstacks-halfka_hm_merged-1024x16x64-threat",
+            "layerstacks-halfka_hm_merged-1024x16x64-threat512",
             "layerstacks-halfka_hm_merged-2304x16x64-none",
             "layerstacks-halfka_hm_merged-2304x16x64-threat",
             "layerstacks-halfka_hm_merged-2304x16x64-threat512",

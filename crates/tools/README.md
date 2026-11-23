@@ -69,6 +69,7 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 [rescore_psv の単一構成の build](docs/rescore_psv.md#単一構成の-build) を参照してください。
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` / `eval_sfens` / `nnue_saturation` /
 `verify_nnue_accumulator`) には、tools の `layerstack-arch` feature (`nnue-arch` に含まれる) が必要です。
+診断するモデルに合わせて寸法を指定します。1024×16×64 には `layerstacks-1024x16x64` を使います。
 
 [`eval_sfens`](docs/eval_sfens.md)、[`nnue_saturation`](docs/nnue_saturation.md)、
 [`bench_nnue_eval`](docs/bench_nnue_eval.md) は、ネットに `ls_bucket=` がある場合に

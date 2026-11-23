@@ -78,7 +78,7 @@
 | [`verify_nnue_accumulator`](verify_nnue_accumulator.md) | NNUE の差分更新と再計算の一致を検証（LayerStacks 最大 64 bucket（PSQT 付きは最大 32）） |
 | [`dump_effect_bucket_golden`](dump_effect_bucket_golden.md) | effect bucket の active index を設定別に dump |
 | [`prepack_nnue`](prepack_nnue.md) | LayerStacks FT を事前展開して共有読み込み用コンテナを生成 |
-| [`resize_nnue_threat`](resize_nnue_threat.md) | Threat を部分幅に縮小し、任意の seed で乱数化 |
+| [`resize_nnue_threat`](resize_nnue_threat.md) | Threat を部分幅に縮小し、任意の seed で乱数化（1024×16×64 の部分幅は512列） |
 | [`permute_nnue_ft`](permute_nnue_ft.md) | LayerStacks の FT と L1 列を評価値を保って並べ替え |
 | [`extract_bench_positions`](extract_bench_positions.md) | CSA / 自己対局 JSONL からラベル品質測定用の局面を抽出 |
 | [`label_bench_positions`](label_bench_positions.md) | ベンチ局面へ深い NNUE 探索の評価ラベルを付与 |

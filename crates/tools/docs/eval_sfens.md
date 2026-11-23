@@ -33,7 +33,8 @@ Linux で共有メモリの新規確保に失敗した重みは、プロセス�
 ### L2=64 の専用モデル
 
 静的 LayerStacks の解析には、モデルの寸法に合わせて
-`--features layerstacks-3072x16x64`、`--features layerstacks-2304x16x64` または `--features layerstacks-1536x16x64`
+`--features layerstacks-1024x16x64`、`--features layerstacks-1536x16x64`、
+`--features layerstacks-2304x16x64` または `--features layerstacks-3072x16x64`
 をビルド時に追加する。L2 の中間出力も指定した幅で計算する。
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

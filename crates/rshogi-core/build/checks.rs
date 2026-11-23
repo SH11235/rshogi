@@ -9,6 +9,7 @@ const LAYERSTACK_FEATURES: &[&str] = &[
     "layerstacks-512x16x32",
     "layerstacks-1024x16x32",
     "layerstacks-3072x16x32",
+    "layerstacks-1024x16x64",
     "layerstacks-2304x16x64",
     "layerstacks-3072x16x64",
     "layerstacks-1536x16x64",
@@ -72,9 +73,10 @@ fn validate_feature_combination(
     if threat_width_512
         && !(static_layerstack
             && (size_2304 || has_feature("layerstacks-1536x16x32")
-                || has_feature("layerstacks-1536x16x64")))
+                || has_feature("layerstacks-1536x16x64")
+                || has_feature("layerstacks-1024x16x64")))
     {
-        return Err("threat-width-512 requires a static 1536x16x32, 1536x16x64 or 2304x16x64 edition".to_owned());
+        return Err("threat-width-512 requires a static 1024x16x64, 1536x16x32, 1536x16x64 or 2304x16x64 edition".to_owned());
     }
     if threat_width_768 && !(static_layerstack && size_2304) {
         return Err("threat-width-768 requires a static 2304x16x64 edition".to_owned());
