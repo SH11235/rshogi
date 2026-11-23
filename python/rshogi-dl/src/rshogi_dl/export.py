@@ -88,7 +88,7 @@ def _check_tensor(
         raise ExportError(f"{name}: expected shape [dynamic batch, {trailing}], got {shape}")
 
 
-def verify_onnx_bytes(data: bytes, config: ModelConfig) -> None:
+def verify_onnx_bytes(data: bytes, config: ModelConfig, *, ort_fusion: bool = False) -> None:
     """ONNX の graph・metadata・動的 batch を検査する。合わなければ :class:`ExportError`。"""
     model = onnx.load_from_string(data)
     onnx.checker.check_model(model)
@@ -110,7 +110,14 @@ def verify_onnx_bytes(data: bytes, config: ModelConfig) -> None:
         raise ExportError("model-local functions are not expected")
     op_counts: dict[str, int] = {}
     for node in graph.node:
-        if node.domain not in ("", "ai.onnx"):
+        if node.domain == "com.microsoft" and ort_fusion:
+            if opsets.get(node.domain) != 1 or node.op_type not in {
+                "BiasGelu",
+                "Gelu",
+                "SkipLayerNormalization",
+            }:
+                raise ExportError(f"unsupported ORT fusion: {node.op_type}")
+        elif node.domain not in ("", "ai.onnx"):
             raise ExportError(f"non-standard operator domain: {node.domain}")
         op_counts[node.op_type] = op_counts.get(node.op_type, 0) + 1
     convolutions = sorted(op for op in op_counts if "Conv" in op)
@@ -144,7 +151,20 @@ def verify_onnx_bytes(data: bytes, config: ModelConfig) -> None:
             raise ExportError("value output is outside [0, 1]")
 
 
-def onnx_bytes(model: SquareTransformer) -> bytes:
+def _fuse_for_ort(model: onnx.ModelProto, config: ModelConfig) -> onnx.ModelProto:
+    from onnxruntime.transformers.optimizer import optimize_model
+
+    fused = optimize_model(
+        model, model_type="vit", num_heads=config.heads, hidden_size=config.width, opt_level=0
+    ).model
+    if any(node.domain == "com.microsoft" for node in fused.graph.node) and not any(
+        entry.domain == "com.microsoft" for entry in fused.opset_import
+    ):
+        fused.opset_import.append(onnx.helper.make_opsetid("com.microsoft", 1))
+    return fused
+
+
+def onnx_bytes(model: SquareTransformer, *, ort_fusion: bool = False) -> bytes:
     """model を metadata 付きの ONNX に変換し、検査済みの bytes を返す。"""
     wrapper = ExportModule(model).eval()
     buffer = io.BytesIO()
@@ -165,17 +185,21 @@ def onnx_bytes(model: SquareTransformer) -> bytes:
         )
     exported = onnx.shape_inference.infer_shapes(onnx.load_from_string(buffer.getvalue()))
     onnx.helper.set_model_props(exported, expected_metadata(model.config))
+    if ort_fusion:
+        exported = _fuse_for_ort(exported, model.config)
     data = exported.SerializeToString()
-    verify_onnx_bytes(data, model.config)
+    verify_onnx_bytes(data, model.config, ort_fusion=ort_fusion)
     return data
 
 
-def export_onnx(model: SquareTransformer, output_path: str | Path) -> Path:
+def export_onnx(
+    model: SquareTransformer, output_path: str | Path, *, ort_fusion: bool = False
+) -> Path:
     """検査を通った ONNX だけを新規 file に書く。既存 file は上書きしない。"""
     resolved = resolve_new_artifact(output_path)
     if resolved.suffix != ".onnx":
         raise ArtifactPathError("output file name must end with .onnx")
-    data = onnx_bytes(model)
+    data = onnx_bytes(model, ort_fusion=ort_fusion)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     with open(resolved, "xb") as stream:
         stream.write(data)
@@ -189,6 +213,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--checkpoint", required=True, help="smoke が保存した checkpoint")
     parser.add_argument(
+        "--ort-fusion", action="store_true", help="ONNX Runtime 向けの演算融合を適用する"
+    )
+    parser.add_argument(
         "--output",
         required=True,
         help="新規に作る .onnx の絶対 path。$SHOGI_DATA/dl/transformer-v1-validation/ か "
@@ -199,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         # checkpoint の読み込みより先に出力先を確かめる。
         resolve_new_artifact(args.output)
         checkpoint = load_checkpoint(args.checkpoint)
-        output = export_onnx(checkpoint.model, args.output)
+        output = export_onnx(checkpoint.model, args.output, ort_fusion=args.ort_fusion)
     except (ArtifactPathError, CheckpointError, ExportError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

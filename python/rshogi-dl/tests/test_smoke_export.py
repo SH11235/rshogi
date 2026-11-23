@@ -226,6 +226,21 @@ class SmokeAndExportTest(unittest.TestCase):
         with self.assertRaisesRegex(export.ExportError, "dynamic batch"):
             export.verify_onnx_bytes(fixed_batch.SerializeToString(), TEST_CONFIG)
 
+    def test_optional_ort_fusion_preserves_export_contract(self) -> None:
+        path = self.models / "ort-fused.onnx"
+        code, _, stderr = run_cli(
+            export.main,
+            ["--checkpoint", str(self.checkpoint_path), "--output", str(path), "--ort-fusion"],
+        )
+        self.assertEqual(code, 0, stderr)
+        model = onnx.load(path)
+        fused_ops = {node.op_type for node in model.graph.node if node.domain == "com.microsoft"}
+        self.assertLessEqual({"SkipLayerNormalization", "BiasGelu"}, fused_ops)
+        with self.assertRaisesRegex(export.ExportError, "non-standard operator"):
+            export.verify_onnx_bytes(path.read_bytes(), TEST_CONFIG)
+        reference = load_checkpoint(self.checkpoint_path).model
+        parity.check_parity(reference, parity.open_session(path, "cpu"), self._parity_tokens(), "cpu")
+
     def test_export_refuses_overwrite_and_outside_paths(self) -> None:
         arguments = ["--checkpoint", str(self.checkpoint_path), "--output"]
         code, _, stderr = run_cli(export.main, [*arguments, str(self.onnx_path)])
