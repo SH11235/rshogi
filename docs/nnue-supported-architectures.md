@@ -126,7 +126,8 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 | 2304 | 16×64 |
 | 3072 | 16×32、16×64 |
 
-部分幅の Threat は固定 edition で扱います。`ThreatWidth=512` は 1024×16×64 / 1536×16×32 /
+部分幅の Threat は固定 edition で扱います。`ThreatWidth=256` は 1536×16×64 の `threat256` を選びます。
+`ThreatWidth=512` は 1024×16×64 / 1536×16×32 /
 1536×16×64 / 2304×16×64 の `threat512`、`ThreatWidth=768` は 1024×16×64 / 1536×16×64 / 2304×16×64 の
 `threat768` を選びます。`ThreatWidth` を省略したヘッダーは FT と同じ全幅を表します。
 

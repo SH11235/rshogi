@@ -1,12 +1,22 @@
 //! Threat accumulator の格納幅。
 
-#[cfg(any(feature = "threat-width-512", feature = "threat-width-768"))]
+#[cfg(any(
+    feature = "threat-width-256",
+    feature = "threat-width-512",
+    feature = "threat-width-768"
+))]
 pub(crate) type ThreatAccumulation<const L1: usize> = [i16; width(0)];
-#[cfg(not(any(feature = "threat-width-512", feature = "threat-width-768")))]
+#[cfg(not(any(
+    feature = "threat-width-256",
+    feature = "threat-width-512",
+    feature = "threat-width-768"
+)))]
 pub(crate) type ThreatAccumulation<const L1: usize> = [i16; L1];
 
 pub(crate) const fn width(l1: usize) -> usize {
-    if cfg!(feature = "threat-width-768") {
+    if cfg!(feature = "threat-width-256") {
+        256
+    } else if cfg!(feature = "threat-width-768") {
         768
     } else if cfg!(feature = "threat-width-512") {
         512

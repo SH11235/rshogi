@@ -4,8 +4,8 @@ LayerStacks の Threat 行を指定幅に縮め、FT・PSQT・全 bucket の FC 
 
 ```bash
 cargo run -p tools --no-default-features --bin resize_nnue_threat -- \
-  --nnue "$SHOGI_DATA/nnue/threat-full.bin" \
-  --width 512 --output "$SHOGI_DATA/nnue/threat512.bin"
+  --nnue "$SHOGI_DATA/nnue/1536x16x64-threat-full.bin" \
+  --width 256 --output "$SHOGI_DATA/nnue/threat256.bin"
 ```
 
 `--seed 42` を付けると Threat だけを一様な整数乱数 -4..=4 に置き換えます。同じ入力・幅・seed で出力は一致します。省略時は各行の前半の先頭 T/2 列と後半の先頭 T/2 列を保持します。幅は 128 の倍数かつ入力の Threat 幅以下です。FT や後段の係数を保持しても、幅を縮めると評価値と探索木は変わります。未学習の変換 net は速度試験用です。
@@ -23,6 +23,7 @@ cargo run -p tools --no-default-features --bin resize_nnue_threat -- \
 - PSQT は従来の独立した駒由来 i32 accumulator です。Threat 重みの PSQT 項はありません。
 
 部分幅の net は FT と後段の寸法、Threat 幅が一致する edition で読み込みます。
+256列では 1536x16x64 の `threat256` を選びます。
 512列では 1024x16x64 / 1536x16x32 / 1536x16x64 / 2304x16x64 の `threat512`、768列では
 1024x16x64 / 1536x16x64 / 2304x16x64 の `threat768` を選びます。全幅の net は同じ寸法の `threat` edition を使います。
 `edition-universal` は全幅の profile 0 に対応します。
@@ -30,7 +31,7 @@ edition 名は [ビルドガイド](../../../docs/build.md) を参照してく�
 
 ```bash
 cargo run -q -p xtask -- build \
-  --edition layerstacks-halfka_hm_merged-1536x16x32-threat512 \
+  --edition layerstacks-halfka_hm_merged-1536x16x64-threat256 \
   --features use-lazy-evaluate --profile production
 ```
 
@@ -38,5 +39,5 @@ PSQT 付き net 用の engine は、`cargo build` で edition と `nnue-psqt` �
 
 ```bash
 cargo build -p rshogi-usi --no-default-features --profile production \
-  --features edition-layerstacks-halfka_hm_merged-1536x16x32-threat512,nnue-psqt,use-lazy-evaluate
+  --features edition-layerstacks-halfka_hm_merged-1536x16x64-threat256,nnue-psqt,use-lazy-evaluate
 ```

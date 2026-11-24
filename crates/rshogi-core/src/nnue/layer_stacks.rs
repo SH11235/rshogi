@@ -1910,6 +1910,8 @@ mod kernel_tests {
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn fused_threat_matches_wrapped_accumulators() {
+        #[cfg(target_feature = "avx512vnni")]
+        assert!(avx512::supported::<1536, 16, 64>());
         fn check<const N: usize, const L2: usize>() {
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0153_6512);
             let bucket = random_bucket::<N, L2>(&mut rng);
@@ -1966,6 +1968,7 @@ mod kernel_tests {
         check::<1536, 32>();
         check::<2304, 64>();
         check::<3072, 64>();
+        check::<1536, 64>();
     }
 
     #[test]
