@@ -24,6 +24,7 @@ struct Engine {
     device: i32,
     cuda_tf32: bool,
     use_tensorrt: bool,
+    tensorrt_graph: bool,
     tensorrt_cache: Option<PathBuf>,
     cache_mib: usize,
     overhead: u64,
@@ -97,6 +98,7 @@ impl Engine {
             device: 0,
             cuda_tf32: true,
             use_tensorrt: false,
+            tensorrt_graph: false,
             tensorrt_cache: None,
             cache_mib: 0,
             overhead: 50,
@@ -118,13 +120,16 @@ impl Engine {
     fn initialize(&mut self) -> Result<()> {
         self.join(true)?;
         if self.runtime.is_none() {
-            let evaluator = ModelEvaluator::with_options(
-                &self.model_config(),
-                &ModelOptions {
-                    cuda_tf32: self.cuda_tf32,
-                    profiling: None,
-                },
-            )?;
+            let config = self.model_config();
+            let options = ModelOptions {
+                cuda_tf32: self.cuda_tf32,
+                profiling: None,
+            };
+            let evaluator = if self.tensorrt_graph {
+                ModelEvaluator::with_tensorrt_graph(&config, &options)?
+            } else {
+                ModelEvaluator::with_options(&config, &options)?
+            };
             self.runtime = Some((
                 prepare_evaluator(
                     evaluator,
@@ -167,6 +172,9 @@ impl Engine {
             }
             "TensorRT" => {
                 self.use_tensorrt = value.parse()?;
+            }
+            "TensorRTGraph" => {
+                self.tensorrt_graph = value.parse()?;
             }
             "TensorRTCacheDir" => {
                 self.tensorrt_cache = match value {
@@ -277,6 +285,7 @@ impl Engine {
                     "Device type spin default 0 min -1 max 15",
                     "CudaTF32 type check default true",
                     "TensorRT type check default false",
+                    "TensorRTGraph type check default false",
                     "TensorRTCacheDir type string default <empty>",
                     "NNCacheMiB type spin default 0 min 0 max 1024",
                     NN_BATCH_OPTION,
@@ -578,6 +587,23 @@ mod tests {
         engine.option("setoption name TensorRT value false")?;
         assert!(!engine.model_config().use_tensorrt);
         assert_eq!(engine.model_config().tensorrt_cache, None);
+        Ok(())
+    }
+
+    #[test]
+    fn tensorrt_graph_requires_tensorrt_and_a_batched_search() -> Result<()> {
+        let mut engine = Engine::new()?;
+        assert!(!engine.tensorrt_graph);
+        engine.option("setoption name TensorRTGraph value true")?;
+        assert!(engine.tensorrt_graph);
+        assert_eq!(engine.initialize().unwrap_err().to_string(), "TensorRTGraph requires TensorRT");
+        engine.option("setoption name TensorRT value true")?;
+        assert_eq!(
+            engine.initialize().unwrap_err().to_string(),
+            "TensorRTGraph requires NNBatchSize greater than 1"
+        );
+        engine.option("setoption name TensorRTGraph value false")?;
+        assert!(!engine.tensorrt_graph);
         Ok(())
     }
 

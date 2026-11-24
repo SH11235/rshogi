@@ -41,6 +41,7 @@ go nodes 128
 | Device | 0 | CUDA device id。-1 は CPU |
 | CudaTF32 | true | false で CUDA TF32 を無効化。true は runtime の既定設定を維持。CPU では無効 |
 | TensorRT | false | token 入力のモデルを NVIDIA TensorRT の FP16 で実行 |
+| TensorRTGraph | false | 満杯のバッチを CUDA Graph で実行。Linux・CUDA 12 用 |
 | TensorRTCacheDir | 空 | TensorRT エンジンのキャッシュ先ディレクトリ |
 | NNCacheMiB | 0 | raw policy/value キャッシュの上限 MiB。0 は無効、最大1024 |
 | NNBatchSize | 1 | 同期推論にまとめる葉の上限。1〜256。1 は scalar 探索 |
@@ -101,6 +102,8 @@ value は手番側の期待スコア（勝ち1、引き分け0.5、負け0）で
 `TensorRT=true` には GPU 対応の ONNX Runtime と、その TensorRT execution provider に対応する NVIDIA TensorRT ライブラリが必要です。token 入力のモデルを指定し、`Device` に CUDA device id を設定してください。TensorRT が担当しない演算には ONNX Runtime の CUDA 等が使われます。TensorRT の FP16 と通常の CUDA では推論値に差が出る場合があります。
 
 初回の `isready` では、1〜`NNBatchSize` の入力に対する TensorRT エンジンを構築します。複数プロセスで使う場合は、モデル、設定、GPU を揃えた1プロセスで先にキャッシュを作成してください。同じ名前でモデルを差し替える場合も含め、モデルの内容、プロファイル設定、ONNX Runtime・TensorRT の版、または GPU を変更したら新しいキャッシュ先を指定してください。
+
+`TensorRTGraph=true` は `TensorRT=true`、`NNBatchSize > 1` と Linux の CUDA 12 runtime (`libcudart.so.12`) が必要です。モデル全体を TensorRT に割り当てられる必要があります。満杯のバッチ専用のセッションと GPU buffer を確保し、小さいバッチは通常の TensorRT セッションで実行します。追加の VRAM を使用するため、特に複数のエンジンが同じ GPU を使う場合は、速度とメモリ使用量を確認してください。
 
 `CudaTF32` は `true` / `false` を受理し、変更時はモデルと cache を再構築します。厳密な FP32 出力の照合には `CudaTF32=false` と `TensorRT=false` を使います。runtime の既定 precision は TF32 を許可する場合があるため、同じ float32 入出力でも CPU と差が出ることがあります。
 

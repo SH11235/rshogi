@@ -8,6 +8,7 @@ description = "Policy/value inference and model features for rshogi"
 
 [dependencies]
 anyhow.workspace = true
+libloading = { version = "0.9", optional = true }
 rshogi-core = { path = "../rshogi-core", default-features = false }
 rayon = { version = "1.10", optional = true }
 ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic", "api-24"] }
@@ -19,7 +20,7 @@ libc = "0.2"
 default = []
 cuda-pinned-output = []
 cuda-basic-single-row-session = []
-onnx = ["dep:ort", "dep:rayon"]
+onnx = ["dep:ort", "dep:rayon", "dep:libloading"]
 inference-diagnostics = []
 policy-validation-reduction = []
 
