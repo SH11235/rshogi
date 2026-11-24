@@ -55,7 +55,12 @@ kingrank9 の net は `--ls-bucket-mode kingrank9` で `--ls-progress-*` を外�
 tatara checkout は環境変数 `$TATARA_DIR` があればそれを使い、無ければユーザーに場所を聞く。
 
 **kingrank9 の net は Step 2 の対象外**。rshogi `eval_sfens` の `--bucket-mode` は
-`progresskpabs` しか受け付けないため、kingrank9 の net は Step 1 で検証する。
+進行度 (`progresskpabs` / `progresskpabsq16`) と header の spec だけを扱うため、kingrank9 の net は Step 1 で検証する。
+
+**header に `ls_bucket=<spec>` を持つ net** (自玉・敵玉の段などで bucket を選ぶ spec の bucket) は、
+両側とも header の spec で routing するので進行度の引数 (`--progress-coeff` / `--progress-buckets` /
+`--bucket-mode progresskpabsq16`) を渡さない。rshogi `eval_sfens` はそれらと header の spec の組み合わせを
+エラーにする。header は `head -c 400 <net.bin> | strings | head -1` で確かめる。
 
 ```bash
 # SFEN だけを 1 行 1 局面で用意する
@@ -69,7 +74,11 @@ cargo run --release -p tools --bin eval_sfens -- \
   --bucket-mode progresskpabs --progress-coeff <progress.bin> \
   --progress-buckets <routing bucket 数> --count <局面数>
 
+# spec の bucket の net: 進行度の引数を外して
+#   cargo run --release -p tools --bin eval_sfens -- --nnue <net.bin> --sfens sfens.txt --count <局面数>
+
 # 参照値 (tatara): stdout に cp、--debug で stderr に bucket / raw / cp を出す
+# (spec の bucket の net は --bucket-mode / --progress-coeff を外す)
 cargo build --release --manifest-path "$TATARA_DIR/Cargo.toml" -p eval-sfen
 args=(); while IFS= read -r s; do args+=(--sfen "$s"); done < sfens.txt
 "$TATARA_DIR/target/release/eval_sfen" --nnue-file <net.bin> \
