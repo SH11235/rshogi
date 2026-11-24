@@ -15,7 +15,7 @@ fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {
 fn partial_threat_width_requires_supported_static_size() {
     for size in LAYERSTACK_FEATURES {
         for mode in ["mode-specific", "mode-family", "mode-universal", ""] {
-            for width in ["threat-width-512", "threat-width-768"] {
+            for width in ["threat-width-256", "threat-width-512", "threat-width-768"] {
                 let features = [
                     mode,
                     "layerstack-arch",
@@ -26,9 +26,10 @@ fn partial_threat_width_requires_supported_static_size() {
                 ];
                 let supported = mode == "mode-specific"
                     && match *size {
-                        "layerstacks-1024x16x64"
-                        | "layerstacks-1536x16x64"
-                        | "layerstacks-2304x16x64" => true,
+                        "layerstacks-1536x16x64" => true,
+                        "layerstacks-1024x16x64" | "layerstacks-2304x16x64" => {
+                            width != "threat-width-256"
+                        }
                         "layerstacks-1536x16x32" => width == "threat-width-512",
                         _ => false,
                     };
@@ -44,16 +45,26 @@ fn partial_threat_width_requires_supported_static_size() {
 
 #[test]
 fn partial_threat_widths_are_mutually_exclusive() {
-    let has = lookup(&[
-        "mode-specific",
-        "layerstack-arch",
-        "ft-halfka_hm_merged",
-        "layerstacks-2304x16x64",
-        "nnue-threat",
-        "threat-width-512",
-        "threat-width-768",
-    ]);
-    assert!(validate_feature_combination(&has).unwrap_err().contains("mutually exclusive"));
+    for (a, b) in [
+        ("threat-width-256", "threat-width-512"),
+        ("threat-width-256", "threat-width-768"),
+        ("threat-width-512", "threat-width-768"),
+    ] {
+        let features = [
+            "mode-specific",
+            "layerstack-arch",
+            "ft-halfka_hm_merged",
+            "layerstacks-1536x16x64",
+            "nnue-threat",
+            a,
+            b,
+        ];
+        assert!(
+            validate_feature_combination(&lookup(&features))
+                .unwrap_err()
+                .contains("mutually exclusive")
+        );
+    }
 }
 
 #[test]

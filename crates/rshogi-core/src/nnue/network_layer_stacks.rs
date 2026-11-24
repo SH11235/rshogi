@@ -3373,7 +3373,7 @@ mod tests {
         } else {
             32
         };
-        for width in [512, 768, N] {
+        for width in [256, 512, 768, N] {
             let mut arch = format!(
                 "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720,ls_bucket=ownking:2"
             );

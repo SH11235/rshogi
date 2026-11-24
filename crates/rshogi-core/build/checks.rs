@@ -63,12 +63,24 @@ fn validate_feature_combination(
 
     let ft_count = FT_FEATURES.iter().filter(|f| has_feature(f)).count();
 
+    let threat_width_256 = has_feature("threat-width-256");
     let threat_width_512 = has_feature("threat-width-512");
     let threat_width_768 = has_feature("threat-width-768");
-    if threat_width_512 && threat_width_768 {
-        return Err("threat-width-512 and threat-width-768 are mutually exclusive".to_owned());
+    if [threat_width_256, threat_width_512, threat_width_768]
+        .into_iter()
+        .filter(|&enabled| enabled)
+        .count()
+        > 1
+    {
+        return Err(
+            "threat-width-256, threat-width-512 and threat-width-768 are mutually exclusive"
+                .to_owned(),
+        );
     }
     let static_layerstack = mode_specific && layerstack_arch && !runtime_dimensions;
+    if threat_width_256 && !(static_layerstack && has_feature("layerstacks-1536x16x64")) {
+        return Err("threat-width-256 requires a static 1536x16x64 edition".to_owned());
+    }
     let partial_width_l2_64 = has_feature("layerstacks-1024x16x64")
         || has_feature("layerstacks-1536x16x64")
         || has_feature("layerstacks-2304x16x64");

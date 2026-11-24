@@ -173,12 +173,13 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 | activation (HalfKX) | `crelu` / `screlu` / `pairwise` | ✗ | ✓ |
 | ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
 | size (LS) | [対応する11構成](./nnue-supported-architectures.md#layerstacks)から選択 | ✗ | ✓ |
-| ext (LS) | `psqt` / `threat` / `psqt_threat` / `threat512` / `threat768` | ✓ | ✓ |
+| ext (LS) | `psqt` / `threat` / `psqt_threat` / `threat256` / `threat512` / `threat768` | ✓ | ✓ |
 
 - slot の省略は alias `edition-halfkx` / `edition-layerstacks` 以外では不可。全候補を
   dispatch したいときは `any` を書く。
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
+- `threat256` は 1536x16x64 で256列の Threat を使う静的 edition。
 - `threat512` は 1024x16x64 / 1536x16x32 / 1536x16x64 / 2304x16x64 で512列の Threat を使う静的 edition。
   `threat768` は 1024x16x64 / 1536x16x64 / 2304x16x64 で768列の Threat を使う。形式と変換は
   [`resize_nnue_threat`](../crates/tools/docs/resize_nnue_threat.md) を参照。
@@ -460,6 +461,7 @@ Threat 付きの net は、FT 幅とヘッダーの `ThreatWidth` に合う edit
 | 1024 | 512 | `layerstacks-halfka_hm_merged-1024x16x64-threat512` |
 | 1024 | 768 | `layerstacks-halfka_hm_merged-1024x16x64-threat768` |
 | 1536 | 全幅 | `layerstacks-halfka_hm_merged-1536x16x64-threat` |
+| 1536 | 256 | `layerstacks-halfka_hm_merged-1536x16x64-threat256` |
 | 1536 | 512 | `layerstacks-halfka_hm_merged-1536x16x64-threat512` |
 | 1536 | 768 | `layerstacks-halfka_hm_merged-1536x16x64-threat768` |
 | 2304 | 全幅 | `layerstacks-halfka_hm_merged-2304x16x64-threat` |

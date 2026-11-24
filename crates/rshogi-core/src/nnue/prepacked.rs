@@ -907,6 +907,7 @@ mod tests {
     feature = "nnue-threat",
     any(
         feature = "nnue-psqt",
+        feature = "threat-width-256",
         feature = "threat-width-512",
         feature = "threat-width-768",
         feature = "layerstacks-1024x16x64"
@@ -1047,6 +1048,27 @@ mod extension_tests {
             assert_eq!(original.evaluate(&pos, &acc), expected);
             packed.feature_transformer.refresh_accumulator(&pos, &mut acc);
             assert_eq!(packed.evaluate(&pos, &acc), expected);
+
+            #[cfg(all(
+                feature = "threat-width-256",
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                target_feature = "avx512vnni"
+            ))]
+            {
+                let [original_raw, packed_raw] = [&original, &packed].map(|net| {
+                    net.layer_stacks.buckets[bucket]
+                        .propagate_accumulators_with_threat(
+                            acc.get(0),
+                            acc.get(1),
+                            acc.get_threat(0),
+                            acc.get_threat(1),
+                        )
+                        .unwrap()
+                });
+                assert_eq!(original_raw, packed_raw);
+            }
         }
     }
 }

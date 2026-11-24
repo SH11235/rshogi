@@ -257,7 +257,9 @@ mod threat_width;
 
 #[cfg(all(test, feature = "nnue-threat"))]
 const fn expected_threat_width(l1: usize) -> usize {
-    if cfg!(feature = "threat-width-512") {
+    if cfg!(feature = "threat-width-256") {
+        256
+    } else if cfg!(feature = "threat-width-512") {
         512
     } else if cfg!(feature = "threat-width-768") {
         768

@@ -3153,7 +3153,11 @@ mod tests {
             1024
         } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
-        } else if cfg!(any(feature = "threat-width-512", feature = "threat-width-768")) {
+        } else if cfg!(any(
+            feature = "threat-width-256",
+            feature = "threat-width-512",
+            feature = "threat-width-768"
+        )) {
             1536
         } else {
             64
@@ -3381,7 +3385,11 @@ mod tests {
             1024
         } else if cfg!(feature = "layerstacks-2304x16x64") {
             2304
-        } else if cfg!(any(feature = "threat-width-512", feature = "threat-width-768")) {
+        } else if cfg!(any(
+            feature = "threat-width-256",
+            feature = "threat-width-512",
+            feature = "threat-width-768"
+        )) {
             1536
         } else {
             256

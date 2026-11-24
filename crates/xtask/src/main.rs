@@ -994,6 +994,7 @@ mod tests {
             "layerstacks-halfka_hm_merged-3072x16x64-none",
             "layerstacks-halfka_hm_merged-1536x16x64-none",
             "layerstacks-halfka_hm_merged-1536x16x64-threat",
+            "layerstacks-halfka_hm_merged-1536x16x64-threat256",
             "layerstacks-halfka_hm_merged-1536x16x64-threat512",
             "layerstacks-halfka_hm_merged-1536x16x64-threat768",
         ] {
