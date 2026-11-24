@@ -80,7 +80,7 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 
 ### 教師データの生成とシャッフル
 
-[nnue_mcts_gensfen](docs/nnue_mcts_gensfen.md) で、NNUE 葉評価の MCTS 自己対局から HCPE3 教師を生成できます。
+[nnue_mcts_gensfen](docs/nnue_mcts_gensfen.md) で、NNUE 葉評価の MCTS 自己対局から HCPE3 教師を生成できます。合法手の事前確率は一様のほか、子局面の NNUE 評価や静止探索の値からも作れます (`--prior`)。
 [hcpe3_to_dl_rows](docs/hcpe3_to_dl_rows.md) で、HCPE3 から訪問数付きの DL 学習行を作れます。
 
 ```bash

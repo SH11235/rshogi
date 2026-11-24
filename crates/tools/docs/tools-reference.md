@@ -17,7 +17,7 @@
 | ツール | 用途 |
 |---|---|
 | [`gensfen`](gensfen.md) | エンジン対局から PSV / pack / hcpe3 教師を生成 |
-| [`nnue_mcts_gensfen`](nnue_mcts_gensfen.md) | NNUE 葉評価の MCTS 自己対局から訪問数付き HCPE3 を生成 |
+| [`nnue_mcts_gensfen`](nnue_mcts_gensfen.md) | NNUE 葉評価の MCTS 自己対局から訪問数付き HCPE3 を生成。事前確率は一様か子局面の NNUE 値・静止探索値から選択 (`--prior`) |
 | [`nyugyoku_gensfen`](nyugyoku_gensfen.md) | CSA から入玉局面を抽出し gensfen 用開始局面を生成 |
 | [`policy_rollout_psv`](policy_rollout_psv.md) | ONNX policy で局面を進め、value 評価付き PSV を生成 |
 | [`shuffle_psv`](shuffle_psv.md) | seed とチャンクサイズを指定して PSV をシャッフル |

@@ -213,6 +213,24 @@ pub fn qsearch_with_pv_nnue(
     ply: i32,
     max_ply: i32,
 ) -> QsearchResult {
+    qsearch_nnue_impl::<true>(pos, stacks, alpha, beta, ply, max_ply)
+}
+
+/// NNUE 差分更新で静止探索のスコアを求める。PV 用の領域は確保しない。
+pub fn qsearch_nnue(pos: &mut Position, stacks: &mut NnueStacks, max_ply: i32) -> i32 {
+    stacks.node_count = 0;
+    let bound = Value::INFINITE.raw();
+    qsearch_nnue_impl::<false>(pos, stacks, -bound, bound, 0, max_ply).value
+}
+
+fn qsearch_nnue_impl<const WITH_PV: bool>(
+    pos: &mut Position,
+    stacks: &mut NnueStacks,
+    alpha: i32,
+    beta: i32,
+    ply: i32,
+    max_ply: i32,
+) -> QsearchResult {
     // ノード数をインクリメント
     stacks.increment_nodes();
 
@@ -306,7 +324,7 @@ pub fn qsearch_with_pv_nnue(
         stacks.push(dirty_piece);
 
         // 再帰呼び出し
-        let result = qsearch_with_pv_nnue(pos, stacks, -beta, -alpha, ply + 1, max_ply);
+        let result = qsearch_nnue_impl::<WITH_PV>(pos, stacks, -beta, -alpha, ply + 1, max_ply);
         let value = -result.value;
 
         // AccumulatorStackをポップ
@@ -321,8 +339,10 @@ pub fn qsearch_with_pv_nnue(
 
             if value > alpha {
                 alpha = value;
-                best_pv = vec![*mv];
-                best_pv.extend(result.pv);
+                if WITH_PV {
+                    best_pv = vec![*mv];
+                    best_pv.extend(result.pv);
+                }
 
                 // ベータカットオフ
                 if value >= beta {
