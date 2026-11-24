@@ -6,9 +6,9 @@ use anyhow::Result;
 use rayon::prelude::*;
 use rshogi_core::position::Position;
 
-use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
-use ort::session::Session;
-use ort::value::TensorRef;
+use ort::memory::{AllocationDevice, Allocator, AllocatorType, MemoryInfo, MemoryType};
+use ort::session::{IoBinding, Session};
+use ort::value::{Tensor, TensorRef, TensorValueType};
 
 use crate::features::{
     FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, MAX_MOVE_LABEL_NUM,
@@ -108,6 +108,7 @@ impl BasicSessions {
 
 struct EvaluatorSession {
     inner: Session,
+    token_graph: Option<Box<FixedTokenGraph>>,
     #[cfg(feature = "cuda-pinned-output")]
     pinned_device: Option<i32>,
 }
@@ -173,6 +174,7 @@ fn create_session(
     profile: Option<&Path>,
     cuda_tf32: bool,
     input_format: InputFormat,
+    cuda_graph: bool,
 ) -> Result<EvaluatorSession> {
     use ort::ep::ExecutionProvider;
 
@@ -202,6 +204,7 @@ fn create_session(
             let mut trt_ep = ort::execution_providers::TensorRTExecutionProvider::default()
                 .with_device_id(cfg.gpu_id)
                 .with_fp16(true)
+                .with_cuda_graph(cuda_graph)
                 .with_engine_cache(cfg.tensorrt_cache.is_some());
             if input_format == InputFormat::StmTokensV1 {
                 trt_ep = trt_ep.with_builder_optimization_level(2);
@@ -301,6 +304,7 @@ fn create_session(
 
     Ok(EvaluatorSession {
         inner: session,
+        token_graph: None,
         #[cfg(feature = "cuda-pinned-output")]
         pinned_device: (cfg.gpu_id >= 0 && !cfg.use_tensorrt).then_some(cfg.gpu_id),
     })
@@ -309,7 +313,7 @@ fn create_session(
 impl OnnxEvaluator {
     /// 基本形式のモデルを読み込む。token形式は受理しない。
     pub fn new(cfg: &OnnxConfig) -> Result<Self> {
-        let session = create_session(cfg, None, true, InputFormat::Basic)?;
+        let session = create_session(cfg, None, true, InputFormat::Basic, false)?;
         Self::from_session(
             session,
             cfg,
@@ -336,7 +340,7 @@ impl OnnxEvaluator {
             && batch_size > 1
             && options.profiling.is_none()
         {
-            let session = create_session(cfg, None, options.cuda_tf32, InputFormat::Basic)?;
+            let session = create_session(cfg, None, options.cuda_tf32, InputFormat::Basic, false)?;
             validate_model(&session.inner, batch_size, crate::InputFormat::Basic)?;
             eprintln!("CUDA single-row session enabled");
             Some(Box::new(session))
@@ -756,12 +760,29 @@ impl ModelEvaluator {
 
     /// 精度設定と任意の ORT profile を指定して、モデルを読み込む。
     pub fn with_options(cfg: &OnnxConfig, options: &ModelOptions) -> Result<Self> {
+        Self::load(cfg, options, false)
+    }
+
+    /// TensorRT の最大バッチに CUDA Graph を使う。Linux の CUDA 12 runtime が必要。
+    pub fn with_tensorrt_graph(cfg: &OnnxConfig, options: &ModelOptions) -> Result<Self> {
+        anyhow::ensure!(cfg.use_tensorrt, "TensorRTGraph requires TensorRT");
+        anyhow::ensure!(cfg.batch_size > 1, "TensorRTGraph requires NNBatchSize greater than 1");
+        anyhow::ensure!(
+            options.profiling.is_none(),
+            "TensorRTGraph does not support ORT profiling"
+        );
+        anyhow::ensure!(cfg!(target_os = "linux"), "TensorRTGraph requires Linux with CUDA 12");
+        Self::load(cfg, options, true)
+    }
+
+    fn load(cfg: &OnnxConfig, options: &ModelOptions, cuda_graph: bool) -> Result<Self> {
         anyhow::ensure!(!cfg.use_tensorrt || cfg.gpu_id >= 0, "TensorRT requires a CUDA device");
-        let session = create_session(
+        let mut session = create_session(
             cfg,
             options.profiling.as_deref(),
             options.cuda_tf32,
             InputFormat::StmTokensV1,
+            false,
         )?;
         let format = model_format(&session.inner)?;
         anyhow::ensure!(
@@ -777,6 +798,10 @@ impl ModelEvaluator {
             )?)),
             crate::InputFormat::StmTokensV1 => {
                 validate_model(&session.inner, cfg.batch_size, crate::InputFormat::StmTokensV1)?;
+                if cuda_graph {
+                    session.token_graph =
+                        Some(Box::new(FixedTokenGraph::new(cfg, options.cuda_tf32)?));
+                }
                 Ok(Self::Tokens(TokenEvaluator {
                     session,
                     batch_size: cfg.batch_size,
@@ -927,6 +952,206 @@ pub struct TokenEvaluator {
     timings: crate::InferenceTimings,
 }
 
+struct FixedTokenGraph {
+    binding: IoBinding,
+    tokens: Tensor<i64>,
+    staged_tokens: Tensor<i64>,
+    policy: Tensor<f32>,
+    value: Tensor<f32>,
+    // GPU テンソルと binding を先に解放し、確保元の allocator と session を最後まで保持する。
+    _gpu_allocator: Allocator,
+    _pinned_allocator: Allocator,
+    session: Session,
+    copies: CudaCopies,
+    gpu_id: i32,
+    rows: usize,
+}
+
+type SetCudaDevice = unsafe extern "C" fn(i32) -> i32;
+type CudaMemcpy =
+    unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, usize, i32) -> i32;
+
+const CUDA_HOST_TO_DEVICE: i32 = 1;
+const CUDA_DEVICE_TO_HOST: i32 = 2;
+
+struct CudaCopies {
+    set_device: SetCudaDevice,
+    memcpy: CudaMemcpy,
+    _library: libloading::Library,
+}
+
+impl CudaCopies {
+    fn new() -> Result<Self> {
+        // SAFETY: 固定 SONAME の CUDA Runtime から ABI が既知の関数を取得し、呼び出し中ライブラリを保持する。
+        let (library, set_device, memcpy) = unsafe {
+            let library = libloading::Library::new("libcudart.so.12").map_err(|error| {
+                anyhow::anyhow!("TensorRTGraph requires libcudart.so.12: {error}")
+            })?;
+            let set_device = *library.get(b"cudaSetDevice\0")?;
+            let memcpy = *library.get(b"cudaMemcpy\0")?;
+            (library, set_device, memcpy)
+        };
+        Ok(Self {
+            set_device,
+            memcpy,
+            _library: library,
+        })
+    }
+
+    fn activate(&self, device: i32) -> Result<()> {
+        // SAFETY: 整数のデバイス番号のみを渡し、CUDA Runtime のエラーを確認する。
+        let code = unsafe { (self.set_device)(device) };
+        anyhow::ensure!(code == 0, "cudaSetDevice error {code}");
+        Ok(())
+    }
+
+    fn upload(&self, source: &Tensor<i64>, target: &mut Tensor<i64>) -> Result<()> {
+        anyhow::ensure!(
+            source.shape() == target.shape()
+                && source.memory_info().allocation_device() == AllocationDevice::CUDA_PINNED
+                && target.memory_info().allocation_device() == AllocationDevice::CUDA,
+            "unexpected CUDA upload buffers"
+        );
+        // SAFETY: 同じ形状の独立したテンソル間で、pinned hostからdeviceへの同期コピーを行う。
+        let code = unsafe {
+            (self.memcpy)(
+                target.data_ptr_mut(),
+                source.data_ptr(),
+                source.shape().num_elements() * size_of::<i64>(),
+                CUDA_HOST_TO_DEVICE,
+            )
+        };
+        anyhow::ensure!(code == 0, "cudaMemcpy upload error {code}");
+        Ok(())
+    }
+
+    fn download(&self, source: &Tensor<f32>, target: &mut Tensor<f32>) -> Result<()> {
+        anyhow::ensure!(
+            source.shape() == target.shape()
+                && source.memory_info().allocation_device() == AllocationDevice::CUDA
+                && target.memory_info().allocation_device() == AllocationDevice::CPU,
+            "unexpected CUDA download buffers"
+        );
+        // SAFETY: 同じ形状の独立したテンソル間で、完了済みdevice出力をhostへ同期コピーする。
+        let code = unsafe {
+            (self.memcpy)(
+                target.data_ptr_mut(),
+                source.data_ptr(),
+                source.shape().num_elements() * size_of::<f32>(),
+                CUDA_DEVICE_TO_HOST,
+            )
+        };
+        anyhow::ensure!(code == 0, "cudaMemcpy download error {code}");
+        Ok(())
+    }
+}
+
+impl FixedTokenGraph {
+    fn new(cfg: &OnnxConfig, cuda_tf32: bool) -> Result<Self> {
+        let copies = CudaCopies::new()?;
+        let session = create_session(cfg, None, cuda_tf32, InputFormat::StmTokensV1, true)?.inner;
+        let memory = MemoryInfo::new(
+            AllocationDevice::CUDA,
+            cfg.gpu_id,
+            AllocatorType::Device,
+            MemoryType::Default,
+        )
+        .map_err(ort_err)?;
+        let gpu = Allocator::new(&session, memory).map_err(ort_err)?;
+        let pinned = Allocator::new(
+            &session,
+            MemoryInfo::new(
+                AllocationDevice::CUDA_PINNED,
+                cfg.gpu_id,
+                AllocatorType::Device,
+                MemoryType::CPUInput,
+            )
+            .map_err(ort_err)?,
+        )
+        .map_err(ort_err)?;
+        let cpu = Allocator::default();
+        let rows = cfg.batch_size;
+        let tokens = Tensor::new(&gpu, [rows, crate::tokens::TOKEN_COUNT]).map_err(ort_err)?;
+        let mut binding = session.create_binding().map_err(ort_err)?;
+        binding.bind_input("tokens", &tokens).map_err(ort_err)?;
+        binding
+            .bind_output(
+                "output_policy",
+                Tensor::<f32>::new(&gpu, [rows, MAX_MOVE_LABEL_NUM]).map_err(ort_err)?,
+            )
+            .map_err(ort_err)?;
+        binding
+            .bind_output("output_value", Tensor::<f32>::new(&gpu, [rows, 1]).map_err(ort_err)?)
+            .map_err(ort_err)?;
+        Ok(Self {
+            binding,
+            tokens,
+            staged_tokens: Tensor::new(&pinned, [rows, crate::tokens::TOKEN_COUNT])
+                .map_err(ort_err)?,
+            policy: Tensor::new(&cpu, [rows, MAX_MOVE_LABEL_NUM]).map_err(ort_err)?,
+            value: Tensor::new(&cpu, [rows, 1]).map_err(ort_err)?,
+            _gpu_allocator: gpu,
+            _pinned_allocator: pinned,
+            session,
+            copies,
+            gpu_id: cfg.gpu_id,
+            rows,
+        })
+    }
+
+    fn run(
+        &mut self,
+        tokens: &[i64],
+        values_out: &mut [f32],
+        policy_out: Option<&mut [f32]>,
+        #[cfg(feature = "inference-diagnostics")] timings: &mut crate::InferenceTimings,
+    ) -> Result<()> {
+        #[cfg(feature = "inference-diagnostics")]
+        let mut timer = ForwardTimer::new(timings, self.rows);
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::InputBind);
+        inference_try!(timer, self.copies.activate(self.gpu_id));
+        let (_, staged) =
+            inference_try!(timer, self.staged_tokens.try_extract_tensor_mut().map_err(ort_err));
+        staged.copy_from_slice(tokens);
+        inference_try!(timer, self.copies.upload(&self.staged_tokens, &mut self.tokens));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::RunBinding);
+        let outputs =
+            inference_try!(timer, self.session.run_binding(&self.binding).map_err(ort_err));
+        inference_try!(timer, self.binding.synchronize_outputs().map_err(ort_err));
+        #[cfg(feature = "inference-diagnostics")]
+        timer.advance(InferenceStage::OutputValidationCopy);
+        let value = inference_try!(
+            timer,
+            outputs["output_value"].downcast_ref::<TensorValueType<f32>>().map_err(ort_err)
+        );
+        inference_try!(timer, self.copies.download(&value, &mut self.value));
+        let (_, values) =
+            inference_try!(timer, self.value.try_extract_tensor::<f32>().map_err(ort_err));
+        inference_ensure!(
+            timer,
+            values.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "invalid expected score"
+        );
+        if let Some(policy_out) = policy_out {
+            let policy = inference_try!(
+                timer,
+                outputs["output_policy"].downcast_ref::<TensorValueType<f32>>().map_err(ort_err)
+            );
+            inference_try!(timer, self.copies.download(&policy, &mut self.policy));
+            let (_, policy) =
+                inference_try!(timer, self.policy.try_extract_tensor::<f32>().map_err(ort_err));
+            inference_ensure!(timer, policy_logits_are_finite(policy), "non-finite policy logits");
+            policy_out.copy_from_slice(policy);
+        }
+        values_out.copy_from_slice(values);
+        #[cfg(feature = "inference-diagnostics")]
+        timer.finish();
+        Ok(())
+    }
+}
+
 impl TokenEvaluator {
     fn run(
         &mut self,
@@ -1065,6 +1290,17 @@ impl TokenEvaluator {
         policy_out: Option<&mut [f32]>,
         #[cfg(feature = "inference-diagnostics")] timings: &mut crate::InferenceTimings,
     ) -> Result<()> {
+        if let Some(graph) = &mut session.token_graph
+            && n == graph.rows
+        {
+            return graph.run(
+                tokens,
+                values_out,
+                policy_out,
+                #[cfg(feature = "inference-diagnostics")]
+                timings,
+            );
+        }
         // ORT resource より先に宣言し、逆順の Drop で解放時間も記録する。
         #[cfg(feature = "inference-diagnostics")]
         let mut timer = ForwardTimer::new(timings, n);
