@@ -550,8 +550,8 @@ mod tests {
         target_feature = "avx512bw",
         any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
-    fn packed_fused_l1_matches_after_copy_on_write<const N: usize>() {
-        if !crate::nnue::ls_l1_kernel::avx512::supported::<N, 16>() {
+    fn packed_fused_l1_matches_after_copy_on_write<const N: usize, const L2: usize>() {
+        if !crate::nnue::ls_l1_kernel::avx512::supported::<N, 16, L2>() {
             return;
         }
         use crate::nnue::layer_stacks::{LayerStacks, assert_fused_l1_matches_reference};
@@ -572,7 +572,7 @@ mod tests {
         for bucket in 0..9 {
             raw.write_all(&[0; 4]).unwrap();
             packed_bytes.write_all(&[0; 4]).unwrap();
-            for (input, output) in [(N, 16), (30, 32), (32, 1)] {
+            for (input, output) in [(N, 16), (30, L2), (L2, 1)] {
                 let biases_start = raw.get_ref().len();
                 for out in 0..output {
                     raw.write_all(&((out * 31 + bucket * 7) as i32).to_le_bytes()).unwrap();
@@ -603,11 +603,11 @@ mod tests {
             ranges: [0..packed_bytes.get_ref().len(), 0..0, 0..0, 0..0],
             used: Cell::new(0),
         };
-        type Stacks<const N: usize> = LayerStacks<N, 16, 30, 32>;
+        type Stacks<const N: usize, const L2: usize> = LayerStacks<N, 16, 30, 32, L2>;
         raw.set_position(0);
-        let original = Stacks::<N>::read(&mut raw, 9).unwrap();
+        let original = Stacks::<N, L2>::read(&mut raw, 9).unwrap();
         let mut stacks =
-            Stacks::<N>::read_packed(&mut packed.metadata().unwrap(), 9, &packed).unwrap();
+            Stacks::<N, L2>::read_packed(&mut packed.metadata().unwrap(), 9, &packed).unwrap();
         let us = std::array::from_fn(|i| ((i * 53) % 383) as i16 - 128);
         let them = std::array::from_fn(|i| ((i * 71) % 383) as i16 - 128);
         for (a, b) in original.buckets.iter().zip(&mut stacks.buckets) {
@@ -630,9 +630,10 @@ mod tests {
     ))]
     #[test]
     fn packed_fused_shapes_match_after_copy_on_write() {
-        packed_fused_l1_matches_after_copy_on_write::<1536>();
-        packed_fused_l1_matches_after_copy_on_write::<2304>();
-        packed_fused_l1_matches_after_copy_on_write::<3072>();
+        packed_fused_l1_matches_after_copy_on_write::<1024, 64>();
+        packed_fused_l1_matches_after_copy_on_write::<1536, 32>();
+        packed_fused_l1_matches_after_copy_on_write::<2304, 64>();
+        packed_fused_l1_matches_after_copy_on_write::<3072, 64>();
     }
 
     #[test]

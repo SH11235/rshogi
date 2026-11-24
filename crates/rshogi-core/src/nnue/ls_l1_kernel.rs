@@ -1,4 +1,4 @@
-//! L1=1536 / 2304 / 3072、出力16 の LayerStacks L1 と FT 出力変換を融合する AVX-512 カーネル。
+//! LayerStacks の FT 出力変換と L1（出力16）を融合する AVX-512 カーネル。
 
 #[cfg(all(
     target_arch = "x86_64",
@@ -17,18 +17,19 @@ pub(super) mod avx512 {
     pub(crate) struct FusedWeights<const INPUT: usize>(AlignedBox<i8>);
 
     // 非 VNNI の融合は、性能を確認した通常 LayerStacks に限る。
-    pub(crate) const fn supported<const INPUT: usize, const OUTPUT: usize>() -> bool {
+    pub(crate) const fn supported<const INPUT: usize, const OUTPUT: usize, const L2: usize>() -> bool
+    {
         OUTPUT == 16
             && if cfg!(target_feature = "avx512vnni") {
-                matches!(INPUT, 1536 | 2304 | 3072)
+                (INPUT == 1024 && L2 == 64) || matches!(INPUT, 1536 | 2304 | 3072)
             } else {
                 !cfg!(any(feature = "nnue-threat", feature = "nnue-psqt")) && matches!(INPUT, 1536)
             }
     }
-    pub(crate) fn reorder<const INPUT: usize, const OUTPUT: usize>(
+    pub(crate) fn reorder<const INPUT: usize, const OUTPUT: usize, const L2: usize>(
         l1: &AffineTransform<INPUT, OUTPUT>,
     ) -> Option<FusedWeights<INPUT>> {
-        if !supported::<INPUT, OUTPUT>() {
+        if !supported::<INPUT, OUTPUT, L2>() {
             return None;
         }
         let mut weights = AlignedBox::new_zeroed(INPUT * OUTPUT);
@@ -52,21 +53,23 @@ pub(super) mod avx512 {
     }
 
     /// 正常終了と unwind のどちらでも、編集した L1 から融合用重みを再構築する。
-    pub(crate) fn edit_l1<const INPUT: usize, const OUTPUT: usize>(
+    pub(crate) fn edit_l1<const INPUT: usize, const OUTPUT: usize, const L2: usize>(
         l1: &mut AffineTransform<INPUT, OUTPUT>,
         weights: &mut Option<FusedWeights<INPUT>>,
         edit: impl FnOnce(&mut AffineTransform<INPUT, OUTPUT>),
     ) {
-        struct Rebuild<'a, const INPUT: usize, const OUTPUT: usize> {
+        struct Rebuild<'a, const INPUT: usize, const OUTPUT: usize, const L2: usize> {
             l1: &'a mut AffineTransform<INPUT, OUTPUT>,
             weights: &'a mut Option<FusedWeights<INPUT>>,
         }
-        impl<const INPUT: usize, const OUTPUT: usize> Drop for Rebuild<'_, INPUT, OUTPUT> {
+        impl<const INPUT: usize, const OUTPUT: usize, const L2: usize> Drop
+            for Rebuild<'_, INPUT, OUTPUT, L2>
+        {
             fn drop(&mut self) {
-                *self.weights = reorder(self.l1);
+                *self.weights = reorder::<INPUT, OUTPUT, L2>(self.l1);
             }
         }
-        let guard = Rebuild { l1, weights };
+        let guard = Rebuild::<INPUT, OUTPUT, L2> { l1, weights };
         edit(guard.l1);
     }
 
@@ -272,7 +275,7 @@ pub(super) mod avx512 {
         weights: &FusedWeights<N>,
         biases: &[i32; OUT],
     ) -> [i32; OUT] {
-        assert!(matches!(N, 1536 | 2304 | 3072));
+        assert!(matches!(N, 1024 | 1536 | 2304 | 3072));
         assert_eq!(OUT, 16);
         let mut output = [0; OUT];
         // SAFETY: cfg が命令セットを保証する。入力・重み・出力の寸法は確認済み。

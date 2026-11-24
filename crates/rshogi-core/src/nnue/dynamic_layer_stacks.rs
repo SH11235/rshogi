@@ -2160,25 +2160,31 @@ mod tests {
 
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        any(feature = "layerstacks-1536x16x32", feature = "layerstacks-1024x16x64"),
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
     fn static_dispatch_selection() {
-        let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
-            "HalfKaHmMerged",
-            HalfKaHmMergedFeatureSet::DIMENSIONS,
-            1536,
-            16,
-            32,
-            9,
-        );
-        let selected = NNUENetwork::read(&mut Cursor::new(&model.bytes)).unwrap();
-        if cfg!(feature = "nnue-progress-diff") || cfg!(feature = "nnue-effect-bucket") {
-            assert!(matches!(selected, NNUENetwork::DynamicLayerStacks(_)));
-        } else {
-            assert!(matches!(selected, NNUENetwork::LayerStacks(_)));
+        fn check(ft: usize, l2: usize) {
+            let model = crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+                "HalfKaHmMerged",
+                HalfKaHmMergedFeatureSet::DIMENSIONS,
+                ft,
+                16,
+                l2,
+                9,
+            );
+            let selected = NNUENetwork::read(&mut Cursor::new(&model.bytes)).unwrap();
+            if cfg!(feature = "nnue-progress-diff") || cfg!(feature = "nnue-effect-bucket") {
+                assert!(matches!(selected, NNUENetwork::DynamicLayerStacks(_)));
+            } else {
+                assert!(matches!(selected, NNUENetwork::LayerStacks(_)));
+            }
         }
+        #[cfg(feature = "layerstacks-1536x16x32")]
+        check(1536, 32);
+        #[cfg(feature = "layerstacks-1024x16x64")]
+        check(1024, 64);
     }
 
     #[cfg(all(

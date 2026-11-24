@@ -782,7 +782,7 @@ impl<
             target_feature = "avx512bw",
             any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
         ))]
-        let raw_score = if super::ls_l1_kernel::avx512::supported::<L1, LS_L1_OUT>() {
+        let raw_score = if super::ls_l1_kernel::avx512::supported::<L1, LS_L1_OUT, LS_L2_OUT>() {
             #[cfg(feature = "nnue-threat")]
             let fused_threat = if self.feature_transformer.has_threat {
                 let (us, them) = if side_to_move == Color::Black {
@@ -3038,6 +3038,7 @@ pub(super) fn static_slot_available(
         (512, 16, 32) => cfg!(feature = "layerstacks-512x16x32"),
         (1024, 16, 32) => cfg!(feature = "layerstacks-1024x16x32"),
         (3072, 16, 32) => cfg!(feature = "layerstacks-3072x16x32"),
+        (1024, 16, 64) => cfg!(feature = "layerstacks-1024x16x64"),
         (2304, 16, 64) => cfg!(feature = "layerstacks-2304x16x64"),
         (3072, 16, 64) => cfg!(feature = "layerstacks-3072x16x64"),
         (1536, 16, 64) => cfg!(feature = "layerstacks-1536x16x64"),
@@ -3874,6 +3875,7 @@ mod tests {
 
     #[test]
     fn synthetic_fused_shapes_evaluate_with_bucket_match_legacy() {
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(false);
         synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(false);
         synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(false);
         synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(false);
