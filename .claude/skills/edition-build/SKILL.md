@@ -228,6 +228,20 @@ cp target/production/rshogi-usi engines/rshogi-usi-custom-768x16x32-<purpose>
   で NPS バイアスになる。**build cmd 自体の grep 検査が唯一の検出手段** (preset 経由なら
   meta.toml の edition 名から構成を特定可)
 
+## 5b. 新しい大きさ・edition を足したとき (評価の前に必須)
+
+LayerStack の新しい大きさ (L0xL1xL2) や edition を足したら、対局評価に入る前に、既存の近い大きさ
+(例: 1536x16x64) にある最適化が新しい方にも乗っているかを確かめる。
+
+- 洗い出す: L1 の融合カーネル (`ls_l1_kernel.rs` の対応条件)、build の組み合わせ検査で大きさごとに
+  許している feature (`build/checks.rs`、`nnue-progress-diff` 等)、prepacked・融合用の重みの生成、
+  静的・汎用併載の振り分け表。乗せられないものは理由を PR 本文に書く。
+- 測る: AVX-512 機 (本番と同じ CPU 系統) で、既存の大きさと NPS を比べる (1 thread・CPU 固定・
+  同じ局面で交互に回す。計測の作法は [`usi-perf-measure` SKILL](../usi-perf-measure/SKILL.md))。
+  FT が小さいのに既存より遅いなど、想定と逆なら評価に進まず実装を疑う。
+- 理由: 汎用経路のまま時間制の対局を回すと、実装の遅さを net の性質と取り違え、その評価は意味を失う。
+  固定 nodes の対局は速さに依らないが、時間制のカードと NPS の比較は無駄になる。
+
 ## 6. troubleshooting
 
 | 症状 | 原因 | 対処 |
@@ -236,6 +250,7 @@ cp target/production/rshogi-usi engines/rshogi-usi-custom-768x16x32-<purpose>
 | `EvalFile was explicitly set but failed to load` | 上記 format mismatch、もしくは ckpt path 間違い、ckpt の feature-set/dim と engine の build が不一致 | (1) §4 (a) の arch 文字列を確認、(2) engine の preset/features を arch に合わせる |
 | `readyok` 通過するが evaluator 出力おかしい | 過剰 feature で余分な accumulator field 残留 / 必要 feature 不足 | preset 経由で build し直し、対応表で feature 確認 |
 | NPS 差が説明できない | binary 群が release / production 混在 | 全 binary を同一 profile で rebuild |
+| 小さい大きさの net の方が遅い | 新しい大きさが既存の最適化経路 (融合カーネル等) に乗っていない | §5b で洗い出して実装を直す |
 
 ## 7. 関連 SKILL
 
