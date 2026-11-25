@@ -152,6 +152,30 @@ fn dense_concat_rejects_noncanonical_arch_tokens() {
 
 #[cfg(ls_dense_concat)]
 #[test]
+fn dense_concat_threat_arch_counts_threat_dimensions_in_features() {
+    let ft = DENSE_CONCAT_FT;
+    let arch = dense_concat_arch(ft, 16, 64);
+    let threat = 216_720;
+    let with_threat = arch
+        .replace(
+            &format!("[{HALFKA_HM_DIMENSIONS}->"),
+            &format!("[{}->", HALFKA_HM_DIMENSIONS + threat),
+        )
+        .replace(",Head=", &format!(",Threat={threat},Head="))
+        + ",ThreatWidth=512,ls_bucket=ownking:2/3/7+oppking:2/3/7";
+    let err = static_read_error(&with_threat, ft);
+    assert!(!err.contains("DenseConcat"), "{err}");
+
+    let piece_dims_only = with_threat.replace(
+        &format!("[{}->", HALFKA_HM_DIMENSIONS + threat),
+        &format!("[{HALFKA_HM_DIMENSIONS}->"),
+    );
+    let err = static_read_error(&piece_dims_only, ft);
+    assert!(err.contains("Invalid DenseConcat network architecture"), "{err}");
+}
+
+#[cfg(ls_dense_concat)]
+#[test]
 fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
     use rand::{Rng, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
