@@ -15,7 +15,7 @@ use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::reader::{Line, PositionEntry, classify_line, normalize_key, strip_ply};
+use crate::record::{Line, PositionEntry, classify_line, normalize_key, strip_ply};
 
 /// 開くときに並びを確かめる抜き取り点の数。
 const ORDER_CHECK_SAMPLES: u64 = 1024;
@@ -410,7 +410,10 @@ mod tests {
         assert_eq!(best(&[otf(&first)]), None);
         assert_eq!(best(&[otf(&first), otf(&second)]).as_deref(), Some("8c8d"));
         // 丸読みは指し手の無い局面を登録しないので、反転局面に当たる。
-        assert_eq!(best(&[Book::from_path(&first, false).unwrap()]).as_deref(), Some("3c3d"));
+        assert_eq!(
+            best(&[Book::from_path(&first, false).unwrap(), otf(&second)]).as_deref(),
+            Some("3c3d")
+        );
         std::fs::remove_file(first).ok();
         std::fs::remove_file(second).ok();
     }

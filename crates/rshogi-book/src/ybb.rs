@@ -16,7 +16,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::reader::{PositionEntry, RawBookMove, parse_move_field};
+use crate::record::{PositionEntry, RawBookMove, parse_move_field};
 
 pub(crate) const MAGIC: &[u8; 16] = b"YANE-BINBOOK-V1\0";
 const HEADER_SIZE: u64 = 32;
@@ -520,7 +520,7 @@ mod tests {
         ];
         let mut hits = 0;
         for sfen in db_sfens() {
-            let other_ply = format!("{} 99", crate::reader::strip_ply(&sfen));
+            let other_ply = format!("{} 99", crate::record::strip_ply(&sfen));
             let flipped = flipped_key(&sfen).unwrap();
             for query in [&sfen, &other_ply, &flipped] {
                 let mut expected = db.entry_moves(query).unwrap();
@@ -704,7 +704,7 @@ mod tests {
                     continue;
                 }
                 let canonical = position.to_sfen();
-                let other_ply = format!("{} 999", crate::reader::strip_ply(&canonical));
+                let other_ply = format!("{} 999", crate::record::strip_ply(&canonical));
                 let Some(flipped) = flipped_key(&canonical) else {
                     continue;
                 };
@@ -883,6 +883,34 @@ mod tests {
         let ybb = Book::from_bytes(&SMALL_YBB[..SMALL_YBB.len() - 2], true).unwrap();
         let errors = db_sfens().iter().filter(|s| ybb.entry_moves(s).is_err()).count();
         assert_eq!(errors, 1);
+    }
+
+    #[test]
+    fn probe_reports_read_error_before_searching_next_book() {
+        let hirate = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let flipped = flipped_key(hirate).unwrap();
+        let mut position = Position::new();
+        position.set_sfen(hirate).unwrap();
+        let options = BookOptions {
+            flipped_book: true,
+            ..Default::default()
+        };
+        for key in [hirate, flipped.as_str()] {
+            let mut broken = build_ybb(&[(key, &[((60 << 7) | 59, 10)])]);
+            broken.pop();
+            let books = [
+                Book::from_bytes(&broken, false).unwrap(),
+                Book::from_bytes(SMALL_DB, false).unwrap(),
+            ];
+            let mut messages = Vec::new();
+            let result =
+                probe(&books, &position, &options, &mut DefaultBookRng::from_seed(0), |m| {
+                    messages.push(m.to_owned());
+                });
+            assert!(result.is_none());
+            assert_eq!(messages.len(), 1);
+            assert!(messages[0].starts_with("Error reading book file: "));
+        }
     }
 
     #[test]
