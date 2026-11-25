@@ -88,6 +88,11 @@ pub struct PersistedConfig {
 }
 
 impl PersistedConfig {
+    /// 対局開始時刻。開始時刻が保存されていなければマッチ成立時刻を使う。
+    pub(crate) fn record_start_ms(&self) -> u64 {
+        self.play_started_at_ms.unwrap_or(self.matched_at_ms)
+    }
+
     /// 保存した USI トークンから `%KACHI` 判定ルールを復元する。`None` / 不正
     /// トークン (旧 schema・手書き改変) は [`crate::config::DEFAULT_ENTERING_KING_RULE`]。
     pub(crate) fn entering_king_rule(&self) -> rshogi_core::types::EnteringKingRule {

@@ -6,7 +6,7 @@
 //! 「この ws がどの対局者か」というマッピングを DO 内の in-memory 変数に
 //! 頼らず保持できる。
 //!
-//! 本モジュールは attachment の形式と (de)serialize 規約だけを定義し、
+//! 本モジュールは attachment の形式と状態遷移を定義し、
 //! worker ランタイムに依存しない。単体テストはホスト target で走る。
 
 use serde::{Deserialize, Serialize};
@@ -166,8 +166,8 @@ pub enum WsAttachment {
         /// (`None` は START / 終局通知 / CHAT 等の非指し手 broadcast で、queue
         /// 経由でも常に flush 対象)。
         ///
-        /// MVP では上限を設けない (1 局 ≤ 512 手のため pending queue は数十行
-        /// 程度に収まる想定)。性能課題が顕在化したら別 Issue で gating する。
+        /// 行数・バイト数の上限は `MAX_SPECTATOR_QUEUE_ITEMS` と
+        /// `MAX_SPECTATOR_QUEUE_BYTES` で定める。
         #[serde(default)]
         pending_queue: Vec<(String, Option<u32>)>,
         /// この接続へ送信済みの終局通知行。
@@ -201,6 +201,33 @@ impl From<&rshogi_csa_server::BroadcastEntry> for FinalizingBroadcast {
             ply: entry.ply,
         }
     }
+}
+
+/// snapshot 中の観戦配信をキューに積んだ結果。
+pub enum SpectatorQueueResult<'a> {
+    /// snapshot の保留対象外。
+    Inactive,
+    /// キューに追加済み。
+    Queued,
+    /// 上限を超えるためキューを変更していない。
+    Overflow {
+        /// 観戦対象の部屋 ID。
+        room_id: &'a str,
+        /// 追加を含む行数。
+        items: usize,
+        /// 追加を含むバイト数。
+        bytes: usize,
+    },
+}
+
+/// 観戦 snapshot のキューを 1 行進めた結果。
+pub enum SpectatorQueueDrain {
+    /// キューを空にして通常配信へ移った。
+    Complete,
+    /// snapshot に含まれていた指し手を取り除いた。
+    Duplicate,
+    /// 取り出した配信行。
+    Send(String),
 }
 
 impl WsAttachment {
@@ -423,32 +450,91 @@ impl WsAttachment {
         }
     }
 
-    /// Spectator の snapshot 送信状態を初期状態 (flag=false / queue 空) に戻す。
-    ///
-    /// snapshot 送信経路がエラーで中断すると、`snapshot_in_progress = true` の
-    /// まま attachment が残り、`send_to_spectators` が以降の broadcast を per-ws
-    /// pending queue に積み続けて観戦者が無音フリーズする。エラー経路でこの
-    /// helper を通して flag を落とし queue を空にする。`last_ply_in_snapshot` は
-    /// flag=false では参照されないため `0` に戻す。Spectator 以外の variant は
-    /// 変更せず元の値を返す。
-    pub fn reset_spectator_snapshot(self) -> Self {
-        match self {
-            Self::Spectator {
+    /// 中断または空の snapshot のキューを捨て、保留を解除する。
+    pub fn reset_spectator_snapshot(mut self) -> Self {
+        self.initialize_spectator_snapshot(false);
+        self
+    }
+
+    /// キューと最終 ply を初期化し、観戦接続を変更したか返す。
+    pub fn initialize_spectator_snapshot(&mut self, in_progress: bool) -> bool {
+        let Self::Spectator {
+            snapshot_in_progress,
+            last_ply_in_snapshot,
+            pending_queue,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        *snapshot_in_progress = in_progress;
+        *last_ply_in_snapshot = 0;
+        pending_queue.clear();
+        true
+    }
+
+    /// snapshot 構築中に積まれたキューを保ったまま最終 ply を記録する。
+    pub fn set_spectator_snapshot_last_ply(&mut self, last_ply: u32) -> bool {
+        let Self::Spectator {
+            last_ply_in_snapshot,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        *last_ply_in_snapshot = last_ply;
+        true
+    }
+
+    /// snapshot 中に到着した配信行を、上限内ならキューに追加する。
+    pub fn enqueue_spectator_line(
+        &mut self,
+        line: &str,
+        ply: Option<u32>,
+    ) -> SpectatorQueueResult<'_> {
+        let Self::Spectator {
+            room_id,
+            snapshot_in_progress: true,
+            pending_queue,
+            ..
+        } = self
+        else {
+            return SpectatorQueueResult::Inactive;
+        };
+        let items = pending_queue.len().saturating_add(1);
+        let current_bytes: usize = pending_queue.iter().map(|(line, _)| line.len()).sum();
+        let bytes = current_bytes.saturating_add(line.len());
+        if items > MAX_SPECTATOR_QUEUE_ITEMS || bytes > MAX_SPECTATOR_QUEUE_BYTES {
+            return SpectatorQueueResult::Overflow {
                 room_id,
-                terminal_sent,
-                terminal_in_flight,
-                terminal_aborted,
-                ..
-            } => Self::Spectator {
-                room_id,
-                snapshot_in_progress: false,
-                last_ply_in_snapshot: 0,
-                pending_queue: Vec::new(),
-                terminal_sent,
-                terminal_in_flight,
-                terminal_aborted,
-            },
-            other => other,
+                items,
+                bytes,
+            };
+        }
+        pending_queue.push((line.to_owned(), ply));
+        SpectatorQueueResult::Queued
+    }
+
+    /// 観戦接続のキューから先頭を取り出し、snapshot に含まれる手を判定する。
+    pub fn drain_spectator_line(&mut self) -> Option<SpectatorQueueDrain> {
+        let Self::Spectator {
+            snapshot_in_progress,
+            last_ply_in_snapshot,
+            pending_queue,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if pending_queue.is_empty() {
+            *snapshot_in_progress = false;
+            return Some(SpectatorQueueDrain::Complete);
+        }
+        let (line, ply) = pending_queue.remove(0);
+        if ply.is_some_and(|ply| ply <= *last_ply_in_snapshot) {
+            Some(SpectatorQueueDrain::Duplicate)
+        } else {
+            Some(SpectatorQueueDrain::Send(line))
         }
     }
 }
@@ -917,6 +1003,47 @@ mod tests {
         // Player / Pending は snapshot 状態を持たないので変更されない。
         let player = WsAttachment::player(Role::Black, "alice", "g");
         assert_eq!(player.clone().reset_spectator_snapshot(), player);
+    }
+
+    #[test]
+    fn spectator_snapshot_preserves_terminal_state_and_drains_live_lines_in_order() {
+        let mut att = WsAttachment::Spectator {
+            room_id: "room".into(),
+            snapshot_in_progress: false,
+            last_ply_in_snapshot: 9,
+            pending_queue: vec![("stale".into(), None)],
+            terminal_sent: vec!["#CHUDAN".into()],
+            terminal_in_flight: Some("#CENSORED".into()),
+            terminal_aborted: true,
+        };
+        assert!(att.initialize_spectator_snapshot(true));
+        for (line, ply) in [
+            ("+7776FU", Some(1)),
+            ("##[CHAT] hello", None),
+            ("-3334FU", Some(2)),
+        ] {
+            assert!(matches!(att.enqueue_spectator_line(line, ply), SpectatorQueueResult::Queued));
+        }
+        assert!(att.set_spectator_snapshot_last_ply(1));
+        assert!(matches!(att.drain_spectator_line(), Some(SpectatorQueueDrain::Duplicate)));
+        for expected in ["##[CHAT] hello", "-3334FU"] {
+            assert!(
+                matches!(att.drain_spectator_line(), Some(SpectatorQueueDrain::Send(line)) if line == expected)
+            );
+        }
+        assert!(matches!(att.drain_spectator_line(), Some(SpectatorQueueDrain::Complete)));
+        assert_eq!(
+            att,
+            WsAttachment::Spectator {
+                room_id: "room".into(),
+                snapshot_in_progress: false,
+                last_ply_in_snapshot: 1,
+                pending_queue: Vec::new(),
+                terminal_sent: vec!["#CHUDAN".into()],
+                terminal_in_flight: Some("#CENSORED".into()),
+                terminal_aborted: true,
+            },
+        );
     }
 
     #[test]

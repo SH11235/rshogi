@@ -143,22 +143,14 @@ pub fn build_spectator_snapshot(input: SpectatorSnapshotInput<'_>) -> Vec<String
         lines.push(raw_line.to_owned());
     }
 
-    // 既存の指し手を broadcast と同一 wire 形式に正規化して push する。
-    // `MoveRow::line` は client が送ってきた raw 行 (`+7776FU,T3` や Floodgate
-    // 形式 `+7776FU,'* 123 +7776FU...`) をそのまま保持しているため、
-    // - token 部を取り出し、消費時間は broadcast 同様 `at_ms` 差分から再接続時計
-    //   補償を差し引いて再計算した `<token>,T<units>` を出す
-    //   (raw 行の `T` 値や `,T` 欠落に依存しない)
-    // - コメントが付いていれば直後に `'<comment>` 行を 1 行足す (Floodgate
-    //   評価値 PV。ライブ broadcast の観戦者専用コメント行と同じ形式で、観戦
-    //   client は `'` 始まり行を無視する互換性がある)
-    // export (`export_kifu_to_r2`) と同じ行 parse (`parse_move_row_line`) /
-    // elapsed 計算を共有し、wire では Time_Unit、CSA V2 棋譜では秒を使う。
-    let first_prev_ms = input.config.play_started_at_ms.unwrap_or(input.config.matched_at_ms);
-    let elapsed = move_elapsed_units(input.moves, first_prev_ms, input.config.clock.time_unit_ms());
-    for (m, units) in input.moves.iter().zip(elapsed) {
-        let (token, comment) = parse_move_row_line(&m.line);
-        lines.push(format!("{token},T{units}"));
+    for NormalizedTimedMove {
+        token,
+        comment,
+        elapsed_units,
+        ..
+    } in normalized_timed_moves(input.config, input.moves)
+    {
+        lines.push(format!("{token},T{elapsed_units}"));
         if let Some(c) = comment {
             lines.push(format!("'{c}"));
         }
@@ -175,69 +167,70 @@ pub fn build_spectator_snapshot(input: SpectatorSnapshotInput<'_>) -> Vec<String
     lines
 }
 
-/// `MoveRow::line` の raw CSA 行を `(token, comment)` に分解する共有ヘルパ。
-///
-/// `MoveRow::line` は client が送ってきた行をそのまま保持しており、次の形が
-/// あり得る:
-/// - `+7776FU` （コメント無し・時間フィールド無し）
-/// - `+7776FU,T3` （時間フィールド付き）
-/// - `+7776FU,'* 123 +7776FU -3334FU` （Floodgate 形式のコメント付き）
-/// - `+7776FU,T3'コメント` （時間 + コメント）
-///
-/// `token` は最初の `,` より前 (`command.rs::parse_move` と同じ token 抽出)。
-/// `comment` は最初の `'` より後 (存在すれば。`'` プレフィックスは含めない)。
-/// snapshot (`build_spectator_snapshot`) と export (`export_kifu_to_r2`) で
-/// この 1 箇所を共有し、wire 形式の食い違いを防ぐ。
-pub(crate) fn parse_move_row_line(line: &str) -> (&str, Option<&str>) {
+fn parse_move_row_line(line: &str) -> (&str, Option<&str>) {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     let token = trimmed.split(',').next().unwrap_or(trimmed);
     let comment = trimmed.split_once('\'').map(|(_, c)| c);
     (token, comment)
 }
 
-/// `moves` を先頭から走査し、各手の消費時間を時計の単位で切り捨て、棋譜用の秒へ換算して `at_ms` 差分から
-/// 算出する共有ヘルパ。
-///
-/// `first_prev_ms` は初手の計時起点 (= `play_started_at_ms`、無ければ
-/// `matched_at_ms`)。以降は 1 手前の raw `at_ms` を起点にし、各行の差分から
-/// `reconnect_credit_ms` を差し引く。これにより次手番の起点は実際の着手時刻の
-/// まま、補償対象手の `T` だけを core 課金と同じ実効経過時間へ揃える。負値
-/// `at_ms` / credit は 0 に丸める。snapshot と export で同じ補償計算を使い、出力単位だけを変える。
-pub(crate) fn move_elapsed_secs(moves: &[MoveRow], first_prev_ms: u64, unit_ms: u64) -> Vec<u32> {
-    move_elapsed_units(moves, first_prev_ms, unit_ms)
-        .into_iter()
-        .map(|units| ((units * unit_ms) / 1000).min(u64::from(u32::MAX)) as u32)
-        .collect()
+/// 永続化した指し手から抽出した CSA トークン、コメント、観戦用および棋譜用の消費時間。
+pub(crate) struct NormalizedTimedMove<'a> {
+    pub(crate) token: &'a str,
+    pub(crate) comment: Option<&'a str>,
+    pub(crate) elapsed_units: u64,
+    pub(crate) elapsed_sec: u32,
 }
 
-// wire は時計の単位、CSA V2 棋譜は秒で表現する。再接続補償の控除を共有する。
-fn move_elapsed_units(moves: &[MoveRow], first_prev_ms: u64, unit_ms: u64) -> Vec<u64> {
+/// ply 順の指し手を観戦 wire と CSA V2 棋譜で使える形に変換する。
+pub(crate) fn normalized_timed_moves<'a>(
+    config: &PersistedConfig,
+    moves: &'a [MoveRow],
+) -> impl ExactSizeIterator<Item = NormalizedTimedMove<'a>> + use<'a> {
+    let unit_ms = config.clock.time_unit_ms();
+    moves_with_elapsed_ms(moves, config.record_start_ms()).map(move |(row, elapsed_ms)| {
+        let (token, comment) = parse_move_row_line(&row.line);
+        let elapsed_units = elapsed_ms / unit_ms;
+        let elapsed_sec = ((elapsed_units * unit_ms) / 1000).min(u64::from(u32::MAX)) as u32;
+        NormalizedTimedMove {
+            token,
+            comment,
+            elapsed_units,
+            elapsed_sec,
+        }
+    })
+}
+
+fn moves_with_elapsed_ms(
+    moves: &[MoveRow],
+    first_prev_ms: u64,
+) -> impl ExactSizeIterator<Item = (&MoveRow, u64)> + '_ {
     let mut prev_ts = first_prev_ms;
-    moves
-        .iter()
-        .map(|m| {
-            let at_ms = m.at_ms.max(0) as u64;
-            let raw_elapsed_ms = at_ms.saturating_sub(prev_ts);
-            prev_ts = at_ms;
-            let credit_ms = m.reconnect_credit_ms.max(0) as u64;
-            let elapsed_ms = raw_elapsed_ms.saturating_sub(credit_ms);
-            elapsed_ms / unit_ms
-        })
-        .collect()
+    moves.iter().map(move |row| {
+        let at_ms = row.at_ms.max(0) as u64;
+        let raw_elapsed_ms = at_ms.saturating_sub(prev_ts);
+        // 再接続補償を適用しても、次の手の起点は実際の着手時刻のまま。
+        prev_ts = at_ms;
+        let elapsed_ms = raw_elapsed_ms.saturating_sub(row.reconnect_credit_ms.max(0) as u64);
+        (row, elapsed_ms)
+    })
 }
 
 /// ミリ秒時計の経過時間を CSA コメントとして保存する。
 /// V2 本文の T は秒を維持し、終局後の観戦履歴だけコメントから精度を復元する。
-pub(crate) fn with_millisecond_timings(csa: &str, moves: &[MoveRow], first_prev_ms: u64) -> String {
+pub(crate) fn with_millisecond_timings(
+    csa: &str,
+    config: &PersistedConfig,
+    moves: &[MoveRow],
+) -> String {
     use std::fmt::Write as _;
-    let elapsed = move_elapsed_units(moves, first_prev_ms, 1);
-    let mut timings = elapsed.into_iter();
+    let mut timings = moves_with_elapsed_ms(moves, config.record_start_ms());
     let mut out = String::with_capacity(csa.len());
     for line in csa.lines() {
         let _ = writeln!(out, "{line}");
         if line.starts_with(['+', '-'])
             && line.len() >= 7
-            && let Some(ms) = timings.next()
+            && let Some((_, ms)) = timings.next()
         {
             let _ = writeln!(out, "'RSHOGI_TIME_MS:{ms}");
         }
@@ -421,8 +414,10 @@ mod tests {
         ] {
             let mut cfg = baseline_config();
             cfg.clock = clock;
+            cfg.matched_at_ms = 940_000;
             // raw 経過に再接続補償 250ms が含まれていても、ライブと同じ課金にする。
-            let mut row = move_row_at(1, "black", "+7776FU,T99", 1_000_000 + elapsed_ms + 250);
+            let mut row =
+                move_row_at(1, "black", "+7776FU,T99'note\r\n", 1_000_000 + elapsed_ms + 250);
             row.reconnect_credit_ms = 250;
             let rows = [row];
             let cl = clocks(10000, 10000, Color::White);
@@ -432,14 +427,18 @@ mod tests {
                 clocks: &cl,
                 finalized: None,
             });
-            assert!(lines.contains(&format!("+7776FU,T{wire_t}")));
-            assert_eq!(move_elapsed_secs(&rows, 1_000_000, cfg.clock.time_unit_ms()), [seconds]);
+            assert_eq!(&lines[lines.len() - 2..], &[format!("+7776FU,T{wire_t}"), "'note".into()]);
+            let timed_move = normalized_timed_moves(&cfg, &rows).next().unwrap();
+            assert_eq!(timed_move.token, "+7776FU");
+            assert_eq!(timed_move.comment, Some("note"));
+            assert_eq!(timed_move.elapsed_sec, seconds);
         }
     }
 
     #[test]
     fn finished_snapshot_retains_milliseconds_after_csa_roundtrip() {
         let mut cfg = baseline_config();
+        cfg.play_started_at_ms = None;
         cfg.clock = ClockSpec::CountdownMsec {
             total_time_ms: 10000,
             byoyomi_ms: 100,
@@ -451,13 +450,12 @@ mod tests {
         let rows = [first, move_row_at(2, "white", "-3334FU", 1_001_750)];
         let csa = with_millisecond_timings(
             "V2.2\nPI\n+\n+7776FU,T0\n'** 50 -3334FU\n-3334FU,T1\n%TORYO\n",
+            &cfg,
             &rows,
-            1_000_000,
         );
         assert!(csa.contains("+7776FU,T0\n'RSHOGI_TIME_MS:250"));
         assert!(csa.contains("-3334FU,T1\n'RSHOGI_TIME_MS:1250"));
         let restored = move_rows_from_exported_csa(&csa, 1_000_000);
-        assert_eq!(move_elapsed_units(&restored, 1_000_000, 1), [250, 1250]);
         assert_eq!(parse_move_row_line(&restored[0].line).1, Some("** 50 -3334FU"));
         let cl = clocks(9750, 8750, Color::Black);
         let lines = build_spectator_snapshot(SpectatorSnapshotInput {
@@ -471,7 +469,7 @@ mod tests {
         assert!(!lines.iter().any(|line| line.contains("RSHOGI_TIME_MS")));
         // コメントのない既存棋譜も従来どおり秒として読める。
         let old = move_rows_from_exported_csa("+7776FU,T0\n-3334FU,T1\n", 1_000_000);
-        assert_eq!(move_elapsed_units(&old, 1_000_000, 1), [0, 1000]);
+        assert!(normalized_timed_moves(&cfg, &old).map(|m| m.elapsed_units).eq([0, 1000]));
     }
 
     /// シナリオ 1: 初手前 (= moves 空、終局なし)。
@@ -708,19 +706,19 @@ PI
     }
 
     #[test]
-    fn move_elapsed_secs_computes_from_at_ms_deltas() {
+    fn normalized_timed_moves_computes_from_at_ms_deltas() {
         let moves = vec![
             move_row_at(1, "black", "+7776FU", 1_003_000), // prev 1_000_000 → 3s
             move_row_at(2, "white", "-3334FU", 1_005_500), // prev 1_003_000 → 2s (切り捨て)
             move_row_at(3, "black", "+8833UM", 1_005_000), // prev 1_005_500 → 0s (逆行は 0)
         ];
-        assert_eq!(move_elapsed_secs(&moves, 1_000_000, 1000), vec![3, 2, 0]);
-        // 空入力は空 Vec。
-        assert_eq!(move_elapsed_secs(&[], 1_000_000, 1000), Vec::<u32>::new());
+        let cfg = baseline_config();
+        assert!(normalized_timed_moves(&cfg, &moves).map(|m| m.elapsed_sec).eq([3, 2, 0]));
+        assert_eq!(normalized_timed_moves(&cfg, &[]).len(), 0);
     }
 
     #[test]
-    fn move_elapsed_secs_subtracts_credit_without_shifting_the_next_turn_origin() {
+    fn normalized_timed_moves_subtracts_credit_without_shifting_the_next_turn_origin() {
         let mut moves = vec![
             move_row_at(1, "black", "+7776FU", 1_005_000),
             move_row_at(2, "white", "-3334FU", 1_007_000),
@@ -731,16 +729,15 @@ PI
 
         // 1 手目は raw 5s - credit 3s = T2。2 手目の起点は補償後の仮想時刻でなく
         // 1 手目の raw at_ms のままなので T2、3 手目は raw 3s - credit 1s = T2。
-        assert_eq!(move_elapsed_secs(&moves, 1_000_000, 1000), vec![2, 2, 2]);
+        assert!(
+            normalized_timed_moves(&baseline_config(), &moves)
+                .map(|m| m.elapsed_sec)
+                .eq([2, 2, 2])
+        );
     }
 
     #[test]
     fn live_broadcast_t_matches_export_elapsed_secs() {
-        // #857 test (c): ライブ配信 T (core `apply_move` の `<token>,T<units>` broadcast) と、
-        //   終局 export / 観戦 snapshot の T (`move_elapsed_secs` が at_ms 差分から再計算)
-        //   が同一手で一致すること。通信マージンを課金から差し引かなくなったため、両者とも
-        //   「(到着 at_ms − 直前手 at_ms) を秒切り捨て」した同じ値になる (旧実装ではライブ側が
-        //   margin を引いて 1 秒/手ずれていた)。
         use rshogi_csa_server::{CsaLine, FischerClock, GameRoom, GameRoomConfig, HandleOutcome};
 
         let play_started_ms: u64 = 1_000_000;
@@ -784,7 +781,10 @@ PI
         }
 
         // export / snapshot 経路の T を at_ms 差分から再計算し、ライブ配信 T と一致を確認。
-        let export_secs = move_elapsed_secs(&move_rows, play_started_ms, 1000);
+        let mut cfg = baseline_config();
+        cfg.play_started_at_ms = Some(play_started_ms);
+        let export_secs: Vec<_> =
+            normalized_timed_moves(&cfg, &move_rows).map(|m| m.elapsed_sec).collect();
         assert_eq!(export_secs.len(), live_lines.len());
         for (i, (_, token, _)) in seq.iter().enumerate() {
             assert_eq!(live_lines[i], format!("{token},T{}", export_secs[i]));
