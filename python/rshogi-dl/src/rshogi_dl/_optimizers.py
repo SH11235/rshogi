@@ -117,7 +117,10 @@ def validate_adamw_state(state, parameter, updates=None, *, serialized=False) ->
 
 
 class MuonAdamW:
-    def __init__(self, model, *, lr, muon_lr, weight_decay, capturable, batched, fuse_symmetric_polynomial=False):
+    def __init__(
+        self, model, *, lr, muon_lr, weight_decay, capturable, batched, fuse_symmetric_polynomial=False,
+        adamw_betas=(0.9, 0.999), adamw_epsilon=1e-8,
+    ):
         groups = model.parameter_groups()
         selected = {p for key in ("attention", "ffn") for p in groups[key] if p.ndim == 2}
         adamw, muon = [], []
@@ -127,7 +130,8 @@ class MuonAdamW:
         self.adamw_parameters = tuple(p for _, p in adamw)
         self._muon_parameters = tuple(p for _, p in muon)
         self._adamw = torch.optim.AdamW(
-            self.adamw_parameters, lr=lr, weight_decay=weight_decay, fused=True, capturable=capturable,
+            self.adamw_parameters, lr=lr, weight_decay=weight_decay, betas=adamw_betas, eps=adamw_epsilon,
+            fused=True, capturable=capturable,
         )
         if batched:
             self._muon = BatchedMuon(

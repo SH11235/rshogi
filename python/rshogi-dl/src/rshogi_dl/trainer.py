@@ -38,6 +38,13 @@ from .trainer_checkpoint import (
     validate_scaler_state,
 )
 
+_OPTIONAL_SETTINGS = {
+    "policy_loss_weight": 1.0,
+    "value_loss_weight": 1.0,
+    "adamw_betas": (0.9, 0.999),
+    "adamw_epsilon": 1e-8,
+    "clip_grad_norm": 0.0,
+}
 _OPTIMIZERS = ("adamw", "muon", "batched-muon")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
 _CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
@@ -93,6 +100,11 @@ class TrainerConfig:
     tile_packed_attention_short_key_first: bool = False
     lookup_ffn_gelu_derivative: bool = False
     learning_rate_steps: tuple[tuple[int, float], ...] = ()
+    policy_loss_weight: float = 1.0
+    value_loss_weight: float = 1.0
+    adamw_betas: tuple[float, float] = (0.9, 0.999)
+    adamw_epsilon: float = 1e-8
+    clip_grad_norm: float = 0.0
 
     def __post_init__(self) -> None:
         limits = {
@@ -123,12 +135,21 @@ class TrainerConfig:
         }.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f"{name} must be one of {choices}")
-        for name in ("learning_rate", "weight_decay"):
+        for name in (
+            "learning_rate", "weight_decay", "policy_loss_weight", "value_loss_weight",
+            "adamw_epsilon", "clip_grad_norm",
+        ):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError(f"{name} must be finite")
-            if value < 0 or (name == "learning_rate" and value == 0):
+            if value < 0 or (name in ("learning_rate", "adamw_epsilon", "value_loss_weight") and value == 0):
                 raise ValueError(f"invalid {name}")
+        if (
+            type(self.adamw_betas) not in (list, tuple) or len(self.adamw_betas) != 2
+            or any(type(beta) not in (int, float) or not 0 <= beta < 1 for beta in self.adamw_betas)
+        ):
+            raise ValueError("adamw_betas must contain two values in [0,1)")
+        object.__setattr__(self, "adamw_betas", tuple(float(beta) for beta in self.adamw_betas))
         if type(self.learning_rate_steps) not in (tuple, list):
             raise ValueError("learning_rate_steps must be a sequence")
         previous_step, previous_rate = 0, self.learning_rate
@@ -205,6 +226,9 @@ class TrainerConfig:
 
 def _config_dict(config: TrainerConfig) -> dict:
     payload = asdict(config)
+    for name, default in _OPTIONAL_SETTINGS.items():
+        if payload[name] == default:
+            del payload[name]
     if not config.learning_rate_steps:
         del payload["learning_rate_steps"]
     if config.optimizer == "adamw":
@@ -335,7 +359,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
     try:
         expected = {field.name for field in fields(TrainerConfig)}
         optimizer_fields = {"optimizer", "muon_learning_rate"}
-        required = expected - optimizer_fields - {
+        required = expected - optimizer_fields - _OPTIONAL_SETTINGS.keys() - {
             "learning_rate_steps",
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
             "fuse_packed_attention", "fuse_packed_attention_backward",
@@ -585,13 +609,14 @@ def run_training(
         if config.optimizer == "adamw":
             optimizer = torch.optim.AdamW(
                 model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
-                fused=config.fused_optimizer, capturable=uses_step_graph,
+                betas=config.adamw_betas, eps=config.adamw_epsilon, fused=config.fused_optimizer,
+                capturable=uses_step_graph,
             )
         else:
             optimizer = MuonAdamW(
                 model, lr=config.learning_rate, muon_lr=config.muon_learning_rate,
                 weight_decay=config.weight_decay, capturable=uses_step_graph,
-                batched=config.optimizer == "batched-muon",
+                adamw_betas=config.adamw_betas, adamw_epsilon=config.adamw_epsilon, batched=config.optimizer == "batched-muon",
                 fuse_symmetric_polynomial=config.fuse_muon_symmetric_polynomial,
             )
         scaler = torch.amp.GradScaler(
@@ -668,21 +693,29 @@ def run_training(
         rolling_steps = 0
         finite = torch.ones((), dtype=torch.bool, device=device)
 
+        weighted_loss = (config.policy_loss_weight, config.value_loss_weight) != (1.0, 1.0)
+        parameters = tuple(model.parameters())
+
         def update(batch: Batch, has_policy: bool) -> None:
             optimizer.zero_grad(set_to_none=True)
             with _autocast(config):
                 policy, value = execution(batch.tokens)
                 loss = policy_value_loss(policy, value, batch)
-            finite.logical_and_(torch.isfinite(loss.total.detach()))
-            scaler.scale(loss.total).backward()
-            clear_unused_policy_head_gradients(model, has_policy)
+                total = (config.policy_loss_weight * loss.policy + config.value_loss_weight * loss.value
+                         if weighted_loss else loss.total)
+            finite.logical_and_(torch.isfinite(total.detach()))
+            scaler.scale(total).backward()
+            clear_unused_policy_head_gradients(model, has_policy and config.policy_loss_weight > 0)
+            if config.clip_grad_norm:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(parameters, config.clip_grad_norm)
             scaler.step(optimizer)
             scaler.update()
-            rolling.add_(torch.stack((loss.total.detach(), loss.policy.detach(), loss.value.detach())))
+            rolling.add_(torch.stack((total.detach(), loss.policy.detach(), loss.value.detach())))
 
         def make_graph():
             return StepGraph(
-                config.batch_size, device, update, _transfer, tuple(model.parameters()),
+                config.batch_size, device, update, _transfer, parameters,
                 prefetch_input=config.prefetch_input,
             ) if uses_step_graph else None
 
@@ -848,6 +881,11 @@ def main(argv: list[str] | None = None) -> int:
                         default=[], type=_parse_learning_rate_step, metavar="STEP:RATE",
                         help="STEP 回の更新試行後に RATE に下げる。複数指定可")
     parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--adamw-betas", type=float, nargs=2, default=(0.9, 0.999), metavar=("BETA1", "BETA2"))
+    parser.add_argument("--adamw-epsilon", type=float, default=1e-8)
+    parser.add_argument("--clip-grad-norm", type=float, default=0.0)
+    parser.add_argument("--policy-loss-weight", type=float, default=1.0)
+    parser.add_argument("--value-loss-weight", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
