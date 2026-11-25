@@ -20,6 +20,8 @@ from .sharded import MAX_BATCH_SIZE, DatasetError, _append, _batch, _scratch, _s
 
 FORMAT = "rshogi-dl-hcpe3-stream-v1"
 _SHUFFLE_ROWS = 8192
+_MAX_INTERLEAVE_ARCHIVES = 8
+_GAME_KEY_BYTES = 32
 _EXIT_TIMEOUT = 10
 
 
@@ -45,15 +47,20 @@ def _manifest(path):
         raise DatasetError("HCPE3 input manifest is too large")
     raw = path.read_bytes()
     config = json.loads(raw)
+    required = {"format", "encoder", "encoder_sha256", "archives", "protected_tokens", "heldout_modulus", "seed"}
+    optional = {"interleave_archives", "protected_games"}
     if (
         type(config) is not dict
-        or set(config) != {"format", "encoder", "encoder_sha256", "archives", "protected_tokens", "heldout_modulus", "seed"}
+        or not required <= config.keys() <= required | optional
         or config["format"] != FORMAT
         or type(config["seed"]) is not int
         or type(config["heldout_modulus"]) is not int
         or config["heldout_modulus"] < 0 or config["heldout_modulus"] == 1
     ):
         raise DatasetError("invalid HCPE3 input manifest")
+    interleave = config.get("interleave_archives", 1)
+    if type(interleave) is not int or not 1 <= interleave <= _MAX_INTERLEAVE_ARCHIVES:
+        raise DatasetError(f"interleave_archives must be in 1..{_MAX_INTERLEAVE_ARCHIVES}")
     encoder = _regular_file(config["encoder"])
     if not os.access(encoder, os.X_OK) or _hash(encoder) != config["encoder_sha256"]:
         raise DatasetError("HCPE3 encoder does not match the manifest")
@@ -75,23 +82,27 @@ def _manifest(path):
         archives.append((source, entry["sha256"], source_signature))
     if len({entry[1] for entry in archives}) != len(archives):
         raise DatasetError("duplicate HCPE3 archives")
-    protected = set()
-    if config["protected_tokens"] is not None:
-        entry = config["protected_tokens"]
-        if type(entry) is not dict or set(entry) != {"path", "sha256"}:
-            raise DatasetError("invalid protected-token entry")
-        exclude = _regular_file(entry["path"])
-        if not exclude.is_relative_to(shogi_data_root()) or exclude.stat().st_size > 128 << 20:
-            raise DatasetError("invalid protected-token file")
-        data = exclude.read_bytes()
-        if len(data) % TOKEN_COUNT or sha256(data).hexdigest() != entry["sha256"]:
-            raise DatasetError("protected-token file does not match the manifest")
-        protected.update(data[i:i + TOKEN_COUNT] for i in range(0, len(data), TOKEN_COUNT))
+    protected = _protection(config["protected_tokens"], TOKEN_COUNT, "protected-token")
+    protected_games = _protection(config.get("protected_games"), _GAME_KEY_BYTES, "protected-game")
     if _signature(path) != signature:
         raise DatasetError("HCPE3 input manifest changed while reading")
     content = sha256(raw).hexdigest()
     fingerprint = sha256(json.dumps([content, [list(entry[2]) for entry in archives]]).encode()).hexdigest()
-    return path, encoder, config, archives, protected, content, fingerprint
+    return path, encoder, config, archives, protected, protected_games, content, fingerprint
+
+
+def _protection(entry, width, label):
+    if entry is None:
+        return set()
+    if type(entry) is not dict or set(entry) != {"path", "sha256"}:
+        raise DatasetError(f"invalid {label} entry")
+    path = _regular_file(entry["path"])
+    if not path.is_relative_to(shogi_data_root()) or path.stat().st_size > 128 << 20:
+        raise DatasetError(f"invalid {label} file")
+    data = path.read_bytes()
+    if len(data) % width or sha256(data).hexdigest() != entry["sha256"]:
+        raise DatasetError(f"{label} file does not match the manifest")
+    return {data[i:i + width] for i in range(0, len(data), width)}
 
 
 def _hash(path):
@@ -100,7 +111,7 @@ def _hash(path):
 
 
 def hcpe3_dataset_info(path):
-    root, _, _, _, _, content, fingerprint = _manifest(path)
+    root, _, _, _, _, _, content, fingerprint = _manifest(path)
     return {"path": str(root), "fingerprint": fingerprint, "manifest": {
         "format": FORMAT, "input_format": INPUT_FORMAT, "policy_format": POLICY_FORMAT,
         "value_format": VALUE_FORMAT, "source_records": None, "dataset_content_sha256": content,
@@ -149,7 +160,7 @@ def _replay(encoder, path):
                     process.wait()
 
 
-def _archive_rows(encoder, archive, config, protected):
+def _archive_rows(encoder, archive, config, protected, protected_games):
     source, digest, signature = archive
     if _signature(source) != signature or _hash(source) != digest or _signature(source) != signature:
         raise DatasetError(f"HCPE3 archive contents changed: {source}")
@@ -159,7 +170,9 @@ def _archive_rows(encoder, archive, config, protected):
             retained = True
             for frame in iter_packed_frames(stream):
                 if isinstance(frame, GameFrame):
-                    retained = not modulus or int.from_bytes(frame.key[:8], "big") % modulus != 0
+                    retained = frame.key not in protected_games and (
+                        not modulus or int.from_bytes(frame.key[:8], "big") % modulus != 0
+                    )
                 elif retained and frame.tokens not in protected:
                     yield frame
     finally:
@@ -182,36 +195,72 @@ def _remember_count(path, count):
             temporary.unlink(missing_ok=True)
 
 
+def _cached_count(index, archive):
+    source, digest, signature = archive
+    count_path = index / digest
+    if not count_path.is_file():
+        return None
+    record = count_path.read_text()
+    count = int(record.split(" ", 1)[0])
+    if count < 0 or record != _count_record(count_path, count) or _signature(source) != signature:
+        raise DatasetError(f"invalid HCPE3 resume index: {source}")
+    return count
+
+
+def _mixed_blocks(encoder, group, config, protected, protected_games, index):
+    seed = config["seed"]
+    if len(group) == 1:
+        seed ^= int(group[0][1], 16)
+    else:
+        identity = b"".join(bytes.fromhex(archive[1]) for archive in group)
+        seed ^= int.from_bytes(sha256(identity).digest(), "big")
+    rng = random.Random(seed)
+    with ExitStack() as stack:
+        active = {}
+        counts = {}
+        for archive in group:
+            rows = _archive_rows(encoder, archive, config, protected, protected_games)
+            stack.callback(rows.close)
+            active[archive[1]] = rows
+            counts[archive[1]] = 0
+        while active:
+            block = []
+            share = _SHUFFLE_ROWS // len(active)
+            for digest, rows in list(active.items()):
+                start = len(block)
+                block.extend(islice(rows, share))
+                added = len(block) - start
+                counts[digest] += added
+                if added < share:
+                    _remember_count(index / digest, counts[digest])
+                    del active[digest]
+            if block:
+                rng.shuffle(block)
+                yield block
+
+
 def _ordered_rows(path, start_row, expected_fingerprint):
-    root, encoder, config, archives, protected, _, fingerprint = _manifest(path)
+    root, encoder, config, archives, protected, protected_games, _, fingerprint = _manifest(path)
     if expected_fingerprint is not None and expected_fingerprint != fingerprint:
         raise DatasetError("HCPE3 input changed before opening the training stream")
     index = root.with_name(f"{root.name}.counts") / fingerprint
     index.mkdir(parents=True, exist_ok=True)
-    for archive in archives:
-        source, digest, signature = archive
-        count_path = index / digest
-        if start_row and count_path.is_file():
-            record = count_path.read_text()
-            count = int(record.split(" ", 1)[0])
-            if count < 0 or record != _count_record(count_path, count) or _signature(source) != signature:
-                raise DatasetError(f"invalid HCPE3 resume index: {source}")
-            if start_row >= count:
-                start_row -= count
+    interleave = config.get("interleave_archives", 1)
+    for offset in range(0, len(archives), interleave):
+        group = archives[offset:offset + interleave]
+        if start_row:
+            counts = [_cached_count(index, archive) for archive in group]
+            if None not in counts and start_row >= sum(counts):
+                start_row -= sum(counts)
                 continue
-        rng = random.Random(config["seed"] ^ int(digest, 16))
-        count = 0
-        rows = _archive_rows(encoder, archive, config, protected)
+        blocks = _mixed_blocks(encoder, group, config, protected, protected_games, index)
         try:
-            while block := list(islice(rows, _SHUFFLE_ROWS)):
-                count += len(block)
-                rng.shuffle(block)
+            for block in blocks:
                 skip = min(start_row, len(block))
                 start_row -= skip
                 yield from islice(block, skip, None)
         finally:
-            rows.close()
-        _remember_count(count_path, count)
+            blocks.close()
     if start_row:
         raise DatasetError("HCPE3 resume cursor exceeds the dataset")
 

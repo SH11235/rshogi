@@ -131,7 +131,7 @@ encoder は `cargo build -p tools --no-default-features --release --bin hcpe3_to
     {"path": "/path/to/games.hcpe3.xz", "sha256": "<ファイルの SHA-256>", "size": 123456}
   ],
   "protected_tokens": null,
-  "heldout_modulus": 5,
+  "heldout_modulus": 0,
   "seed": 42
 }
 ```
@@ -140,6 +140,9 @@ manifest と教師ファイルは `SHOGI_DATA` 配下に置きます。アーカ
 各ファイル内では固定サイズのブロックごとに seed を使って行を並べ替えます。
 `heldout_modulus` に 2 以上を指定すると、対局キーの先頭 8 バイトを整数として読み、
 指定値で割り切れる対局を学習から除外します。0 はこのフィルターを無効にします。
+保護対象を対局単位で指定する場合、32 バイトの対局キーを連結したファイルの絶対パスと
+SHA-256 を、任意の `protected_games` の `path`、`sha256` に指定します。
+対局キーは開始 HCP に実着手の 16 bit コード（little endian）を連結したバイト列の SHA-256 です。
 評価局面を除外するには、96 バイトのトークン列を連結したファイルの絶対パスと
 SHA-256 を `protected_tokens` の `path`、`sha256` に指定します。
 非合法な実着手を含む対局など、encoder が除外した対局はログに出ます。
@@ -148,6 +151,11 @@ SHA-256 を `protected_tokens` の `path`、`sha256` に指定します。
 学習データ全体の重複排除は行いません。再開時は同じ manifest とアーカイブを使い、
 checkpoint に記録した学習行まで進めます。読み終えたアーカイブの行数を
 manifest に隣接する `.counts` ディレクトリに保存し、再開時の読み飛ばしに使います。
+
+任意の `interleave_archives`（1〜8、既定1）を増やすと、配列の隣り合う原本を一定数ずつ開き、
+各原本から局面を取り出してブロック内で並べ替えます。先に混ぜたい教師源を同じ組に置いてください。
+開くファイル数と展開の CPU 使用量が増えるので、読み込み速度と利用可能な資源に合わせて選びます。
+再開時は完了した組を読み飛ばし、途中の組の並びを再現します。
 
 ## shard の作成と読み込み
 
