@@ -98,6 +98,7 @@ use crate::spectator_snapshot::{
     move_rows_from_exported_csa, parse_move_row_line, spectator_clock_insert_after,
     with_millisecond_timings,
 };
+use crate::turn_alarm::{ALARM_SAFETY_MS, earliest_turn_or_grace_alarm, turn_alarm_delay};
 use crate::ws_route::{WsRoute, parse_ws_route};
 use crate::x1_paths::{
     BUOY_KEY_PREFIX, buoy_object_key, default_fork_buoy_name, kifu_by_id_meta_key,
@@ -112,10 +113,6 @@ const DEFAULT_TIME_MARGIN_MS: u64 = 1000;
 /// 防御として最低限の gating であり、ベンチで上限を見直す際は環境変数化を検討する
 /// (現状は const)。
 const MAX_SPECTATORS_PER_ROOM: usize = 50;
-
-/// Alarm 発火時刻に上乗せする安全側マージン（ミリ秒）。Cloudflare Alarm API
-/// のジッタと `Date::now()` ↔ `handle_line` の now_ms 伝搬遅延を吸収する。
-const ALARM_SAFETY_MS: u64 = 200;
 
 /// `try_delete_live_games_index` の delete 試行上限 (https://github.com/SH11235/rshogi/issues/629)。R2 delete は
 /// idempotent なので transient error は積極的に retry する。
@@ -1207,8 +1204,8 @@ impl GameRoom {
         // room 枠を専有し続ける edge case を解消する。
         //
         // - 両者 AGREE で `HandleOutcome::GameStarted` が観測されたら、
-        //   `reschedule_turn_alarm` が turn budget で alarm 本体を上書きした **後**
-        //   に `clear_agree_timeout_tag` で kind タグを削除する (タグ削除を後置
+        //   `reschedule_turn_alarm` が turn deadline で alarm 本体を上書きした **後**
+        //   に kind タグを削除する (タグ削除を後置
         //   することで「kind=None かつ alarm=AgreeTimeout 当時の発火時刻」の
         //   中間状態をコード上に作らない)。
         //   タグが無くなった後は alarm が時間切れ駆動 (TimeUp) として扱われる。
@@ -1306,8 +1303,8 @@ impl GameRoom {
         // outcome 別の永続化 + alarm + broadcast 順序 (AgreeTimeout タグ管理)。
         //
         // - `GameStarted` / `MoveAccepted`: 新 turn alarm の予約と
-        //   `clear_agree_timeout_tag` を **broadcast より前** に行う。broadcast 失敗で
-        //   `?` 伝播した場合でも alarm が turn budget に再予約済となり、既存の
+        //   AGREE 待ち TTL タグの片付けを **broadcast より前** に行う。broadcast 失敗で
+        //   `?` 伝播した場合でも alarm が turn deadline に再予約済となり、既存の
         //   `AgreeTimeout` alarm がそのまま発火して `handle_agree_timeout_alarm` の
         //   `play_started_at_ms.is_some()` ガードで「タグ削除のみ」して return する
         //   (turn alarm が二度と貼られない) 経路を回避する。
@@ -1317,10 +1314,6 @@ impl GameRoom {
             HandleOutcome::GameStarted => {
                 self.mark_play_started(now).await?;
                 self.reschedule_turn_alarm(&result.outcome).await?;
-                // AGREE 待ち TTL タグの片付けは新 turn alarm 設定後に行う。先に
-                // タグを消すと「kind=None かつ alarm=AgreeTimeout 当時の発火時刻」の
-                // 中間状態をコード順序として作ることになる。
-                self.clear_agree_timeout_tag().await;
                 self.dispatch_broadcasts(&result.broadcasts).await?;
             }
             HandleOutcome::MoveAccepted { .. } => {
@@ -2068,35 +2061,42 @@ impl GameRoom {
         bucket.delete(&key).await
     }
 
+    fn turn_alarm_delay(&self) -> Option<Duration> {
+        let deadline_ms = self
+            .core
+            .borrow()
+            .as_ref()
+            .and_then(CoreRoom::current_turn_deadline_with_margin_ms);
+        turn_alarm_delay(deadline_ms, self.now_ms())
+    }
+
     /// 直前の `HandleOutcome` に応じて Alarm を張り替える。
     ///
-    /// - `GameStarted` / `MoveAccepted`: 次手番側が使える残時間 (main + byoyomi) を
-    ///   `Duration` として set_alarm に渡す。通信マージン分の安全側余裕も追加する。
+    /// - `GameStarted` / `MoveAccepted`: 計時起点から決まる期限に turn alarm を予約する。
     /// - `GameEnded`: 明示的に delete_alarm で解除する (set_alarm で上書きされないケースへの保険)。
     /// - `Continue`: 手番は変わらないので何もしない。
     async fn reschedule_turn_alarm(&self, outcome: &HandleOutcome) -> Result<()> {
         match outcome {
             HandleOutcome::GameStarted | HandleOutcome::MoveAccepted { .. } => {
-                let budget_ms = {
-                    let borrow = self.core.borrow();
-                    let Some(core) = borrow.as_ref() else {
-                        return Ok(());
-                    };
-                    let next_turn = core.current_turn();
-                    core.clock_turn_budget_ms(next_turn)
+                let kind = if matches!(outcome, HandleOutcome::GameStarted) {
+                    // 開始時の R2 書き込み中に登録された grace や終局後の retry を優先する。
+                    self.load_pending_alarm_kind().await?
+                } else {
+                    None
                 };
-                let margin_ms = self
-                    .config
-                    .borrow()
-                    .as_ref()
-                    .map(|c| c.time_margin_ms)
-                    .unwrap_or(DEFAULT_TIME_MARGIN_MS);
-                // budget が負になるのは契約違反だが、set_alarm に負時間は渡せないので
-                // 防御的に 0 へ丸める。`u64 + margin` に小さな安全側ゲタ (ALARM_SAFETY_MS)
-                // を加えて、CoreRoom が deadline 未到達として直前に弾くのを防ぐ。
-                let budget = budget_ms.max(0) as u64;
-                let total = budget.saturating_add(margin_ms).saturating_add(ALARM_SAFETY_MS);
-                self.state.storage().set_alarm(Duration::from_millis(total)).await?;
+                if matches!(
+                    kind,
+                    Some(PendingAlarmKind::GraceExpired | PendingAlarmKind::ExportRetry)
+                ) {
+                    return Ok(());
+                }
+                if let Some(delay) = self.turn_alarm_delay() {
+                    self.state.storage().set_alarm(delay).await?;
+                    if matches!(kind, Some(PendingAlarmKind::AgreeTimeout)) {
+                        // 旧 alarm を時間切れと誤認しないよう、タグは上書き後に消す。
+                        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+                    }
+                }
             }
             HandleOutcome::GameEnded(_) => {
                 let _ = self.state.storage().delete_alarm().await;
@@ -3686,21 +3686,41 @@ impl GameRoom {
         // 既存 turn alarm の予定発火時刻を grace 経路前に取得する。grace deadline
         // と比較して早い方を残すために使い、再接続成立後の turn alarm は core の
         // 固定計時起点 + 現在予算 + 永続化済み累積 credit から再構成する。
+        let existing_kind = self.load_pending_alarm_kind().await?;
+        if matches!(existing_kind, Some(PendingAlarmKind::ExportRetry)) {
+            return Ok(());
+        }
         let existing_alarm = self.state.storage().get_alarm().await.ok().flatten();
-        let pending = {
+        let (pending, turn_deadline_ms) = {
             let borrow = self.core.borrow();
             let core = borrow.as_ref().ok_or_else(|| {
                 Error::RustError("enter_grace_window: core missing after ensure_core_loaded".into())
             })?;
-            self.build_pending_reconnect(core, &cfg, role, grace_duration)?
+            (
+                self.build_pending_reconnect(core, &cfg, role, grace_duration)?,
+                core.current_turn_deadline_with_margin_ms(),
+            )
         };
         // 既存の turn alarm より grace deadline が早ければ上書き、遅ければ既存
         // alarm (時間切れ) を残す。`get_alarm` は次回発火時刻 (epoch ms) を返し、
         // 未予約なら `None`。
         let now_ms = self.now_ms();
         let grace_deadline_ms = pending.deadline_ms;
-        let (alarm_kind, should_set_grace) =
-            classify_alarm_after_enter_grace(existing_alarm, grace_deadline_ms);
+        // 開始時の R2 待ちでは、AGREE 待ちの予約が残るか、発火済みで予約が空になる。
+        let unarmed_turn_deadline_ms = match (existing_kind, existing_alarm) {
+            (Some(PendingAlarmKind::AgreeTimeout), _) | (None, None) => turn_deadline_ms,
+            _ => None,
+        };
+        let (alarm_kind, new_deadline_ms, should_set_grace) =
+            if let Some(turn_deadline_ms) = unarmed_turn_deadline_ms {
+                let (kind, deadline_ms) =
+                    earliest_turn_or_grace_alarm(turn_deadline_ms, grace_deadline_ms);
+                (kind, Some(deadline_ms), false)
+            } else {
+                let (kind, should_set_grace) =
+                    classify_alarm_after_enter_grace(existing_alarm, grace_deadline_ms);
+                (kind, None, should_set_grace)
+            };
 
         // `KEY_PENDING_ALARM_KIND` → `KEY_GRACE_REGISTRY` の順で put する。
         // `put_multiple` を使うとローカル struct の
@@ -3719,7 +3739,9 @@ impl GameRoom {
         // 防御として効く。
         self.state.storage().put(KEY_PENDING_ALARM_KIND, &alarm_kind).await?;
         self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
-        if should_set_grace {
+        if let Some(delay) = turn_alarm_delay(new_deadline_ms, self.now_ms()) {
+            self.state.storage().set_alarm(delay).await?;
+        } else if should_set_grace {
             let delay = grace_deadline_ms.saturating_sub(now_ms).saturating_add(ALARM_SAFETY_MS);
             self.state.storage().set_alarm(Duration::from_millis(delay)).await?;
         }
@@ -4123,26 +4145,8 @@ impl GameRoom {
         // credit + 通信マージン + safety から絶対時刻として再構成する。これにより
         // credit 保存と alarm 更新の間で isolate が失われても、次の cold rejoin が
         // 復元済み credit を反映できる。off-turn は credit を付与しないため延長なし。
-        let now = self.now_ms();
-        let turn_alarm_epoch_ms = {
-            let core_borrow = self.core.borrow();
-            core_borrow.as_ref().and_then(|core| {
-                let margin = self
-                    .config
-                    .borrow()
-                    .as_ref()
-                    .map(|c| c.time_margin_ms)
-                    .unwrap_or(DEFAULT_TIME_MARGIN_MS);
-                core.current_turn_deadline_ms()
-                    .map(|deadline| deadline.saturating_add(margin).saturating_add(ALARM_SAFETY_MS))
-            })
-        };
-        if let Some(final_epoch) = turn_alarm_epoch_ms {
-            // `set_alarm(Duration)` は「now から N ms 後」に発火する API なので
-            // delay = final_epoch - now で渡す。`saturating_sub` は now が final_epoch
-            // を既に過ぎている場合に 0 を返し、即時発火させて time_up に進める。
-            let delay_ms = final_epoch.saturating_sub(now);
-            self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await?;
+        if let Some(delay) = self.turn_alarm_delay() {
+            self.state.storage().set_alarm(delay).await?;
         } else {
             // CoreRoom 不在 (異常系)。alarm を解除して保守的に振る舞う。
             let _ = self.state.storage().delete_alarm().await;
@@ -4181,14 +4185,6 @@ impl GameRoom {
         Ok(())
     }
 
-    /// AGREE 待ち TTL タグだけを片付ける best-effort helper (https://github.com/SH11235/rshogi/issues/600)。
-    /// `HandleOutcome::GameStarted` 観測時に呼ぶ。`KEY_GRACE_REGISTRY` は
-    /// AGREE 経路では存在しない (grace 経路は対局成立後にしか入らない) ため
-    /// 触らない。
-    async fn clear_agree_timeout_tag(&self) {
-        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
-    }
-
     /// alarm が `AgreeTimeout` 種別で発火した経路 (https://github.com/SH11235/rshogi/issues/600)。
     ///
     /// - 既に終局済 / 対局成立済の場合は no-op (race ガード)。
@@ -4205,7 +4201,7 @@ impl GameRoom {
             return Ok(());
         }
         // race: alarm 直前で AGREE が成立していて `mark_play_started` 済なら
-        // 何もしない。タグも `clear_agree_timeout_tag` 経路で消える (race で
+        // 何もしない。タグも turn alarm の設定時に消える (race で
         // 残っているなら念のため明示削除)。
         let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
         if let Some(cfg) = cfg_opt.as_ref()

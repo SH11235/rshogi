@@ -114,13 +114,10 @@ enum Event {
 
 // 受信のたびに猶予を付け直さず、手番開始時刻と再接続補償から固定した期限を使う。
 fn compute_deadline(room: &GameRoom, now_ms: u64) -> Instant {
-    let Some(deadline_ms) = room.current_turn_deadline_ms() else {
+    let Some(deadline_ms) = room.current_turn_deadline_with_margin_ms() else {
         return Instant::now() + NEAR_INFINITE;
     };
-    let wait_ms = deadline_ms
-        .saturating_add(room.time_margin_ms())
-        .saturating_add(TIMEUP_GRACE_MS)
-        .saturating_sub(now_ms);
+    let wait_ms = deadline_ms.saturating_add(TIMEUP_GRACE_MS).saturating_sub(now_ms);
     Instant::now() + Duration::from_millis(wait_ms)
 }
 

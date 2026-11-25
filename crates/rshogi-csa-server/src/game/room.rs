@@ -266,7 +266,7 @@ impl GameRoom {
         self.clock.turn_budget_ms(color)
     }
 
-    /// 設定済みの通信マージン（ミリ秒）。`run_loop` の `compute_deadline` から参照される。
+    /// 設定済みの通信マージン（ミリ秒）。
     pub fn time_margin_ms(&self) -> u64 {
         self.config.time_margin_ms
     }
@@ -367,6 +367,14 @@ impl GameRoom {
         let started = self.turn_started_at_ms?;
         let budget = self.clock.turn_budget_ms(self.current_turn()).max(0) as u64;
         Some(started.saturating_add(budget).saturating_add(self.turn_reconnect_credit_ms))
+    }
+
+    /// 現手番の時計期限に通信マージンを加えた時刻（ミリ秒）。計時起点と同じ時刻系で返す。
+    ///
+    /// アダプター固有の発火猶予は呼び出し側で加える。
+    pub fn current_turn_deadline_with_margin_ms(&self) -> Option<u64> {
+        self.current_turn_deadline_ms()
+            .map(|deadline| deadline.saturating_add(self.time_margin_ms()))
     }
 
     /// 現手番に既に付与済みの再接続時計補償（ミリ秒）。
