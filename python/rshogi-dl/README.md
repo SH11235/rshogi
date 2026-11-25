@@ -322,6 +322,9 @@ python -m rshogi_dl.trainer \
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
 | `--optimizer` | `adamw`（既定）/ `muon` / `batched-muon` |
 | `--learning-rate-step STEP:RATE` | 更新試行を STEP 回終えた直後に学習率を RATE に下げる。たとえば `--learning-rate-step 10000:0.0005 --learning-rate-step 20000:0.00025`。同じ設定で途中再開でき、Muon 併用時は両 optimizer の学習率を同じ比率で下げる。学習ログの learning_rate は直近の更新試行に適用された値 |
+| `--adamw-betas BETA1 BETA2` / `--adamw-epsilon EPS` | AdamW の moment 係数と分母の安定化定数。Muon 併用時も AdamW 側に適用 |
+| `--clip-grad-norm N` | 逆伝播後に全パラメータの勾配を L2 ノルム N でクリップ。0 で無効 |
+| `--policy-loss-weight W` / `--value-loss-weight W` | 学習損失の方策・価値の係数。両方の既定は1。価値の係数は正とし、方策の係数を0にすると方策ヘッドは更新しない。評価は重み付け前の値を記録 |
 | `--muon-learning-rate` | `muon` / `batched-muon` の学習率。両方式で必須 |
 | `--fuse-muon-symmetric-polynomial` | `batched-muon` のNewton–Schulz反復で、対称な二次項のタイルを再利用する。短辺256・長辺が32の倍数の行列が対象。NVIDIA CUDA compute capability 8.0以上とTritonが必要。丸め順が変わる場合がある。既定は無効 |
 | `--threads` | CPU thread数、既定1 |

@@ -114,6 +114,34 @@ class TrainerTest(unittest.TestCase):
             self.assert_nested_equal(resumed["model_state"], expected["model_state"])
             self.assert_nested_equal(resumed["optimizer_state"], expected["optimizer_state"])
 
+    def test_weighted_loss_and_adamw_options_survive_resume(self) -> None:
+        config = replace(
+            self.config, log_every=1, policy_loss_weight=0.5, value_loss_weight=2.0,
+            adamw_betas=(0, 0.95), adamw_epsilon=1e-7, clip_grad_norm=0.2,
+        )
+        self.run_training("weighted-full", config)
+        self.run_training("weighted-start", replace(config, max_steps=2))
+        self.run_training(
+            "weighted-resumed", config, resume=self.root / "weighted-start" / "resume-final.pt",
+        )
+        for line in (self.root / "weighted-full" / "metrics.jsonl").read_text().splitlines():
+            row = json.loads(line)
+            self.assertAlmostEqual(row["loss"], 0.5 * row["policy_loss"] + 2.0 * row["value_loss"], places=6)
+        expected = load_resume(self.root / "weighted-full" / "resume-final.pt")
+        resumed = load_resume(self.root / "weighted-resumed" / "resume-final.pt")
+        group = expected["optimizer_state"]["param_groups"][0]
+        self.assertEqual(group["betas"], (0.0, 0.95))
+        self.assertEqual(group["eps"], 1e-7)
+        self.assert_nested_equal(resumed["model_state"], expected["model_state"])
+        self.assert_nested_equal(resumed["optimizer_state"], expected["optimizer_state"])
+
+    def test_zero_policy_weight_does_not_update_policy_head(self) -> None:
+        config = replace(self.config, policy_loss_weight=0.0, weight_decay=0.1)
+        report = self.run_training("value-only-objective", config)
+        self.assertEqual(report["progress"]["policy_optimizer_updates"], 0)
+        with self.assertRaisesRegex(ValueError, "value_loss_weight"):
+            replace(config, value_loss_weight=0.0)
+
     def test_direct_hcpe3_trains_one_pass_and_resumes_at_accepted_row(self) -> None:
         train_info = deepcopy(dataset_info(self.train))
         train_info["manifest"]["source_records"] = None
@@ -671,6 +699,26 @@ class TrainerTest(unittest.TestCase):
         with mock.patch.object(optimizer, "_symmetric_polynomial") as symmetric:
             optimizer.step()
             symmetric.assert_not_called()
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_clipped_weighted_objective_matches_padded_eager(self) -> None:
+        records = synthetic_records(seed=27, count=8)
+        for record in records:
+            record["policy"] = [[record["legal_labels"][0], 1]]
+        self.train = self.make_dataset("clipped-policy", records)
+        config = replace(
+            self.config, max_steps=9, batch_size=2, device="cuda", precision="bf16", fused_optimizer=True,
+            execution="cuda-graph", attention_backend="sdpa", policy_loss_weight=0.5, clip_grad_norm=0.2,
+            adamw_betas=(0.9, 0.95),
+        )
+        report = self.run_training("clipped-graph", config)
+        self.assertGreater(report["cuda_graph_replayed_steps"], 0)
+        with mock.patch("rshogi_dl._step_graph._WARMUP_STEPS", config.max_steps):
+            self.run_training("clipped-eager", config)
+        graph = load_resume(self.root / "clipped-graph" / "resume-final.pt")
+        eager = load_resume(self.root / "clipped-eager" / "resume-final.pt")
+        self.assert_nested_equal(graph["model_state"], eager["model_state"])
+        self.assert_nested_equal(graph["optimizer_state"], eager["optimizer_state"])
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_symmetric_muon_resume_after_eager_fallback(self) -> None:
