@@ -1,11 +1,11 @@
-"""shard を有限回学習し、保持した cursor と optimizer 状態から再開する。"""
+"""教師データを有限回学習し、保持した cursor と optimizer 状態から再開する。"""
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, fields
 from itertools import islice
 import json
@@ -21,6 +21,7 @@ import torch
 
 from .contract import TRAINING_STATUS
 from .data import Batch
+from .hcpe3_stream import hcpe3_dataset_info, is_hcpe3_manifest, iter_hcpe3_batches
 from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact, shogi_data_root
@@ -278,7 +279,8 @@ def _settings(config: TrainerConfig) -> Iterator[torch.device]:
 
 
 def _datasets(train: str | Path, validation: str | Path, config: TrainerConfig) -> dict:
-    information = {"train": dataset_info(train), "validation": dataset_info(validation)}
+    train_info = hcpe3_dataset_info(train) if is_hcpe3_manifest(train) else dataset_info(train)
+    information = {"train": train_info, "validation": dataset_info(validation)}
     left, right = information.values()
     if (
         left["path"] == right["path"] or left["fingerprint"] == right["fingerprint"]
@@ -347,15 +349,33 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
     if any(type(value) is not int or value < 0 for value in progress.values()):
         raise ResumeError("invalid training progress counters")
     count = datasets["train"]["manifest"]["source_records"]
-    steps_per_epoch = (count + config.batch_size - 1) // config.batch_size
+    if count is None:
+        cursor_matches = (
+            progress["epoch"] <= 1
+            and progress["sample_cursor"] == progress["samples_seen"]
+            and (progress["sample_cursor"] + config.batch_size - 1) // config.batch_size == progress["step"]
+            and (progress["step"] > 0 if progress["epoch"] else progress["sample_cursor"] % config.batch_size == 0)
+        )
+        if cursor_matches and progress["epoch"]:
+            train = datasets["train"]
+            with closing(iter_hcpe3_batches(
+                train["path"], config.batch_size, start_row=progress["sample_cursor"],
+                expected_fingerprint=train["fingerprint"],
+            )) as rows:
+                cursor_matches = next(rows, None) is None
+    else:
+        steps_per_epoch = (count + config.batch_size - 1) // config.batch_size
+        cursor_matches = (
+            progress["epoch"] == progress["step"] // steps_per_epoch
+            and progress["sample_cursor"] == (progress["step"] % steps_per_epoch) * config.batch_size
+            and progress["samples_seen"] == progress["epoch"] * count + progress["sample_cursor"]
+        )
     if (
         progress["step"] > config.max_steps
         or progress["step"] > saved.max_steps
         or progress["optimizer_updates"] > progress["step"]
         or progress["policy_optimizer_updates"] > progress["optimizer_updates"]
-        or progress["epoch"] != progress["step"] // steps_per_epoch
-        or progress["sample_cursor"] != (progress["step"] % steps_per_epoch) * config.batch_size
-        or progress["samples_seen"] != progress["epoch"] * count + progress["sample_cursor"]
+        or not cursor_matches
     ):
         raise ResumeError("checkpoint counters do not match the sequential cursor")
     return dict(progress)
@@ -595,7 +615,9 @@ def run_training(
         })
         setup_seconds = time.perf_counter() - setup_started
         model.train()
-        count = datasets["train"]["manifest"]["source_records"]
+        train = datasets["train"]
+        count = train["manifest"]["source_records"]
+        stream = count is None
         source = None
         rolling = torch.zeros(3, device=device)
         rolling_steps = 0
@@ -623,16 +645,52 @@ def run_training(
         _sync(device)
         started = time.perf_counter()
         reader = ThreadPoolExecutor(max_workers=1) if config.prefetch_input else nullcontext()
-        with (output / "metrics.jsonl").open("x", encoding="utf-8") as metrics, reader as executor:
+        direct_source = (
+            iter_hcpe3_batches(
+                train["path"], config.batch_size, start_row=progress["sample_cursor"],
+                expected_fingerprint=train["fingerprint"],
+            )
+            if stream and not progress["epoch"] else None
+        )
+        with (
+            closing(direct_source) if direct_source is not None else nullcontext(),
+            (output / "metrics.jsonl").open("x", encoding="utf-8") as metrics,
+            reader as executor,
+        ):
+            def write_metrics() -> None:
+                values = (rolling / rolling_steps).cpu().tolist()
+                event = {
+                    **progress, "amp_skipped_steps": progress["step"] - progress["optimizer_updates"],
+                    "loss": values[0], "policy_loss": values[1], "value_loss": values[2],
+                    "seconds": time.perf_counter() - started,
+                }
+                metrics.write(json.dumps(event, sort_keys=True, allow_nan=False) + "\n")
+                metrics.flush()
+                rolling.zero_()
+
             while progress["step"] < config.max_steps:
+                if stream and progress["epoch"]:
+                    break
                 if source is None:
-                    source = iter_batches(
-                        datasets["train"]["path"], config.batch_size,
-                        start_record=progress["sample_cursor"],
+                    source = direct_source if stream else iter_batches(
+                        train["path"], config.batch_size, start_record=progress["sample_cursor"],
                     )
                     if executor is not None:
                         source = _read_ahead(islice(source, config.max_steps - progress["step"]), executor)
-                batch = next(source)
+                try:
+                    batch = next(source)
+                except StopIteration:
+                    if not stream:
+                        raise TrainingError("sharded dataset ended before its declared row count") from None
+                    if not progress["samples_seen"]:
+                        raise TrainingError("HCPE3 manifest has no accepted training rows") from None
+                    progress["epoch"] = 1
+                    if rolling_steps:
+                        _update_progress(optimizer, model, progress)
+                        if not bool(finite.item()):
+                            raise TrainingError("non-finite training loss")
+                        write_metrics()
+                    break
                 samples = batch.tokens.shape[0]
                 if graph is None or not graph.try_update(batch):
                     has_policy = has_policy_targets(batch)
@@ -648,7 +706,11 @@ def run_training(
                     progress["epoch"] += 1
                     progress["sample_cursor"] = 0
                     source = None
-                log = progress["step"] % config.log_every == 0 or progress["step"] == config.max_steps
+                if stream and samples < config.batch_size:
+                    progress["epoch"] = 1
+                log = progress["step"] % config.log_every == 0 or progress["step"] == config.max_steps or (
+                    stream and progress["epoch"]
+                )
                 checkpoint = (
                     config.checkpoint_every
                     and progress["step"] % config.checkpoint_every == 0
@@ -659,15 +721,7 @@ def run_training(
                     if not bool(finite.item()):
                         raise TrainingError("non-finite training loss")
                 if log:
-                    values = (rolling / rolling_steps).cpu().tolist()
-                    event = {
-                        **progress, "amp_skipped_steps": progress["step"] - progress["optimizer_updates"],
-                        "loss": values[0], "policy_loss": values[1], "value_loss": values[2],
-                        "seconds": time.perf_counter() - started,
-                    }
-                    metrics.write(json.dumps(event, sort_keys=True, allow_nan=False) + "\n")
-                    metrics.flush()
-                    rolling.zero_()
+                    write_metrics()
                     rolling_steps = 0
                 if checkpoint:
                     if any(not bool(torch.isfinite(parameter).all()) for parameter in model.parameters()):
@@ -718,8 +772,8 @@ def run_training(
 
 def main(argv: list[str] | None = None) -> int:
     """有限学習と再開の CLI を実行し、条件違反は終了 code 2 で返す。"""
-    parser = argparse.ArgumentParser(description="sharded dataset の有限学習・held-out評価・再開。")
-    parser.add_argument("--train", required=True)
+    parser = argparse.ArgumentParser(description="教師データの有限学習・held-out評価・再開。")
+    parser.add_argument("--train", required=True, help="sharded dataset directory または HCPE3 manifest file（1 pass）")
     parser.add_argument("--validation", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--resume")

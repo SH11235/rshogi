@@ -115,6 +115,40 @@ pip install --no-deps -e .
 
 ストリームは末尾まで読み、encoder の終了コードを確認してから利用してください。オプションなしの `encode` は SFEN のみを受け付け、従来の JSON Lines を返します。
 
+## HCPE3 から直接学習する
+
+学習 CLI の `--train` に次の JSON manifest を指定すると、HCPE3 を
+バッチ単位で読み込みます。`--validation` には評価用の shard を指定します。
+encoder は `cargo build -p tools --no-default-features --release --bin hcpe3_to_dl_rows`
+でビルドできます。`.hcpe3.xz` を読む場合は PATH に `xz` が必要です。
+
+```json
+{
+  "format": "rshogi-dl-hcpe3-stream-v1",
+  "encoder": "/path/to/hcpe3_to_dl_rows",
+  "encoder_sha256": "<encoder の SHA-256>",
+  "archives": [
+    {"path": "/path/to/games.hcpe3.xz", "sha256": "<ファイルの SHA-256>", "size": 123456}
+  ],
+  "protected_tokens": null,
+  "heldout_modulus": 5,
+  "seed": 42
+}
+```
+
+manifest と教師ファイルは `SHOGI_DATA` 配下に置きます。アーカイブは配列の順に読み、
+各ファイル内では固定サイズのブロックごとに seed を使って行を並べ替えます。
+`heldout_modulus` に 2 以上を指定すると、対局キーの先頭 8 バイトを整数として読み、
+指定値で割り切れる対局を学習から除外します。0 はこのフィルターを無効にします。
+評価局面を除外するには、96 バイトのトークン列を連結したファイルの絶対パスと
+SHA-256 を `protected_tokens` の `path`、`sha256` に指定します。
+非合法な実着手を含む対局など、encoder が除外した対局はログに出ます。
+
+学習は1周または `--max-steps` に達した時点で終了します。行はメモリで処理し、
+学習データ全体の重複排除は行いません。再開時は同じ manifest とアーカイブを使い、
+checkpoint に記録した学習行まで進めます。読み終えたアーカイブの行数を
+manifest に隣接する `.counts` ディレクトリに保存し、再開時の読み飛ばしに使います。
+
 ## shard の作成と読み込み
 
 HCPE3 の訪問数付き教師は、Rust の変換ツールから直接 shard にできます。

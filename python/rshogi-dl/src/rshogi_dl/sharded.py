@@ -729,8 +729,7 @@ def _scratch(size: int) -> dict[str, np.ndarray]:
     }
 
 
-def _append(scratch: dict, row: int, shard: _Shard, start: int, count: int) -> int:
-    source = shard.arrays
+def _append(scratch: dict, row: int, source: dict, start: int, count: int) -> int:
     stop = start + count
     for name in ("tokens", "values", "policy_present"):
         scratch[name][row:row + count] = source[name][start:stop]
@@ -801,7 +800,7 @@ def iter_batches(
         while start < shard.rows:
             shard.check_unchanged()
             count = min(batch_size - pending, shard.rows - start)
-            width = max(width, _append(scratch, pending, shard, start, count))
+            width = max(width, _append(scratch, pending, shard.arrays, start, count))
             shard.check_unchanged()
             pending += count
             start += count

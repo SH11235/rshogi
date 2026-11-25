@@ -97,6 +97,46 @@ class TrainerTest(unittest.TestCase):
         self.assert_nested_equal(canonical.model.state_dict(), resumed["model_state"])
         self.assertEqual(canonical.training_status, "validation-only")
 
+    def test_direct_hcpe3_trains_one_pass_and_resumes_at_accepted_row(self) -> None:
+        train_info = deepcopy(dataset_info(self.train))
+        train_info["manifest"]["source_records"] = None
+        with (
+            mock.patch("rshogi_dl.trainer.is_hcpe3_manifest", return_value=True),
+            mock.patch("rshogi_dl.trainer.hcpe3_dataset_info", return_value=train_info),
+            mock.patch(
+                "rshogi_dl.trainer.iter_hcpe3_batches",
+                side_effect=lambda path, batch_size, *, start_row, expected_fingerprint: iter_batches(
+                    path, batch_size, start_record=start_row,
+                ),
+            ) as stream,
+        ):
+            config = replace(self.config, log_every=100)
+            full = self.run_training("direct-full", config)
+            first = self.run_training("direct-first", replace(config, max_steps=1))
+            resumed = self.run_training(
+                "direct-resumed", config, resume=self.root / "direct-first" / "resume-final.pt",
+            )
+            completed = self.run_training(
+                "direct-completed", config, resume=self.root / "direct-resumed" / "resume-final.pt",
+            )
+        self.assertEqual([call.kwargs["start_row"] for call in stream.call_args_list], [0, 0, 3, 5])
+        self.assertEqual(first["progress"]["epoch"], 0)
+        self.assertEqual(first["progress"]["sample_cursor"], 3)
+        self.assertEqual(full["progress"], {
+            "step": 2, "optimizer_updates": 2, "policy_optimizer_updates": 2,
+            "epoch": 1, "sample_cursor": 5, "samples_seen": 5,
+        })
+        self.assertEqual(full["progress"], resumed["progress"])
+        self.assertEqual(completed["segment_samples"], 0)
+        self.assertEqual(resumed["segment_samples"], 2)
+        metrics = json.loads((self.root / "direct-resumed" / "metrics.jsonl").read_text())
+        self.assertEqual(metrics["samples_seen"], 5)
+        uninterrupted, restarted = (
+            load_resume(self.root / name / "resume-final.pt") for name in ("direct-full", "direct-resumed")
+        )
+        for field in ("model_state", "optimizer_state", "scaler_state", "progress", "rng"):
+            self.assert_nested_equal(uninterrupted[field], restarted[field])
+
     def test_compressed_input_resume_matches_npy_training(self) -> None:
         train = self.root / "compressed-train"
         validation = self.root / "compressed-validation"
