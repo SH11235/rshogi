@@ -92,6 +92,7 @@ class TrainerConfig:
     fuse_ffn_expand_bias_gradient: bool = False
     tile_packed_attention_short_key_first: bool = False
     lookup_ffn_gelu_derivative: bool = False
+    learning_rate_steps: tuple[tuple[int, float], ...] = ()
 
     def __post_init__(self) -> None:
         limits = {
@@ -128,6 +129,21 @@ class TrainerConfig:
                 raise ValueError(f"{name} must be finite")
             if value < 0 or (name == "learning_rate" and value == 0):
                 raise ValueError(f"invalid {name}")
+        if type(self.learning_rate_steps) not in (tuple, list):
+            raise ValueError("learning_rate_steps must be a sequence")
+        previous_step, previous_rate = 0, self.learning_rate
+        steps = []
+        for entry in self.learning_rate_steps:
+            if type(entry) not in (tuple, list) or len(entry) != 2:
+                raise ValueError("learning rate steps require STEP:RATE")
+            step, rate = entry
+            if type(step) is not int or not previous_step < step < 10_000_000:
+                raise ValueError("learning rate steps must be strictly increasing in 1..9999999")
+            if type(rate) not in (int, float) or not 0 < rate < previous_rate:
+                raise ValueError("scheduled learning rates must be positive and strictly decreasing")
+            steps.append((step, float(rate)))
+            previous_step, previous_rate = step, rate
+        object.__setattr__(self, "learning_rate_steps", tuple(steps))
         if self.optimizer == "adamw":
             if self.muon_learning_rate is not None:
                 raise ValueError("muon_learning_rate requires a Muon optimizer")
@@ -189,6 +205,8 @@ class TrainerConfig:
 
 def _config_dict(config: TrainerConfig) -> dict:
     payload = asdict(config)
+    if not config.learning_rate_steps:
+        del payload["learning_rate_steps"]
     if config.optimizer == "adamw":
         del payload["optimizer"], payload["muon_learning_rate"]
     for name in ("compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
@@ -318,6 +336,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
         expected = {field.name for field in fields(TrainerConfig)}
         optimizer_fields = {"optimizer", "muon_learning_rate"}
         required = expected - optimizer_fields - {
+            "learning_rate_steps",
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
             "fuse_packed_attention", "fuse_packed_attention_backward",
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
@@ -404,6 +423,29 @@ def _check_optimizer(optimizer, model, progress) -> None:
                 raise ResumeError("missing AdamW state for updated parameter")
             continue
         validate_adamw_state(state, parameter, updates)
+
+
+def _learning_rate_for_checkpoint(config: TrainerConfig, completed_steps: int) -> float:
+    for step, rate in reversed(config.learning_rate_steps):
+        if step < completed_steps:
+            return rate
+    return config.learning_rate
+
+
+def _set_learning_rate(optimizer, config: TrainerConfig, rate: float) -> None:
+    if isinstance(optimizer, MuonAdamW):
+        optimizer.set_learning_rates(rate, config.muon_learning_rate * (rate / config.learning_rate))
+    else:
+        for group in optimizer.param_groups:
+            group["lr"] = rate
+
+
+def _parse_learning_rate_step(argument: str) -> tuple[int, float]:
+    try:
+        step, rate = argument.split(":")
+        return int(step), float(rate)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected STEP:RATE") from error
 
 
 def _checkpoint(path, model, optimizer, scaler, config, datasets, progress) -> None:
@@ -521,6 +563,7 @@ def run_training(
         "step": 0, "optimizer_updates": 0, "policy_optimizer_updates": 0,
         "epoch": 0, "sample_cursor": 0, "samples_seen": 0,
     }
+    initial_rate = _learning_rate_for_checkpoint(config, progress["step"])
     if payload:
         validate_scaler_state(payload["scaler_state"], enabled=config.precision == "fp16")
     initial_samples = progress["samples_seen"]
@@ -561,6 +604,8 @@ def run_training(
             try:
                 model.load_state_dict(payload["model_state"], strict=True)
                 saved_optimizer = payload["optimizer_state"]
+                if config.learning_rate_steps:
+                    _set_learning_rate(optimizer, config, initial_rate)
                 if config.optimizer == "adamw":
                     validate_optimizer_groups(saved_optimizer, optimizer, "AdamW")
                 optimizer.load_state_dict(payload["optimizer_state"])
@@ -635,13 +680,17 @@ def run_training(
             scaler.update()
             rolling.add_(torch.stack((loss.total.detach(), loss.policy.detach(), loss.value.detach())))
 
-        graph = (
-            StepGraph(
+        def make_graph():
+            return StepGraph(
                 config.batch_size, device, update, _transfer, tuple(model.parameters()),
                 prefetch_input=config.prefetch_input,
-            )
-            if uses_step_graph else None
-        )
+            ) if uses_step_graph else None
+
+        graph = make_graph()
+        graph_replays = 0
+        active_rate = initial_rate
+        pending_rates = iter(pair for pair in config.learning_rate_steps if pair[0] >= progress["step"])
+        next_rate = next(pending_rates, None)
         _sync(device)
         started = time.perf_counter()
         reader = ThreadPoolExecutor(max_workers=1) if config.prefetch_input else nullcontext()
@@ -664,6 +713,8 @@ def run_training(
                     "loss": values[0], "policy_loss": values[1], "value_loss": values[2],
                     "seconds": time.perf_counter() - started,
                 }
+                if config.learning_rate_steps:
+                    event["learning_rate"] = active_rate
                 metrics.write(json.dumps(event, sort_keys=True, allow_nan=False) + "\n")
                 metrics.flush()
                 rolling.zero_()
@@ -692,6 +743,17 @@ def run_training(
                         write_metrics()
                     break
                 samples = batch.tokens.shape[0]
+                if next_rate is not None and progress["step"] == next_rate[0]:
+                    active_rate = next_rate[1]
+                    _set_learning_rate(optimizer, config, active_rate)
+                    next_rate = next(pending_rates, None)
+                    if graph is not None:
+                        # AdamW と Muon の scalar 学習率は capture 時の値が埋め込まれる。
+                        _sync(device)
+                        optimizer.zero_grad(set_to_none=True)
+                        graph_replays += graph.replays
+                        del graph
+                        graph = make_graph()
                 if graph is None or not graph.try_update(batch):
                     has_policy = has_policy_targets(batch)
                     batch = _transfer(batch, device)
@@ -733,8 +795,8 @@ def run_training(
                     )
         _sync(device)
         training_seconds = time.perf_counter() - started
-        graph_replays = graph.replays if graph is not None else 0
         if graph is not None:
+            graph_replays += graph.replays
             optimizer.zero_grad(set_to_none=True)
             del graph
         _update_progress(optimizer, model, progress)
@@ -782,6 +844,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-steps", type=int, required=True)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--learning-rate-step", dest="learning_rate_steps", action="append",
+                        default=[], type=_parse_learning_rate_step, metavar="STEP:RATE",
+                        help="STEP 回の更新試行後に RATE に下げる。複数指定可")
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=1)

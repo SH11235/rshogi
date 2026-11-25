@@ -97,6 +97,23 @@ class TrainerTest(unittest.TestCase):
         self.assert_nested_equal(canonical.model.state_dict(), resumed["model_state"])
         self.assertEqual(canonical.training_status, "validation-only")
 
+    def test_learning_rate_steps_survive_resume_before_and_after_change(self) -> None:
+        config = replace(self.config, learning_rate_steps=((2, 0.0005), (5, 0.0001)), log_every=1)
+        full = self.run_training("scheduled-full", config)
+        rates = [json.loads(line)["learning_rate"]
+                 for line in (self.root / "scheduled-full" / "metrics.jsonl").read_text().splitlines()]
+        self.assertEqual(rates, [0.001, 0.001, 0.0005, 0.0005, 0.0005, 0.0001, 0.0001])
+        expected = load_resume(self.root / "scheduled-full" / "resume-final.pt")
+        for split in (2, 4):
+            first = f"scheduled-first-{split}"
+            continued = f"scheduled-resume-{split}"
+            self.run_training(first, replace(config, max_steps=split))
+            report = self.run_training(continued, config, resume=self.root / first / "resume-final.pt")
+            resumed = load_resume(self.root / continued / "resume-final.pt")
+            self.assertEqual(report["progress"], full["progress"])
+            self.assert_nested_equal(resumed["model_state"], expected["model_state"])
+            self.assert_nested_equal(resumed["optimizer_state"], expected["optimizer_state"])
+
     def test_direct_hcpe3_trains_one_pass_and_resumes_at_accepted_row(self) -> None:
         train_info = deepcopy(dataset_info(self.train))
         train_info["manifest"]["source_records"] = None
@@ -602,6 +619,34 @@ class TrainerTest(unittest.TestCase):
         state["momentum_buffer"] = state["momentum_buffer"].double()
         with self.assertRaisesRegex(ResumeError, "momentum buffer"):
             optimizer.load_state_dict(saved)
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_recaptures_scheduled_rates_with_prefetch(self) -> None:
+        records = synthetic_records(seed=28, count=8)
+        for record in records:
+            record["policy"] = [[record["legal_labels"][0], 1]]
+        self.train = self.make_dataset("scheduled-policy", records)
+        for optimizer in ("adamw", "batched-muon"):
+            with self.subTest(optimizer=optimizer):
+                config = replace(
+                    self.config, max_steps=16, batch_size=2, checkpoint_every=8, learning_rate_steps=((8, 0.00025),),
+                    device="cuda", precision="bf16", fused_optimizer=True, execution="cuda-graph",
+                    attention_backend="sdpa", prefetch_input=True, optimizer=optimizer,
+                    muon_learning_rate=0.002 if optimizer != "adamw" else None,
+                )
+                name = f"scheduled-{optimizer}"
+                report = self.run_training(name, config)
+                self.assertEqual(report["cuda_graph_replayed_steps"], 8)
+                resumed = f"{name}-resumed"
+                self.run_training(resumed, config, resume=self.root / name / "resume-0000000008.pt")
+                eager = f"{name}-eager"
+                with mock.patch("rshogi_dl._step_graph._WARMUP_STEPS", config.max_steps):
+                    self.run_training(eager, config)
+                expected = load_resume(self.root / eager / "resume-final.pt")
+                for run in (name, resumed):
+                    actual = load_resume(self.root / run / "resume-final.pt")
+                    self.assert_nested_equal(actual["model_state"], expected["model_state"])
+                    self.assert_nested_equal(actual["optimizer_state"], expected["optimizer_state"])
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_resume_after_eager_fallback(self) -> None:
