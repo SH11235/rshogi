@@ -1,6 +1,6 @@
 //! 局面ごとの定跡乱択候補と警告済み状態。
 
-use crate::{flip, reader::normalize_key};
+use crate::{flip, record::normalize_key};
 use rshogi_core::{position::Position, types::Move};
 use std::collections::{HashMap, HashSet};
 

@@ -27,8 +27,10 @@ use rshogi_core::types::RepetitionState;
 use rshogi_core::types::{Color, Move};
 
 use std::borrow::Cow;
+use std::io;
 
-use crate::reader::{Book, PositionEntry};
+use crate::reader::Book;
+use crate::record::PositionEntry;
 use crate::{BookExploreList, flip};
 
 /// 定跡選択に用いる乱数源。テストで固定できるよう抽象化する。
@@ -221,8 +223,8 @@ struct Candidate {
     move_count: u64,
 }
 
-/// 定跡を先頭から順に find(ply 込み) し、miss なら同じファイルで flip 再検索する (選択パイプラインの 3)。
-/// 指し手が 0 個の局面は載っていないものとして次のファイルへ進む。
+/// 定跡を先頭から順に検索する。局面が無いときだけ同じファイルで反転検索できる。
+/// 局面があっても指し手が 0 個なら次のファイルへ進む。
 /// 戻り値の `bool` は反転局面で当たったか。
 ///
 /// 読み出しエラーは miss と区別し、反転局面の再検索にも後ろのファイルにも進まない
@@ -231,24 +233,23 @@ fn find_in_books<'a>(
     books: &'a [Book],
     sfen: &str,
     flipped_book: bool,
-    info: &mut dyn FnMut(&str, &str),
-) -> Option<(Cow<'a, PositionEntry>, bool)> {
+) -> io::Result<Option<(Cow<'a, PositionEntry>, bool)>> {
     for book in books {
-        let mut find = |key: &str| {
-            book.find_raw(key)
-                .map_err(|e| info("", &format!("Error reading book file: {e}")))
-                .ok()
-        };
-        let found = match find(sfen)? {
+        let found = match book.find_raw(sfen)? {
             Some(entry) => Some((entry, false)),
-            None if flipped_book => find(&flip::flipped_key(sfen)?)?.map(|entry| (entry, true)),
+            None if flipped_book => {
+                let Some(key) = flip::flipped_key(sfen) else {
+                    return Ok(None);
+                };
+                book.find_raw(&key)?.map(|entry| (entry, true))
+            }
             None => None,
         };
         if let Some(found) = found.filter(|(entry, _)| !entry.moves.is_empty()) {
-            return Some(found);
+            return Ok(Some(found));
         }
     }
-    None
+    Ok(None)
 }
 
 /// find + flip + 合法性検証 + 並び替えまでを行い、筆頭手が先頭に来た候補列を返す。
@@ -262,7 +263,9 @@ fn find_candidates(
 ) -> Option<Vec<Candidate>> {
     let sfen = position.to_sfen();
 
-    let (entry, flipped) = find_in_books(books, &sfen, flipped_book, info)?;
+    let (entry, flipped) = find_in_books(books, &sfen, flipped_book)
+        .map_err(|e| info("", &format!("Error reading book file: {e}")))
+        .ok()??;
 
     // 4. 合法性検証。
     let mut candidates: Vec<Candidate> = Vec::with_capacity(entry.moves.len());
@@ -929,7 +932,7 @@ mod tests {
 
     #[test]
     fn explore_parser_comments_optional_ply_and_bad_lines() {
-        let key = crate::reader::normalize_key(HIRATE, true);
+        let key = crate::record::normalize_key(HIRATE, true);
         let flipped = flip::flipped_key(HIRATE).unwrap();
         let text = format!(
             "# comment\n\n  # indented\nsfen {key} 7g7f\nsfen {flipped} 8c8d\nwrong\nsfen bad b - 7g7f\nsfen {HIRATE}\nsfen {HIRATE} 7g7f garbage\nsfen {HIRATE} éé\n"

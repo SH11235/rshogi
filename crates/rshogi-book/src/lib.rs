@@ -22,6 +22,7 @@ mod flip;
 mod on_the_fly;
 mod probe;
 mod reader;
+mod record;
 mod ybb;
 
 pub use explore::BookExploreList;
