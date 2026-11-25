@@ -25,7 +25,10 @@ from .hcpe3_stream import hcpe3_dataset_info, is_hcpe3_manifest, iter_hcpe3_batc
 from .loss import policy_value_loss
 from .model import ATTENTION_BACKENDS, NAMED_CONFIGS, ModelConfig, SquareTransformer
 from .paths import ArtifactPathError, resolve_new_artifact, shogi_data_root
-from ._optimizers import MuonAdamW, validate_adamw_state, validate_optimizer_groups
+from ._optimizers import (
+    NADAM_MOMENTUM_DECAY, MuonAdamW, TrainerSGD, load_nadam_state, validate_adamw_state, validate_nadam_state,
+    validate_optimizer_groups,
+)
 from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
 from ._residual_norm import compiled_residual_forward
 from ._step_graph import StepGraph
@@ -49,8 +52,10 @@ _OPTIONAL_SETTINGS = {
     "weight_average_start_step": 1,
     "weight_average_every": 1,
     "ema_decay": 0.999,
+    "sgd_momentum": 0.0,
+    "sgd_nesterov": False,
 }
-_OPTIMIZERS = ("adamw", "muon", "batched-muon")
+_OPTIMIZERS = ("adamw", "nadam", "sgd", "muon", "batched-muon")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
 _CUDAGRAPH_MODES = ("reduce-overhead", "max-autotune")
 _STEP_GRAPH_EXECUTIONS = ("cuda-graph", "cuda-graph-fused-norm")
@@ -117,6 +122,8 @@ class TrainerConfig:
     weight_average_start_step: int = 1
     weight_average_every: int = 1
     ema_decay: float = 0.999
+    sgd_momentum: float = 0.0
+    sgd_nesterov: bool = False
 
     def __post_init__(self) -> None:
         limits = {
@@ -172,6 +179,19 @@ class TrainerConfig:
             raise ValueError("ema_decay requires EMA")
         if self.weight_average is None and (self.weight_average_start_step, self.weight_average_every) != (1, 1):
             raise ValueError("weight averaging cadence requires SWA or EMA")
+        if type(self.sgd_momentum) not in (int, float) or not 0 <= self.sgd_momentum < 1:
+            raise ValueError("sgd_momentum must be in [0,1)")
+        if type(self.sgd_nesterov) is not bool:
+            raise ValueError("sgd_nesterov must be boolean")
+        if self.sgd_nesterov and not self.sgd_momentum:
+            raise ValueError("SGD Nesterov acceleration requires positive momentum")
+        if self.optimizer != "sgd" and (self.sgd_momentum or self.sgd_nesterov):
+            raise ValueError("SGD momentum settings require the SGD optimizer")
+        if self.optimizer == "sgd" and (
+            self.adamw_betas != _OPTIONAL_SETTINGS["adamw_betas"]
+            or self.adamw_epsilon != _OPTIONAL_SETTINGS["adamw_epsilon"]
+        ):
+            raise ValueError("betas and epsilon require an adaptive optimizer")
         if type(self.learning_rate_steps) not in (tuple, list):
             raise ValueError("learning_rate_steps must be a sequence")
         previous_step, previous_rate = 0, self.learning_rate
@@ -213,9 +233,12 @@ class TrainerConfig:
             bounds = torch.finfo(torch.float32)
             if not bounds.tiny <= minimum <= self.learning_rate <= bounds.max:
                 raise ValueError("continuous CUDA Graph learning rates must be normal FP32 values")
-        if self.optimizer == "adamw":
+        if self.optimizer in ("adamw", "nadam", "sgd"):
             if self.muon_learning_rate is not None:
                 raise ValueError("muon_learning_rate requires a Muon optimizer")
+            if self.optimizer in ("nadam", "sgd") and (self.fused_optimizer or self.execution != "eager"):
+                name = "NAdam" if self.optimizer == "nadam" else "SGD"
+                raise ValueError(f"{name} requires eager execution without a fused optimizer")
         else:
             rate = self.muon_learning_rate
             if type(rate) not in (int, float) or not math.isfinite(rate) or rate <= 0:
@@ -393,12 +416,17 @@ def _datasets(train: str | Path, validation: str | Path, config: TrainerConfig) 
 
 
 def _optimizer_updates(optimizer, model) -> int:
+    if isinstance(optimizer, TrainerSGD):
+        return optimizer.updates
     state = optimizer.state.get(model.value_head[-1].weight, {})
     return int(state["step"].item()) if "step" in state else 0
 
 
 def _update_progress(optimizer, model, progress) -> None:
     progress["optimizer_updates"] = _optimizer_updates(optimizer, model)
+    if isinstance(optimizer, TrainerSGD):
+        progress["policy_optimizer_updates"] = optimizer.policy_updates
+        return
     policy = optimizer.state.get(model.policy_head.weight, {})
     progress["policy_optimizer_updates"] = int(policy["step"].item()) if "step" in policy else 0
 
@@ -476,29 +504,43 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
     return dict(progress)
 
 
+def _parameter_update_counts(model, progress):
+    policy_parameters = set(model.policy_head.parameters())
+    return {
+        parameter: progress["policy_optimizer_updates"] if parameter in policy_parameters else progress["optimizer_updates"]
+        for parameter in model.parameters()
+    }
+
+
 def _check_optimizer(optimizer, model, progress) -> None:
+    if isinstance(optimizer, TrainerSGD):
+        optimizer.validate_state(_parameter_update_counts(model, progress))
+        return
     if isinstance(optimizer, MuonAdamW):
         optimizer.validate_muon(progress["optimizer_updates"])
         parameters = set(optimizer.adamw_parameters)
     else:
         parameters = set(model.parameters())
+    nadam = isinstance(optimizer, torch.optim.NAdam)
+    name = "NAdam" if nadam else "AdamW"
     policy_parameters = set(model.policy_head.parameters())
     if not set(optimizer.state).issubset(parameters):
-        raise ResumeError("unexpected AdamW parameter state")
+        raise ResumeError(f"unexpected {name} parameter state")
     policy_presence = [parameter in optimizer.state for parameter in policy_parameters]
     if any(policy_presence) and not all(policy_presence):
-        raise ResumeError("policy head AdamW state is incomplete")
+        raise ResumeError(f"policy head {name} state is incomplete")
+    update_counts = _parameter_update_counts(model, progress)
     for parameter in parameters:
-        updates = (
-            progress["policy_optimizer_updates"] if parameter in policy_parameters
-            else progress["optimizer_updates"]
-        )
+        updates = update_counts[parameter]
         state = optimizer.state.get(parameter)
         if state is None:
             if updates:
-                raise ResumeError("missing AdamW state for updated parameter")
+                raise ResumeError(f"missing {name} state for updated parameter")
             continue
-        validate_adamw_state(state, parameter, updates)
+        if nadam:
+            validate_nadam_state(state, parameter, updates, optimizer.param_groups[0]["betas"][0])
+        else:
+            validate_adamw_state(state, parameter, updates)
 
 
 def _learning_rate_for_checkpoint(config: TrainerConfig, completed_steps: int) -> float:
@@ -681,6 +723,17 @@ def run_training(
                 betas=config.adamw_betas, eps=config.adamw_epsilon, fused=config.fused_optimizer,
                 capturable=uses_step_graph,
             )
+        elif config.optimizer == "nadam":
+            optimizer = torch.optim.NAdam(
+                model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
+                betas=config.adamw_betas, eps=config.adamw_epsilon, momentum_decay=NADAM_MOMENTUM_DECAY,
+                decoupled_weight_decay=True, foreach=False,
+            )
+        elif config.optimizer == "sgd":
+            optimizer = TrainerSGD(
+                model, lr=config.learning_rate, weight_decay=config.weight_decay,
+                momentum=config.sgd_momentum, nesterov=config.sgd_nesterov,
+            )
         else:
             optimizer = MuonAdamW(
                 model, lr=config.learning_rate, muon_lr=config.muon_learning_rate,
@@ -704,9 +757,14 @@ def run_training(
                 saved_optimizer = payload["optimizer_state"]
                 if config.learning_rate_steps or config.warmup_steps or config.cosine_end_step:
                     _set_learning_rate(optimizer, config, initial_rate)
-                if config.optimizer == "adamw":
-                    validate_optimizer_groups(saved_optimizer, optimizer, "AdamW")
-                optimizer.load_state_dict(payload["optimizer_state"])
+                if config.optimizer == "nadam":
+                    load_nadam_state(optimizer, saved_optimizer, _parameter_update_counts(model, progress))
+                elif config.optimizer == "sgd":
+                    optimizer.load_training_state(saved_optimizer, _parameter_update_counts(model, progress))
+                else:
+                    if config.optimizer == "adamw":
+                        validate_optimizer_groups(saved_optimizer, optimizer, "AdamW")
+                    optimizer.load_state_dict(saved_optimizer)
                 scaler.load_state_dict(payload["scaler_state"])
                 _check_optimizer(optimizer, model, progress)
                 restore_rng(payload["rng"], cuda=device.type == "cuda")
@@ -989,8 +1047,10 @@ def main(argv: list[str] | None = None) -> int:
                         default=[], type=_parse_learning_rate_step, metavar="STEP:RATE",
                         help="STEP 回の更新試行後に RATE に下げる。複数指定可")
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--adamw-betas", type=float, nargs=2, default=(0.9, 0.999), metavar=("BETA1", "BETA2"))
-    parser.add_argument("--adamw-epsilon", type=float, default=1e-8)
+    parser.add_argument("--adamw-betas", "--betas", type=float, nargs=2, default=(0.9, 0.999), metavar=("BETA1", "BETA2"))
+    parser.add_argument("--adamw-epsilon", "--epsilon", type=float, default=1e-8)
+    parser.add_argument("--sgd-momentum", type=float, default=0.0)
+    parser.add_argument("--sgd-nesterov", action="store_true")
     parser.add_argument("--clip-grad-norm", type=float, default=0.0)
     parser.add_argument("--policy-loss-weight", type=float, default=1.0)
     parser.add_argument("--value-loss-weight", type=float, default=1.0)

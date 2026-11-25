@@ -2,6 +2,9 @@
 
 from collections import defaultdict
 
+from functools import lru_cache
+from struct import Struct
+
 import torch
 
 from .trainer_checkpoint import ResumeError
@@ -77,43 +80,149 @@ def validate_optimizer_groups(saved, optimizer, label) -> None:
         raise ResumeError(f"unknown {label} parameter in optimizer state")
 
 
-def _validate_momentum(state, parameter) -> None:
+def _validate_momentum(state, parameter, *, optimizer) -> None:
     if type(state) is not dict or set(state) != {"momentum_buffer"}:
-        raise ResumeError("invalid Muon state fields")
+        raise ResumeError(f"invalid {optimizer} state fields")
     buffer = state["momentum_buffer"]
     if (
         not isinstance(buffer, torch.Tensor) or buffer.shape != parameter.shape
         or buffer.dtype != parameter.dtype or not bool(torch.isfinite(buffer).all())
     ):
-        raise ResumeError("invalid Muon momentum buffer")
+        raise ResumeError(f"invalid {optimizer} momentum buffer")
 
 
-def validate_adamw_state(state, parameter, updates=None, *, serialized=False) -> None:
-    if type(state) is not dict or set(state) != {"step", "exp_avg", "exp_avg_sq"}:
-        raise ResumeError("unexpected AdamW state")
+def _validate_adaptive_moments(state, parameter, updates, *, optimizer, serialized):
     for name in ("exp_avg", "exp_avg_sq"):
         value = state[name]
         if (
             not isinstance(value, torch.Tensor) or value.shape != parameter.shape
             or value.dtype != parameter.dtype or not bool(torch.isfinite(value).all())
         ):
-            raise ResumeError("invalid AdamW moments")
+            raise ResumeError(f"invalid {optimizer} moments")
         if name == "exp_avg_sq" and bool((value < 0).any()):
-            raise ResumeError("AdamW second moments must be non-negative")
+            raise ResumeError(f"{optimizer} second moments must be non-negative")
         if updates == 0 and bool((value != 0).any()):
-            raise ResumeError("unupdated AdamW moments must be zero")
+            raise ResumeError(f"unupdated {optimizer} moments must be zero")
     step = state["step"]
     if (
         not isinstance(step, torch.Tensor) or step.numel() != 1
         or not bool(torch.isfinite(step).all())
         or (serialized and (step.ndim != 0 or step.dtype != torch.float32))
     ):
-        raise ResumeError("invalid AdamW step")
+        raise ResumeError(f"invalid {optimizer} step")
     value = step.item()
     if value < 0 or value != int(value):
-        raise ResumeError("invalid AdamW step")
+        raise ResumeError(f"invalid {optimizer} step")
     if updates is not None and int(value) != updates:
-        raise ResumeError("AdamW step differs from recorded parameter update count")
+        raise ResumeError(f"{optimizer} step differs from recorded parameter update count")
+
+
+def validate_adamw_state(state, parameter, updates=None, *, serialized=False) -> None:
+    if type(state) is not dict or set(state) != {"step", "exp_avg", "exp_avg_sq"}:
+        raise ResumeError("unexpected AdamW state")
+    _validate_adaptive_moments(state, parameter, updates, optimizer="AdamW", serialized=serialized)
+
+
+_FLOAT32 = Struct("=f")
+NADAM_MOMENTUM_DECAY = 0.004
+
+
+@lru_cache(maxsize=16)
+def _nadam_momentum_product(beta1, updates):
+    def round_f32(value):
+        return _FLOAT32.unpack(_FLOAT32.pack(value))[0]
+
+    product = 1.0
+    for step in range(1, updates + 1):
+        factor = beta1 * (1.0 - 0.5 * 0.96 ** (step * NADAM_MOMENTUM_DECAY))
+        next_product = round_f32(product * round_f32(factor))
+        # The factor is nondecreasing and at most 1, so a rounded fixed point persists.
+        if next_product == product:
+            break
+        product = next_product
+    return product
+
+
+def validate_nadam_state(state, parameter, updates, beta1):
+    if type(state) is not dict or set(state) != {"step", "exp_avg", "exp_avg_sq", "mu_product"}:
+        raise ResumeError("unexpected NAdam state")
+    _validate_adaptive_moments(state, parameter, updates, optimizer="NAdam", serialized=True)
+    product = state["mu_product"]
+    if (
+        state["step"].device.type != "cpu"
+        or not isinstance(product, torch.Tensor) or product.device.type != "cpu"
+        or product.layout != torch.strided or product.ndim != 0 or product.dtype != torch.float32
+        or product.item() != _nadam_momentum_product(beta1, updates)
+    ):
+        raise ResumeError("NAdam momentum product differs from recorded parameter update count")
+
+
+def load_nadam_state(optimizer, saved, updates_by_parameter):
+    validate_optimizer_groups(saved, optimizer, "NAdam")
+    products = {}
+    for saved_group, live_group in zip(saved["param_groups"], optimizer.param_groups, strict=True):
+        for index, parameter in zip(saved_group["params"], live_group["params"], strict=True):
+            if index in saved["state"]:
+                state = saved["state"][index]
+                validate_nadam_state(state, parameter, updates_by_parameter[parameter], live_group["betas"][0])
+                products[parameter] = state["mu_product"].clone()
+    optimizer.load_state_dict(saved)
+    # The generic loader moves mu_product to the parameter device, unlike eager NAdam initialization.
+    for parameter, product in products.items():
+        optimizer.state[parameter]["mu_product"] = product
+
+
+class TrainerSGD(torch.optim.SGD):
+    def __init__(self, model, *, lr, weight_decay, momentum, nesterov):
+        super().__init__(
+            model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum,
+            nesterov=nesterov, fused=False,
+        )
+        self._value_parameter = model.value_head[-1].weight
+        self._policy_parameter = model.policy_head.weight
+        self.updates = 0
+        self.policy_updates = 0
+
+    def step(self, closure=None):
+        loss = super().step(closure)
+        self.updates += self._value_parameter.grad is not None
+        self.policy_updates += self._policy_parameter.grad is not None
+        return loss
+
+    def state_dict(self):
+        return {
+            **super().state_dict(),
+            "updates": self.updates, "policy_updates": self.policy_updates,
+        }
+
+    def _validate_buffers(self, states, group_parameters, updates_by_parameter):
+        expected = {
+            key for key, parameter in group_parameters.items()
+            if self.param_groups[0]["momentum"] and updates_by_parameter[parameter]
+        }
+        if states.keys() != expected:
+            raise ResumeError("SGD momentum coverage differs from recorded update counts")
+        for key, state in states.items():
+            _validate_momentum(state, group_parameters[key], optimizer="SGD")
+
+    def validate_state(self, updates_by_parameter):
+        parameters = self.param_groups[0]["params"]
+        self._validate_buffers(self.state, {parameter: parameter for parameter in parameters}, updates_by_parameter)
+
+    def load_training_state(self, saved, updates_by_parameter):
+        if type(saved) is not dict:
+            raise ResumeError("invalid SGD optimizer state")
+        state = {key: value for key, value in saved.items() if key not in ("updates", "policy_updates")}
+        validate_optimizer_groups(state, self, "SGD")
+        for key, parameter in (("updates", self._value_parameter), ("policy_updates", self._policy_parameter)):
+            if type(saved.get(key)) is not int or saved[key] != updates_by_parameter[parameter]:
+                raise ResumeError("SGD optimizer receipts differ from recorded update counts")
+        indices = state["param_groups"][0]["params"]
+        parameters = self.param_groups[0]["params"]
+        self._validate_buffers(state["state"], dict(zip(indices, parameters, strict=True)), updates_by_parameter)
+        super().load_state_dict(state)
+        self.updates = saved["updates"]
+        self.policy_updates = saved["policy_updates"]
 
 
 class MuonAdamW:
@@ -173,7 +282,7 @@ class MuonAdamW:
         for index, state in saved["adamw"]["state"].items():
             validate_adamw_state(state, self.adamw_parameters[index], serialized=True)
         for index, state in saved["muon"]["state"].items():
-            _validate_momentum(state, self._muon_parameters[index])
+            _validate_momentum(state, self._muon_parameters[index], optimizer="Muon")
         self._adamw.load_state_dict(saved["adamw"])
         self._muon.load_state_dict(saved["muon"])
 
@@ -182,4 +291,4 @@ class MuonAdamW:
         if set(self._muon.state) != expected:
             raise ResumeError("Muon momentum coverage differs from training progress")
         for parameter, state in self._muon.state.items():
-            _validate_momentum(state, parameter)
+            _validate_momentum(state, parameter, optimizer="Muon")
