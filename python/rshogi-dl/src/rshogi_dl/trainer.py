@@ -30,6 +30,7 @@ from ._policy_grad import clear_unused_policy_head_gradients, has_policy_targets
 from ._residual_norm import compiled_residual_forward
 from ._step_graph import StepGraph
 from ._tuned_blocks import tuned_training_forward
+from ._weight_average import WeightAverage
 from .sharded import DatasetError, dataset_info, iter_batches
 from .trainer_checkpoint import (
     CONTRACT, ResumeError, atomic_save, capture_rng, export_checkpoint, load_resume, restore_rng,
@@ -44,6 +45,10 @@ _OPTIONAL_SETTINGS = {
     "adamw_betas": (0.9, 0.999),
     "adamw_epsilon": 1e-8,
     "clip_grad_norm": 0.0,
+    "weight_average": None,
+    "weight_average_start_step": 1,
+    "weight_average_every": 1,
+    "ema_decay": 0.999,
 }
 _OPTIMIZERS = ("adamw", "muon", "batched-muon")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
@@ -108,6 +113,10 @@ class TrainerConfig:
     warmup_steps: int = 0
     cosine_end_step: int = 0
     cosine_min_ratio: float = 0.1
+    weight_average: str | None = None
+    weight_average_start_step: int = 1
+    weight_average_every: int = 1
+    ema_decay: float = 0.999
 
     def __post_init__(self) -> None:
         limits = {
@@ -115,6 +124,7 @@ class TrainerConfig:
             "threads": (1, 256), "validation_batches": (0, 1_000_000),
             "warmup_steps": (0, 9_999_999), "cosine_end_step": (0, 10_000_000),
             "checkpoint_every": (0, 10_000_000), "log_every": (1, 1_000_000),
+            "weight_average_start_step": (1, 10_000_000), "weight_average_every": (1, 10_000_000),
         }
         for name, (low, high) in limits.items():
             value = getattr(self, name)
@@ -154,6 +164,14 @@ class TrainerConfig:
         ):
             raise ValueError("adamw_betas must contain two values in [0,1)")
         object.__setattr__(self, "adamw_betas", tuple(float(beta) for beta in self.adamw_betas))
+        if self.weight_average not in (None, "swa", "ema"):
+            raise ValueError("weight_average must be swa or ema")
+        if type(self.ema_decay) not in (int, float) or not 0 <= self.ema_decay < 1:
+            raise ValueError("ema_decay must be in [0,1)")
+        if self.weight_average != "ema" and self.ema_decay != _OPTIONAL_SETTINGS["ema_decay"]:
+            raise ValueError("ema_decay requires EMA")
+        if self.weight_average is None and (self.weight_average_start_step, self.weight_average_every) != (1, 1):
+            raise ValueError("weight averaging cadence requires SWA or EMA")
         if type(self.learning_rate_steps) not in (tuple, list):
             raise ValueError("learning_rate_steps must be a sequence")
         previous_step, previous_rate = 0, self.learning_rate
@@ -514,17 +532,20 @@ def _parse_learning_rate_step(argument: str) -> tuple[int, float]:
         raise argparse.ArgumentTypeError("expected STEP:RATE") from error
 
 
-def _checkpoint(path, model, optimizer, scaler, config, datasets, progress) -> None:
+def _checkpoint(path, model, optimizer, scaler, config, datasets, progress, average) -> None:
     scaler_state = scaler.state_dict()
     validate_scaler_state(scaler_state, enabled=config.precision == "fp16")
-    atomic_save(path, {
+    payload = {
         **CONTRACT,
         "model_config": model.config.to_dict(), "trainer_config": _config_dict(config),
         "datasets": datasets, "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(), "scaler_state": scaler_state,
         "scheduler_state": None, "progress": dict(progress),
         "rng": capture_rng(cuda=config.device == "cuda"), "runtime": _runtime(),
-    })
+    }
+    if average is not None:
+        payload["averaging_state"] = average.state_dict()
+    atomic_save(path, payload)
 
 
 def evaluate(model, data_path, config: TrainerConfig, device: torch.device) -> dict:
@@ -648,6 +669,12 @@ def run_training(
             raise TrainingError("fuse_muon_symmetric_polynomial requires NVIDIA CUDA compute capability 8.0 or later")
         uses_step_graph = config.execution in _STEP_GRAPH_EXECUTIONS
         model = SquareTransformer(model_config, attention_backend=config.attention_backend).to(device)
+        average = None
+        if config.weight_average is not None:
+            average = WeightAverage(
+                model, start_step=config.weight_average_start_step, every=config.weight_average_every,
+                decay=config.ema_decay if config.weight_average == "ema" else None,
+            )
         if config.optimizer == "adamw":
             optimizer = torch.optim.AdamW(
                 model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
@@ -670,6 +697,10 @@ def run_training(
         if payload:
             try:
                 model.load_state_dict(payload["model_state"], strict=True)
+                if ("averaging_state" in payload) != (average is not None):
+                    raise ResumeError("weight average state differs from trainer configuration")
+                if average is not None:
+                    average.load_state_dict(payload["averaging_state"], progress["step"])
                 saved_optimizer = payload["optimizer_state"]
                 if config.learning_rate_steps or config.warmup_steps or config.cosine_end_step:
                     _set_learning_rate(optimizer, config, initial_rate)
@@ -859,6 +890,8 @@ def run_training(
                     update(batch, has_policy)
                 rolling_steps += 1
                 progress["step"] += 1
+                if average is not None:
+                    average.sample(progress["step"])
                 progress["sample_cursor"] += samples
                 progress["samples_seen"] += samples
                 if progress["sample_cursor"] == count:
@@ -888,7 +921,7 @@ def run_training(
                     _check_optimizer(optimizer, model, progress)
                     _checkpoint(
                         output / f"resume-{progress['step']:010d}.pt",
-                        model, optimizer, scaler, config, datasets, progress,
+                        model, optimizer, scaler, config, datasets, progress, average,
                     )
         _sync(device)
         training_seconds = time.perf_counter() - started
@@ -904,7 +937,7 @@ def run_training(
         ):
             raise TrainingError("final loss or model parameters are non-finite")
         _check_optimizer(optimizer, model, progress)
-        _checkpoint(output / "resume-final.pt", model, optimizer, scaler, config, datasets, progress)
+        _checkpoint(output / "resume-final.pt", model, optimizer, scaler, config, datasets, progress, average)
         export_checkpoint(output / "checkpoint.pt", model, optimizer, step=progress["step"], seed=config.seed)
         validation = evaluate(model, datasets["validation"]["path"], config, device)
         segment_samples = progress["samples_seen"] - initial_samples
@@ -925,6 +958,14 @@ def run_training(
         }
         if uses_step_graph:
             report["cuda_graph_replayed_steps"] = graph_replays
+        if average is not None:
+            report["weight_average_samples"] = average.samples
+            if average.samples:
+                model.load_state_dict(average.weights)
+                export_checkpoint(output / "checkpoint-averaged.pt", model, None, step=average.last_step,
+                                  seed=config.seed)
+                report["averaged_checkpoint"] = "checkpoint-averaged.pt"
+                report["averaged_validation"] = evaluate(model, datasets["validation"]["path"], config, device)
         _write_json(output / "report.json", report)
         return report
 
@@ -953,6 +994,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clip-grad-norm", type=float, default=0.0)
     parser.add_argument("--policy-loss-weight", type=float, default=1.0)
     parser.add_argument("--value-loss-weight", type=float, default=1.0)
+    parser.add_argument("--weight-average", choices=("swa", "ema"))
+    parser.add_argument("--weight-average-start-step", type=int, default=1)
+    parser.add_argument("--weight-average-every", type=int, default=1)
+    parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
