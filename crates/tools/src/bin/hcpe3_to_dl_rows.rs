@@ -21,7 +21,21 @@ struct Args {
     /// HCPE3 ファイル。入力順を維持し、- は標準入力を表す。
     #[arg(required = true, value_name = "HCPE3")]
     inputs: Vec<PathBuf>,
+    /// 非合法な実着手・候補手、または重複候補を含む対局を除外する。
+    #[arg(long)]
+    skip_invalid_games: bool,
 }
+
+#[derive(Debug)]
+struct InvalidGame(String);
+
+impl std::fmt::Display for InvalidGame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidGame {}
 
 struct Ply {
     selected: u16,
@@ -85,7 +99,7 @@ fn write_game(output: &mut impl Write, game: &Game) -> Result<u64> {
             .iter()
             .copied()
             .find(|&candidate| move_to_hcpe_move16(candidate) == ply.selected)
-            .with_context(|| format!("{} 手目の実着手が非合法です", number + 1))?;
+            .ok_or_else(|| InvalidGame(format!("{} 手目の実着手が非合法です", number + 1)))?;
         if !ply.visits.is_empty() {
             let side = position.side_to_move();
             labels.clear();
@@ -100,11 +114,12 @@ fn write_game(output: &mut impl Write, game: &Game) -> Result<u64> {
                 let label = labels
                     .iter()
                     .find_map(|&(code, label)| (code == requested).then_some(label))
-                    .with_context(|| format!("{} 手目の候補手が非合法です", number + 1))?;
+                    .ok_or_else(|| {
+                        InvalidGame(format!("{} 手目の候補手が非合法です", number + 1))
+                    })?;
                 ensure!(
                     !candidates.iter().any(|&(previous, _)| previous == label),
-                    "{} 手目の候補手が重複しています",
-                    number + 1
+                    InvalidGame(format!("{} 手目の候補手が重複しています", number + 1))
                 );
                 candidates.push((label, visits));
             }
@@ -143,6 +158,51 @@ fn convert(mut input: impl Read, output: &mut impl Write, name: &str) -> Result<
     }
 }
 
+fn convert_skipping(
+    mut input: impl Read,
+    output: &mut impl Write,
+    name: &str,
+) -> Result<(u64, u64)> {
+    let mut frame = Vec::new();
+    let mut number = 1u64;
+    let mut rejected = 0u64;
+    let mut rows = 0u64;
+    loop {
+        let context = || format!("{name} の対局 {number}");
+        let Some(game) = read_game(&mut input).with_context(context)? else {
+            break;
+        };
+        frame.clear();
+        match write_game(&mut frame, &game) {
+            Ok(count) => {
+                output.write_all(&frame)?;
+                rows += count;
+            }
+            Err(error) if error.is::<InvalidGame>() => {
+                eprintln!("{}: {error}", context());
+                rejected += 1;
+            }
+            Err(error) => return Err(error).with_context(context),
+        }
+        number += 1;
+    }
+    eprintln!("rejected_games={rejected}");
+    Ok((number - 1 - rejected, rows))
+}
+
+fn convert_input(
+    input: impl Read,
+    output: &mut impl Write,
+    name: &str,
+    skip: bool,
+) -> Result<(u64, u64)> {
+    if skip {
+        convert_skipping(input, output, name)
+    } else {
+        convert(input, output, name)
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     ensure!(
@@ -154,10 +214,10 @@ fn main() -> Result<()> {
     for input in &args.inputs {
         let name = input.to_string_lossy();
         let (games, rows) = if input.as_os_str() == "-" {
-            convert(io::stdin().lock(), &mut output, &name)?
+            convert_input(io::stdin().lock(), &mut output, &name, args.skip_invalid_games)?
         } else {
             let file = File::open(input).with_context(|| format!("{name} を開けません"))?;
-            convert(BufReader::new(file), &mut output, &name)?
+            convert_input(BufReader::new(file), &mut output, &name, args.skip_invalid_games)?
         };
         eprintln!("{name} {games} games, {rows} policy rows");
     }
@@ -241,5 +301,21 @@ mod tests {
             let error = convert(Cursor::new(input), &mut Vec::new(), "input").unwrap_err();
             assert!(error.to_string().contains("対局 1"), "{error:#}");
         }
+    }
+
+    #[test]
+    fn skips_entire_invalid_game_and_still_rejects_truncated_input() {
+        let good = game(&[("7g7f", &[("7g7f", 4)])]);
+        let bad = game(&[("7g7f", &[("7g7f", 4)]), ("7g7e", &[])]);
+        let mut expected = Vec::new();
+        convert(Cursor::new(&good), &mut expected, "input").unwrap();
+        let mut actual = Vec::new();
+        let combined = [bad, good.clone()].concat();
+        assert_eq!(convert_skipping(Cursor::new(combined), &mut actual, "input").unwrap(), (1, 1));
+        assert_eq!(actual, expected);
+        assert!(
+            convert_skipping(Cursor::new(&good[..good.len() - 1]), &mut Vec::new(), "input")
+                .is_err()
+        );
     }
 }
