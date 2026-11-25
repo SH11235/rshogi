@@ -105,11 +105,15 @@ class TrainerConfig:
     adamw_betas: tuple[float, float] = (0.9, 0.999)
     adamw_epsilon: float = 1e-8
     clip_grad_norm: float = 0.0
+    warmup_steps: int = 0
+    cosine_end_step: int = 0
+    cosine_min_ratio: float = 0.1
 
     def __post_init__(self) -> None:
         limits = {
             "max_steps": (1, 10_000_000), "batch_size": (1, 4096), "seed": (0, 2**63 - 1),
             "threads": (1, 256), "validation_batches": (0, 1_000_000),
+            "warmup_steps": (0, 9_999_999), "cosine_end_step": (0, 10_000_000),
             "checkpoint_every": (0, 10_000_000), "log_every": (1, 1_000_000),
         }
         for name, (low, high) in limits.items():
@@ -165,6 +169,32 @@ class TrainerConfig:
             steps.append((step, float(rate)))
             previous_step, previous_rate = step, rate
         object.__setattr__(self, "learning_rate_steps", tuple(steps))
+        if self.cosine_end_step and self.cosine_end_step <= self.warmup_steps:
+            raise ValueError("cosine_end_step must follow warmup")
+        if (
+            type(self.cosine_min_ratio) not in (int, float)
+            or not 0 < self.cosine_min_ratio < 1
+            or (not self.cosine_end_step and self.cosine_min_ratio != 0.1)
+        ):
+            raise ValueError("cosine_min_ratio must be in (0, 1) and requires cosine decay when customized")
+        if (
+            (self.warmup_steps or self.cosine_end_step)
+            and self.execution in _STEP_GRAPH_EXECUTIONS and self.optimizer != "adamw"
+        ):
+            raise ValueError("continuous learning rate under CUDA Graph requires AdamW")
+        if self.learning_rate_steps and self.cosine_end_step:
+            raise ValueError("cosine decay and explicit learning rate steps are mutually exclusive")
+        if self.learning_rate_steps and self.learning_rate_steps[0][0] < self.warmup_steps:
+            raise ValueError("learning rate decay steps must follow warmup")
+        if (self.warmup_steps or self.cosine_end_step) and self.execution in _STEP_GRAPH_EXECUTIONS:
+            minimum = min(
+                self.learning_rate / max(1, self.warmup_steps),
+                self.learning_rate * self.cosine_min_ratio if self.cosine_end_step else self.learning_rate,
+                self.learning_rate_steps[-1][1] if self.learning_rate_steps else self.learning_rate,
+            )
+            bounds = torch.finfo(torch.float32)
+            if not bounds.tiny <= minimum <= self.learning_rate <= bounds.max:
+                raise ValueError("continuous CUDA Graph learning rates must be normal FP32 values")
         if self.optimizer == "adamw":
             if self.muon_learning_rate is not None:
                 raise ValueError("muon_learning_rate requires a Muon optimizer")
@@ -229,6 +259,10 @@ def _config_dict(config: TrainerConfig) -> dict:
     for name, default in _OPTIONAL_SETTINGS.items():
         if payload[name] == default:
             del payload[name]
+    if not config.warmup_steps:
+        del payload["warmup_steps"]
+    if not config.cosine_end_step:
+        del payload["cosine_end_step"], payload["cosine_min_ratio"]
     if not config.learning_rate_steps:
         del payload["learning_rate_steps"]
     if config.optimizer == "adamw":
@@ -360,7 +394,7 @@ def _validate_resume(payload, config, model_config, datasets) -> dict:
         expected = {field.name for field in fields(TrainerConfig)}
         optimizer_fields = {"optimizer", "muon_learning_rate"}
         required = expected - optimizer_fields - _OPTIONAL_SETTINGS.keys() - {
-            "learning_rate_steps",
+            "learning_rate_steps", "warmup_steps", "cosine_end_step", "cosine_min_ratio",
             "compile_ffn", "compile_attention", "fuse_norm_cast", "prefetch_input", "fuse_ffn_residual_norm",
             "fuse_packed_attention", "fuse_packed_attention_backward",
             "fuse_ffn_residual_norm_backward", "tile_packed_attention_backward",
@@ -450,6 +484,14 @@ def _check_optimizer(optimizer, model, progress) -> None:
 
 
 def _learning_rate_for_checkpoint(config: TrainerConfig, completed_steps: int) -> float:
+    if completed_steps <= 0:
+        return config.learning_rate
+    if config.warmup_steps and completed_steps <= config.warmup_steps:
+        return config.learning_rate * (completed_steps / config.warmup_steps)
+    if config.cosine_end_step:
+        fraction = min(1.0, (completed_steps - config.warmup_steps) / (config.cosine_end_step - config.warmup_steps))
+        blend = 0.5 * (1.0 + math.cos(math.pi * fraction))
+        return config.learning_rate * (config.cosine_min_ratio + (1.0 - config.cosine_min_ratio) * blend)
     for step, rate in reversed(config.learning_rate_steps):
         if step < completed_steps:
             return rate
@@ -629,7 +671,7 @@ def run_training(
             try:
                 model.load_state_dict(payload["model_state"], strict=True)
                 saved_optimizer = payload["optimizer_state"]
-                if config.learning_rate_steps:
+                if config.learning_rate_steps or config.warmup_steps or config.cosine_end_step:
                     _set_learning_rate(optimizer, config, initial_rate)
                 if config.optimizer == "adamw":
                     validate_optimizer_groups(saved_optimizer, optimizer, "AdamW")
@@ -639,6 +681,17 @@ def run_training(
                 restore_rng(payload["rng"], cuda=device.type == "cuda")
             except (TypeError, ValueError, RuntimeError, KeyError) as error:
                 raise ResumeError(f"invalid training state: {error}") from error
+        continuous_rate = bool(config.warmup_steps or config.cosine_end_step)
+        rate_tensor = None
+        if continuous_rate and uses_step_graph:
+            rate_tensor = torch.tensor(initial_rate, dtype=torch.float32, device=device)
+            optimizer.param_groups[0]["lr"] = rate_tensor
+
+            def serialize_rate(_optimizer, state):
+                state["param_groups"][0]["lr"] = _learning_rate_for_checkpoint(config, progress["step"])
+                return state
+
+            optimizer.register_state_dict_post_hook(serialize_rate)
         if any(not bool(torch.isfinite(parameter).all()) for parameter in model.parameters()):
             raise TrainingError("model parameters are non-finite")
         if config.execution == "compile":
@@ -746,7 +799,7 @@ def run_training(
                     "loss": values[0], "policy_loss": values[1], "value_loss": values[2],
                     "seconds": time.perf_counter() - started,
                 }
-                if config.learning_rate_steps:
+                if config.learning_rate_steps or continuous_rate:
                     event["learning_rate"] = active_rate
                 metrics.write(json.dumps(event, sort_keys=True, allow_nan=False) + "\n")
                 metrics.flush()
@@ -776,11 +829,22 @@ def run_training(
                         write_metrics()
                     break
                 samples = batch.tokens.shape[0]
-                if next_rate is not None and progress["step"] == next_rate[0]:
+                if config.cosine_end_step or progress["step"] < config.warmup_steps:
+                    rate = _learning_rate_for_checkpoint(config, progress["step"] + 1)
+                    if rate != active_rate:
+                        active_rate = rate
+                        if rate_tensor is None:
+                            _set_learning_rate(optimizer, config, rate)
+                        else:
+                            rate_tensor.fill_(rate)
+                elif next_rate is not None and progress["step"] == next_rate[0]:
                     active_rate = next_rate[1]
-                    _set_learning_rate(optimizer, config, active_rate)
                     next_rate = next(pending_rates, None)
-                    if graph is not None:
+                    if rate_tensor is not None:
+                        rate_tensor.fill_(active_rate)
+                    else:
+                        _set_learning_rate(optimizer, config, active_rate)
+                    if graph is not None and rate_tensor is None:
                         # AdamW と Muon の scalar 学習率は capture 時の値が埋め込まれる。
                         _sync(device)
                         optimizer.zero_grad(set_to_none=True)
@@ -875,6 +939,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", choices=sorted(NAMED_CONFIGS), default="initial")
     parser.add_argument("--model-config", help="layers/width/heads/ffn_width と任意の packed_qkv を含む JSON object")
     parser.add_argument("--max-steps", type=int, required=True)
+    parser.add_argument("--warmup-steps", type=int, default=0)
+    parser.add_argument("--cosine-end-step", type=int, default=0)
+    parser.add_argument("--cosine-min-ratio", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--learning-rate-step", dest="learning_rate_steps", action="append",

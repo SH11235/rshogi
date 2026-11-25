@@ -142,6 +142,34 @@ class TrainerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "value_loss_weight"):
             replace(config, value_loss_weight=0.0)
 
+    def test_warmup_and_cosine_writes_expected_rates_and_resumes(self) -> None:
+        config = replace(
+            self.config, max_steps=8, warmup_steps=2, cosine_end_step=6, cosine_min_ratio=0.25, log_every=1,
+        )
+        self.run_training("cosine-full", config)
+        rows = [json.loads(line) for line in (self.root / "cosine-full" / "metrics.jsonl").read_text().splitlines()]
+        for step, fraction in ((1, 0.5), (2, 1.0), (4, 0.625), (6, 0.25), (8, 0.25)):
+            self.assertAlmostEqual(rows[step - 1]["learning_rate"], config.learning_rate * fraction)
+        expected = load_resume(self.root / "cosine-full" / "resume-final.pt")
+        for step in (1, 4):
+            self.run_training(f"cosine-part-{step}", replace(config, max_steps=step))
+            self.run_training(
+                f"cosine-resume-{step}", config, resume=self.root / f"cosine-part-{step}" / "resume-final.pt",
+            )
+            actual = load_resume(self.root / f"cosine-resume-{step}" / "resume-final.pt")
+            self.assert_nested_equal(actual["model_state"], expected["model_state"])
+            self.assert_nested_equal(actual["optimizer_state"], expected["optimizer_state"])
+        with self.assertRaisesRegex(ValueError, "must follow warmup"):
+            replace(config, cosine_end_step=2)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            replace(config, learning_rate_steps=((3, config.learning_rate / 2),))
+
+    def test_warmup_can_precede_step_decay(self) -> None:
+        config = replace(self.config, max_steps=4, warmup_steps=2, learning_rate_steps=((2, 0.00025),), log_every=1)
+        self.run_training("warmup-then-step", config)
+        rows = [json.loads(line) for line in (self.root / "warmup-then-step" / "metrics.jsonl").read_text().splitlines()]
+        self.assertEqual([row["learning_rate"] for row in rows], [0.0005, 0.001, 0.00025, 0.00025])
+
     def test_direct_hcpe3_trains_one_pass_and_resumes_at_accepted_row(self) -> None:
         train_info = deepcopy(dataset_info(self.train))
         train_info["manifest"]["source_records"] = None
@@ -675,6 +703,28 @@ class TrainerTest(unittest.TestCase):
                     actual = load_resume(self.root / run / "resume-final.pt")
                     self.assert_nested_equal(actual["model_state"], expected["model_state"])
                     self.assert_nested_equal(actual["optimizer_state"], expected["optimizer_state"])
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_continuous_rates_and_resume(self) -> None:
+        records = synthetic_records(seed=28, count=16)
+        for record in records:
+            record["policy"] = [[record["legal_labels"][0], 1]]
+        self.train = self.make_dataset("cosine-policy", records)
+        config = replace(
+            self.config, max_steps=16, batch_size=2, checkpoint_every=8, warmup_steps=4, cosine_end_step=15,
+            device="cuda", precision="bf16", fused_optimizer=True, execution="cuda-graph",
+            attention_backend="sdpa", prefetch_input=True,
+        )
+        report = self.run_training("cosine-graph", config)
+        self.assertEqual(report["cuda_graph_replayed_steps"], 12)
+        self.run_training("cosine-resumed", config, resume=self.root / "cosine-graph" / "resume-0000000008.pt")
+        with mock.patch("rshogi_dl._step_graph._WARMUP_STEPS", config.max_steps):
+            self.run_training("cosine-padded-eager", config)
+        expected = load_resume(self.root / "cosine-padded-eager" / "resume-final.pt")
+        for name in ("cosine-graph", "cosine-resumed"):
+            actual = load_resume(self.root / name / "resume-final.pt")
+            self.assert_nested_equal(actual["model_state"], expected["model_state"])
+            self.assert_nested_equal(actual["optimizer_state"], expected["optimizer_state"])
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_resume_after_eager_fallback(self) -> None:

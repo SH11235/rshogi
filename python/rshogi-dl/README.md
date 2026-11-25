@@ -333,6 +333,9 @@ python -m rshogi_dl.trainer \
 | `--adamw-betas BETA1 BETA2` / `--adamw-epsilon EPS` | AdamW の moment 係数と分母の安定化定数。Muon 併用時も AdamW 側に適用 |
 | `--clip-grad-norm N` | 逆伝播後に全パラメータの勾配を L2 ノルム N でクリップ。0 で無効 |
 | `--policy-loss-weight W` / `--value-loss-weight W` | 学習損失の方策・価値の係数。両方の既定は1。価値の係数は正とし、方策の係数を0にすると方策ヘッドは更新しない。評価は重み付け前の値を記録 |
+| `--warmup-steps` | 最初の指定回数で学習率を線形に上げる |
+| `--cosine-end-step` | warmup 後から指定回まで cosine 減衰する。段階減衰との同時指定は不可 |
+| `--cosine-min-ratio` | cosine 減衰後に維持する学習率の倍率。既定は 0.1 |
 | `--muon-learning-rate` | `muon` / `batched-muon` の学習率。両方式で必須 |
 | `--fuse-muon-symmetric-polynomial` | `batched-muon` のNewton–Schulz反復で、対称な二次項のタイルを再利用する。短辺256・長辺が32の倍数の行列が対象。NVIDIA CUDA compute capability 8.0以上とTritonが必要。丸め順が変わる場合がある。既定は無効 |
 | `--threads` | CPU thread数、既定1 |
@@ -340,6 +343,8 @@ python -m rshogi_dl.trainer \
 | `--checkpoint-every` | 中間checkpointの試行間隔。既定0は最終状態のみ。中間は最大8個 |
 | `--log-every` | `metrics.jsonl`への記録間隔。既定100 |
 | `--deterministic` | 決定的アルゴリズムを要求。CUDAでは起動前に`CUBLAS_WORKSPACE_CONFIG=:4096:8`等を設定 |
+
+warmup と cosine の回数は、再開前のバッチも含めて数える。warmup なしの場合、最初のバッチから減衰を適用する。CUDA Graph で学習率を連続変更する場合は AdamW を使う。
 
 順序は dataset の行順で、暗黙の shuffle はしません。epoch 末尾から先頭に戻り、設定した optimizer と一定の learning rate で更新します。`metrics.jsonl` には loss、実 optimizer 更新数、policy head の更新数、AMP skip 数、epoch と sample cursor を記録します。policy のない batch では policy head の更新数は増えません。毎 step の全 parameter コピーや CPU への loss 同期は行いません。出力先は最初から `$SHOGI_DATA/runs/rshogi-dl/` 配下の新規 directory で、既存 run や checkpoint を上書き・削除しません。
 
