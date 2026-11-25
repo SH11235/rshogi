@@ -62,8 +62,8 @@ use rshogi_csa_server::types::{
 use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor};
 
 use crate::attachment::{
-    MAX_SPECTATOR_QUEUE_BYTES, MAX_SPECTATOR_QUEUE_ITEMS, MAX_WS_LINE_BYTES, Role, WsAttachment,
-    parse_login_handle,
+    MAX_SPECTATOR_QUEUE_BYTES, MAX_SPECTATOR_QUEUE_ITEMS, MAX_WS_LINE_BYTES, Role,
+    SpectatorQueueDrain, SpectatorQueueResult, WsAttachment, parse_login_handle,
 };
 use crate::config::{
     ConfigKeys, DEFAULT_ENTERING_KING_RULE, parse_agree_timeout_duration, parse_clock_presets,
@@ -1489,13 +1489,13 @@ impl GameRoom {
             // 対局未開始 (LOGIN 前) の DO に観戦者が入ったケース。snapshot は
             // 出さずそのまま終了する (Game_Summary に必要な game_id すら無いため)。
             // 未開始の空 snapshot も完了として通常配信へ移す。
-            self.set_spectator_snapshot_state(ws, false, 0, Vec::new())?;
+            self.update_spectator_snapshot(ws, |att| att.initialize_spectator_snapshot(false))?;
             return Ok(());
         };
 
         // attachment の snapshot 状態を「送信中」に更新する。queue / last_ply は
         // ここで初期化し、過去 invocation の残骸が混ざらないようにする。
-        self.set_spectator_snapshot_state(ws, true, 0, Vec::new())?;
+        self.update_spectator_snapshot(ws, |att| att.initialize_spectator_snapshot(true))?;
 
         // ここから先の失敗は flag=true を残さない。中断したら reset + close する。
         if let Err(e) = self.send_spectator_snapshot_body(ws, cfg, finished).await {
@@ -1568,7 +1568,9 @@ impl GameRoom {
         // snapshot 完了。attachment の last_ply を更新し、queue を flush する。
         // queue 内の手は `ply > last_ply_in_snapshot` のみ送る (= snapshot に
         // 含まれた手と重複しない broadcast のみ)。flush は flag を false へ戻す。
-        self.set_spectator_snapshot_last_ply(ws, last_ply_in_snapshot)?;
+        self.update_spectator_snapshot(ws, |att| {
+            att.set_spectator_snapshot_last_ply(last_ply_in_snapshot)
+        })?;
         self.flush_spectator_snapshot_queue(ws).await?;
         if let Some(finished) = finished {
             let entries = [crate::attachment::FinalizingBroadcast {
@@ -1652,94 +1654,33 @@ impl GameRoom {
             let Some(mut att) = ws.deserialize_attachment::<WsAttachment>()? else {
                 return Ok(());
             };
-            let WsAttachment::Spectator {
-                last_ply_in_snapshot,
-                pending_queue,
-                snapshot_in_progress,
-                ..
-            } = &mut att
-            else {
+            let Some(next) = att.drain_spectator_line() else {
                 return Ok(());
             };
-            if pending_queue.is_empty() {
-                *snapshot_in_progress = false;
-                ws.serialize_attachment(&att)?;
-                return Ok(());
-            }
-            let (line, ply) = pending_queue.remove(0);
-            let included = ply.is_some_and(|ply| ply <= *last_ply_in_snapshot);
             ws.serialize_attachment(&att)?;
-            if !included {
-                // 欠落した snapshot を正常完了扱いにしない。
-                send_line(ws, &line)?;
+            match next {
+                SpectatorQueueDrain::Complete => return Ok(()),
+                SpectatorQueueDrain::Duplicate => {}
+                SpectatorQueueDrain::Send(line) => send_line(ws, &line)?,
             }
         }
     }
 
-    /// `WsAttachment::Spectator` の snapshot 関連 3 フィールドを一括更新する。
-    ///
-    /// `room_id` は既存値を保持する (上書きしない)。Spectator でない場合は no-op。
-    fn set_spectator_snapshot_state(
+    fn update_spectator_snapshot(
         &self,
         ws: &WebSocket,
-        snapshot_in_progress: bool,
-        last_ply_in_snapshot: u32,
-        pending_queue: Vec<(String, Option<u32>)>,
+        update: impl FnOnce(&mut WsAttachment) -> bool,
     ) -> Result<()> {
-        let att = ws
+        let Some(mut att) = ws
             .deserialize_attachment::<WsAttachment>()
-            .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?;
-        let Some(WsAttachment::Spectator {
-            room_id,
-            terminal_sent,
-            terminal_in_flight,
-            terminal_aborted,
-            ..
-        }) = att
+            .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?
         else {
             return Ok(());
         };
-        let updated = WsAttachment::Spectator {
-            room_id,
-            snapshot_in_progress,
-            last_ply_in_snapshot,
-            pending_queue,
-            terminal_sent,
-            terminal_in_flight,
-            terminal_aborted,
-        };
-        ws.serialize_attachment(&updated)
-            .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))
-    }
-
-    /// snapshot 構築完了時に `last_ply_in_snapshot` のみ更新する補助関数。
-    /// `snapshot_in_progress` / `pending_queue` は queue が積まれていれば残す。
-    fn set_spectator_snapshot_last_ply(&self, ws: &WebSocket, last_ply: u32) -> Result<()> {
-        let att = ws
-            .deserialize_attachment::<WsAttachment>()
-            .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?;
-        let Some(WsAttachment::Spectator {
-            room_id,
-            snapshot_in_progress,
-            pending_queue,
-            terminal_sent,
-            terminal_in_flight,
-            terminal_aborted,
-            ..
-        }) = att
-        else {
+        if !update(&mut att) {
             return Ok(());
-        };
-        let updated = WsAttachment::Spectator {
-            room_id,
-            snapshot_in_progress,
-            last_ply_in_snapshot: last_ply,
-            pending_queue,
-            terminal_sent,
-            terminal_in_flight,
-            terminal_aborted,
-        };
-        ws.serialize_attachment(&updated)
+        }
+        ws.serialize_attachment(&att)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))
     }
 
@@ -3057,70 +2998,45 @@ impl GameRoom {
     /// flush 経路で `ply > last_ply_in_snapshot` のみ送出される)。
     async fn send_to_spectators(&self, line: &str, ply: Option<u32>) -> Result<()> {
         for ws in self.state.get_websockets() {
-            let att: Option<WsAttachment> =
-                ws.deserialize_attachment::<WsAttachment>().ok().flatten();
-            let Some(WsAttachment::Spectator {
-                room_id,
-                snapshot_in_progress,
-                last_ply_in_snapshot,
-                mut pending_queue,
-                terminal_sent,
-                terminal_in_flight,
-                terminal_aborted,
-            }) = att
-            else {
+            let att = ws.deserialize_attachment::<WsAttachment>().ok().flatten();
+            let Some(mut att @ WsAttachment::Spectator { .. }) = att else {
                 continue;
             };
-            if snapshot_in_progress {
-                // https://github.com/SH11235/rshogi/issues/627: queue を push する前に上限を判定する。
-                // - 行数 > `MAX_SPECTATOR_QUEUE_ITEMS`
-                // - bytes (各 line の `len()` 総和 + 新規 line 分) > `MAX_SPECTATOR_QUEUE_BYTES`
-                // のいずれか満たす場合は、attachment を上書きせずに観戦者を切断する。
-                // serialize_attachment をスキップすることで、close 後の hibernation
-                // 復帰時にも肥大化した queue が残らないことを保証する。
-                let next_items = pending_queue.len().saturating_add(1);
-                let current_bytes: usize = pending_queue.iter().map(|(s, _)| s.len()).sum();
-                let next_bytes = current_bytes.saturating_add(line.len());
-                if next_items > MAX_SPECTATOR_QUEUE_ITEMS || next_bytes > MAX_SPECTATOR_QUEUE_BYTES
-                {
+            match att.enqueue_spectator_line(line, ply) {
+                SpectatorQueueResult::Overflow {
+                    room_id,
+                    items,
+                    bytes,
+                } => {
                     crate::structured_log!(
                         event: "spectator_queue_overflow",
                         component: "game_room",
                         room_id: room_id,
-                        items: next_items,
-                        bytes: next_bytes,
+                        items: items,
+                        bytes: bytes,
                         limit_items: MAX_SPECTATOR_QUEUE_ITEMS,
                         limit_bytes: MAX_SPECTATOR_QUEUE_BYTES,
                     );
                     let _ = ws.close(Some(1009), Some("spectator queue overflow".to_owned()));
-                    continue;
                 }
-                // snapshot 送信中は queue に積むだけ。flush 経路で重複手は弾く。
-                pending_queue.push((line.to_owned(), ply));
-                let updated = WsAttachment::Spectator {
-                    room_id,
-                    snapshot_in_progress,
-                    last_ply_in_snapshot,
-                    pending_queue,
-                    terminal_sent,
-                    terminal_in_flight,
-                    terminal_aborted,
-                };
-                if let Err(e) = ws.serialize_attachment(&updated) {
-                    crate::structured_log!(
-                        event: "spectator_queue_serialize_failed",
-                        component: "game_room",
-                        err: format!("{e:?}"),
-                    );
+                SpectatorQueueResult::Queued => {
+                    if let Err(e) = ws.serialize_attachment(&att) {
+                        crate::structured_log!(
+                            event: "spectator_queue_serialize_failed",
+                            component: "game_room",
+                            err: format!("{e:?}"),
+                        );
+                    }
                 }
-                continue;
-            }
-            if let Err(e) = send_line(&ws, line) {
-                crate::structured_log!(
-                    event: "spectator_send_failed",
-                    component: "game_room",
-                    err: format!("{e:?}"),
-                );
+                SpectatorQueueResult::Inactive => {
+                    if let Err(e) = send_line(&ws, line) {
+                        crate::structured_log!(
+                            event: "spectator_send_failed",
+                            component: "game_room",
+                            err: format!("{e:?}"),
+                        );
+                    }
+                }
             }
         }
         Ok(())
