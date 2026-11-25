@@ -560,20 +560,14 @@ impl NNUENetwork {
     /// 読み込まれた net から対象テンソルの実行時形状を返す。
     #[cfg(any(
         feature = "nnue-runtime-dimensions",
-        all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        )
+        all(feature = "layerstack-arch", not(ls_dense_concat))
     ))]
     pub fn net_tensor_shape(&self, kind: NetTensorKind) -> Result<NetTensorShape, NetDeltaError> {
         #[cfg(feature = "nnue-runtime-dimensions")]
         if let Self::DynamicLayerStacks(net) = self {
             return Ok(net.net_tensor_shape(kind));
         }
-        #[cfg(all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        ))]
+        #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
         if let Self::LayerStacks(net) = self {
             return Ok(net.net_tensor_shape(kind));
         }
@@ -585,10 +579,7 @@ impl NNUENetwork {
     /// 読み込まれた net から対象テンソルの実行時形状を返す。
     #[cfg(not(any(
         feature = "nnue-runtime-dimensions",
-        all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        )
+        all(feature = "layerstack-arch", not(ls_dense_concat))
     )))]
     pub fn net_tensor_shape(&self, kind: NetTensorKind) -> Result<NetTensorShape, NetDeltaError> {
         match kind {
@@ -604,10 +595,7 @@ impl NNUENetwork {
     /// ファイル格納順 ID で指定した係数の現在値を返す。
     #[cfg(any(
         feature = "nnue-runtime-dimensions",
-        all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        )
+        all(feature = "layerstack-arch", not(ls_dense_concat))
     ))]
     pub fn net_coefficient(&self, id: &NetCoefficientId) -> Result<i32, NetDeltaError> {
         self.net_tensor_shape(id.kind)?.validate(id)?;
@@ -615,10 +603,7 @@ impl NNUENetwork {
         if let Self::DynamicLayerStacks(net) = self {
             return Ok(net.net_coefficient(id));
         }
-        #[cfg(all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        ))]
+        #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
         if let Self::LayerStacks(net) = self {
             return Ok(net.net_coefficient(id));
         }
@@ -628,10 +613,7 @@ impl NNUENetwork {
     /// ファイル格納順 ID で指定した係数の現在値を返す。
     #[cfg(not(any(
         feature = "nnue-runtime-dimensions",
-        all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        )
+        all(feature = "layerstack-arch", not(ls_dense_concat))
     )))]
     pub fn net_coefficient(&self, id: &NetCoefficientId) -> Result<i32, NetDeltaError> {
         match id.kind {
@@ -650,10 +632,7 @@ impl NNUENetwork {
     /// 探索などが重みを共有中の場合は `NetDeltaError::SharedNetwork` を返す。
     #[cfg(any(
         feature = "nnue-runtime-dimensions",
-        all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        )
+        all(feature = "layerstack-arch", not(ls_dense_concat))
     ))]
     pub fn apply_net_deltas(
         &mut self,
@@ -676,10 +655,7 @@ impl NNUENetwork {
                 Self::DynamicLayerStacks(net) => Arc::get_mut(net)
                     .ok_or(NetDeltaError::SharedNetwork)?
                     .apply_net_delta(&delta.id, delta.delta),
-                #[cfg(all(
-                    feature = "layerstack-arch",
-                    not(feature = "layerstacks-dense-concat-2304x16x64")
-                ))]
+                #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
                 Self::LayerStacks(net) => Arc::get_mut(net)
                     .ok_or(NetDeltaError::SharedNetwork)?
                     .apply_net_delta(&delta.id, delta.delta),
@@ -693,10 +669,7 @@ impl NNUENetwork {
     /// LayerStacks net の係数へ整数 delta を 1 回適用する。
     #[cfg(not(any(
         feature = "nnue-runtime-dimensions",
-        all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        )
+        all(feature = "layerstack-arch", not(ls_dense_concat))
     )))]
     pub fn apply_net_deltas(
         &mut self,
@@ -1285,14 +1258,11 @@ impl NNUENetwork {
             Self::HalfKP(net) => net.architecture_name(),
             #[cfg(all(
                 feature = "layerstack-arch",
-                any(
-                    feature = "nnue-runtime-dimensions",
-                    feature = "layerstacks-dense-concat-2304x16x64"
-                )
+                any(feature = "nnue-runtime-dimensions", ls_dense_concat)
             ))]
             Self::LayerStacks(net) => {
                 let spec = net.architecture_spec();
-                if cfg!(feature = "layerstacks-dense-concat-2304x16x64") {
+                if cfg!(ls_dense_concat) {
                     format!("LayerStacks-DenseConcat {}-{}-{}", spec.l1, spec.l2, spec.l3)
                 } else {
                     spec.name()
@@ -1300,10 +1270,7 @@ impl NNUENetwork {
             }
             #[cfg(all(
                 feature = "layerstack-arch",
-                not(any(
-                    feature = "nnue-runtime-dimensions",
-                    feature = "layerstacks-dense-concat-2304x16x64"
-                ))
+                not(any(feature = "nnue-runtime-dimensions", ls_dense_concat))
             ))]
             Self::LayerStacks(_) => "LayerStacks".to_string(),
         }
@@ -3735,7 +3702,7 @@ mod tests {
         .into_iter()
         .find_map(|(enabled, dims)| enabled.then_some(dims))
         .unwrap_or((1536, 16, 32));
-        #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+        #[cfg(not(ls_dense_concat))]
         let (ft, input) = [
             (cfg!(feature = "ft-halfka_hm_merged"), ("HalfKaHmMerged", 73305)),
             (cfg!(feature = "ft-halfka_hm_split"), ("HalfKaHmSplit", 76950)),
@@ -3746,7 +3713,7 @@ mod tests {
         .into_iter()
         .find_map(|(enabled, ft)| enabled.then_some(ft))
         .unwrap_or(("HalfKaHmMerged", 73305));
-        #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+        #[cfg(not(ls_dense_concat))]
         let arch = {
             let psqt_token = if psqt {
                 format!(",PSQT={num_buckets}")
@@ -3757,7 +3724,7 @@ mod tests {
                 "Features={ft}(Friend)[{input}->{l1}x2],LayerStacks,l2={l2},l3={l3},FV_SCALE=28{psqt_token}"
             )
         };
-        #[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+        #[cfg(ls_dense_concat)]
         let arch = {
             let mut arch = super::super::dense_concat_tests::dense_concat_arch(l1, l2, l3);
             if psqt {
@@ -3793,7 +3760,7 @@ mod tests {
             };
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert_eq!(err.to_string(), message);
-            #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+            #[cfg(not(ls_dense_concat))]
             assert_eq!(
                 super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&bytes)
                     .unwrap_err()

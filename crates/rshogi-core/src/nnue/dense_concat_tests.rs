@@ -1,6 +1,8 @@
 use std::io::Cursor;
 
 use super::constants::{HALFKA_HM_DIMENSIONS, NNUE_VERSION_LAYERSTACK_NUM_BUCKETS};
+#[cfg(ls_dense_concat)]
+use super::dense_concat::DENSE_CONCAT_FT;
 #[cfg(feature = "layerstack-arch")]
 use super::{LayerStacksNetwork, NNUENetwork};
 
@@ -22,8 +24,8 @@ fn header(arch: &str) -> Vec<u8> {
 }
 
 #[cfg(feature = "layerstack-arch")]
-fn static_read_error(arch: &str) -> String {
-    LayerStacksNetwork::read_with_options(&mut Cursor::new(header(arch)), 2304, 16, 64, None)
+fn static_read_error(arch: &str, ft: usize) -> String {
+    LayerStacksNetwork::read_with_options(&mut Cursor::new(header(arch)), ft, 16, 64, None)
         .err()
         .expect("header should fail before the FT payload")
         .to_string()
@@ -31,12 +33,18 @@ fn static_read_error(arch: &str) -> String {
 
 #[test]
 fn dense_concat_rejects_unknown_head_and_layout_tools_reject_dense_concat() {
-    let arch = dense_concat_arch(2304, 16, 64);
+    for ft in [1536, 2304] {
+        assert_dense_concat_head_handling(ft);
+    }
+}
+
+fn assert_dense_concat_head_handling(ft: usize) {
+    let arch = dense_concat_arch(ft, 16, 64);
     for head in ["Unknown", "SplitSkip"] {
         let unknown = arch.replace("Head=DenseConcat", &format!("Head={head}"));
         let expected = format!("Unknown LayerStacks Head={head}");
         #[cfg(feature = "layerstack-arch")]
-        assert!(static_read_error(&unknown).contains(&expected));
+        assert!(static_read_error(&unknown, ft).contains(&expected));
         assert!(
             super::detect_format(&header(&unknown), 0)
                 .unwrap_err()
@@ -68,58 +76,64 @@ fn dense_concat_rejects_unknown_head_and_layout_tools_reject_dense_concat() {
 
 #[test]
 fn dense_concat_requires_layerstack_arch_to_load() {
-    let arch = dense_concat_arch(2304, 16, 64);
-    let err = super::network::validate_read_head(&arch, false).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
-    assert!(err.to_string().contains("requires a static DenseConcat edition"));
-
-    #[cfg(not(feature = "layerstack-arch"))]
-    {
-        let err = super::NNUENetwork::read(&mut Cursor::new(header(&arch))).err().unwrap();
+    for ft in [1536, 2304] {
+        let arch = dense_concat_arch(ft, 16, 64);
+        let err = super::network::validate_read_head(&arch, false).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         assert!(err.to_string().contains("requires a static DenseConcat edition"));
+
+        #[cfg(not(feature = "layerstack-arch"))]
+        {
+            let err = super::NNUENetwork::read(&mut Cursor::new(header(&arch))).err().unwrap();
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+            assert!(err.to_string().contains("requires a static DenseConcat edition"));
+        }
     }
 }
 
-#[cfg(all(
-    feature = "layerstack-arch",
-    not(feature = "layerstacks-dense-concat-2304x16x64")
-))]
+#[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
 #[test]
 fn dense_concat_is_rejected_by_split_skip_build() {
-    let arch = dense_concat_arch(2304, 16, 64);
-    assert!(static_read_error(&arch).contains("SplitSkip LayerStacks build"));
-    let mut bytes = header(&arch);
-    bytes.extend_from_slice(&9u32.to_le_bytes());
-    let error = NNUENetwork::read(&mut Cursor::new(bytes)).err().unwrap();
-    assert!(error.to_string().contains("does not support Head=DenseConcat"));
+    for ft in [1536, 2304] {
+        let arch = dense_concat_arch(ft, 16, 64);
+        assert!(static_read_error(&arch, ft).contains("SplitSkip LayerStacks build"));
+        let mut bytes = header(&arch);
+        bytes.extend_from_slice(&9u32.to_le_bytes());
+        let error = NNUENetwork::read(&mut Cursor::new(bytes)).err().unwrap();
+        assert!(error.to_string().contains("does not support Head=DenseConcat"));
+    }
 }
 
-#[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+#[cfg(ls_dense_concat)]
 #[test]
 fn dense_concat_build_rejects_split_skip_and_mismatched_dimensions() {
+    let ft = DENSE_CONCAT_FT;
     let split_skip_arch = format!(
-        "Features=HalfKaHmMerged(Friend)[{HALFKA_HM_DIMENSIONS}->2304x2],LayerStacks,l2=16,l3=64"
+        "Features=HalfKaHmMerged(Friend)[{HALFKA_HM_DIMENSIONS}->{ft}x2],LayerStacks,l2=16,l3=64"
     );
-    assert!(static_read_error(&split_skip_arch).contains("model head is SplitSkip"));
+    assert!(static_read_error(&split_skip_arch, ft).contains("model head is SplitSkip"));
     let error = NNUENetwork::read(&mut Cursor::new(header(&split_skip_arch))).err().unwrap();
     assert!(error.to_string().contains("model head is SplitSkip"));
 
-    for (ft, l1, l2) in [(1536, 16, 64), (2304, 32, 64), (2304, 16, 32)] {
-        let error = NNUENetwork::read(&mut Cursor::new(header(&dense_concat_arch(ft, l1, l2))))
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("DenseConcat dimensions (FT, L1, L2) mismatch"));
+    let other_ft = if ft == 1536 { 2304 } else { 1536 };
+    for (model_ft, l1, l2) in [(other_ft, 16, 64), (ft, 32, 64), (ft, 16, 32)] {
+        let arch = dense_concat_arch(model_ft, l1, l2);
+        let expected = "DenseConcat dimensions (FT, L1, L2) mismatch";
+        assert!(static_read_error(&arch, ft).contains(expected));
+        let error = NNUENetwork::read(&mut Cursor::new(header(&arch))).err().unwrap();
+        assert!(error.to_string().contains(expected));
     }
     let wrong_concat =
-        dense_concat_arch(2304, 16, 64).replace("DenseConcat[160]", "DenseConcat[128]");
-    assert!(static_read_error(&wrong_concat).contains("Invalid DenseConcat network architecture"));
+        dense_concat_arch(ft, 16, 64).replace("DenseConcat[160]", "DenseConcat[128]");
+    assert!(
+        static_read_error(&wrong_concat, ft).contains("Invalid DenseConcat network architecture")
+    );
 }
 
-#[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+#[cfg(ls_dense_concat)]
 #[test]
 fn dense_concat_rejects_noncanonical_arch_tokens() {
-    let arch = dense_concat_arch(2304, 16, 64);
+    let arch = dense_concat_arch(DENSE_CONCAT_FT, 16, 64);
     for malformed in [
         arch.replace(",Head=", ",Network=Duplicate,Head="),
         arch.replace(",Head=", ",PSQT=9,PSQT=9,Head="),
@@ -131,21 +145,19 @@ fn dense_concat_rejects_noncanonical_arch_tokens() {
         format!("{arch},ThreatWidth=768"),
         format!("{arch},"),
     ] {
-        let err = static_read_error(&malformed);
+        let err = static_read_error(&malformed, DENSE_CONCAT_FT);
         assert!(err.contains("Invalid DenseConcat network architecture"), "{malformed}: {err}");
     }
 }
 
-#[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+#[cfg(ls_dense_concat)]
 #[test]
 fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
     use rand::{Rng, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
 
     use super::leb128::{LEB128_MAGIC, encode_signed_leb128};
-    use super::{
-        AccumulatorLayerStacks, HalfKaHmMergedSpec, LsSaturationCounts, NetworkLayerStacks,
-    };
+    use super::{AccumulatorLayerStacks, LsNetByFt, LsSaturationCounts};
     use crate::position::{Position, SFEN_HIRATE};
     use crate::types::Move;
 
@@ -199,7 +211,7 @@ fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
             .chain(xs.iter().map(|&x| (x / 64).clamp(0, 127) as u8))
     }
 
-    const FT: usize = 2304;
+    const FT: usize = DENSE_CONCAT_FT;
     const BUCKETS: usize = 2;
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x4443_4e43);
     let arch = format!("{},ls_bucket=ownking:5", dense_concat_arch(FT, 16, 64));
@@ -238,10 +250,17 @@ fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
     }
     bytes.extend_from_slice(&bucket_bytes);
 
-    let mut truncated = &bytes[..bytes.len() - 1];
-    type Net = NetworkLayerStacks<FT, 16, 30, 32, HalfKaHmMergedSpec, 64>;
-    assert!(Net::read(&mut Cursor::new(&mut truncated)).is_err());
-    let net = Net::from_bytes(&bytes).unwrap();
+    assert!(NNUENetwork::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    let network = NNUENetwork::from_bytes(&bytes).unwrap();
+    assert_eq!(network.architecture_name(), format!("LayerStacks-DenseConcat {FT}-16-64"));
+    let NNUENetwork::LayerStacks(network) = network else {
+        panic!("expected static LayerStacks");
+    };
+    let LayerStacksNetwork::HalfKaHmMerged(network) = network.as_ref();
+    #[cfg(feature = "layerstacks-1536x15x64")]
+    let LsNetByFt::L1536x16x64(net) = network;
+    #[cfg(feature = "layerstacks-2304x15x64")]
+    let LsNetByFt::L2304x16x64(net) = network;
     let mut pos = Position::new();
     pos.set_sfen(SFEN_HIRATE).unwrap();
     let mut acc = AccumulatorLayerStacks::new();

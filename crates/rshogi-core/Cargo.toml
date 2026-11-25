@@ -117,6 +117,7 @@ layerstacks-3072x15x32 = []
 layerstacks-1024x15x64 = []
 layerstacks-2304x15x64 = []
 layerstacks-dense-concat-2304x16x64 = ["layerstacks-2304x15x64"]
+layerstacks-dense-concat-1536x16x64 = ["layerstacks-1536x15x64"]
 layerstacks-2304-sparse-l1 = []
 layerstacks-3072x15x64 = []
 layerstacks-1536x15x64 = []
@@ -335,6 +336,16 @@ edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat = [
 ]
 edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat512 = ["edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat", "threat-width-512"]
 edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat768 = ["edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat", "threat-width-768"]
+edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-dense-concat-1536x16x64",
+  "nnue-progress-diff",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat = [
+  "edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none", "nnue-threat",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat256 = ["edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat", "threat-width-256"]
+edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat512 = ["edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat", "threat-width-512"]
+edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat768 = ["edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat", "threat-width-768"]
 edition-layerstacks-halfka_hm_merged-3072x15x64-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x15x64",
   "nnue-progress-diff",

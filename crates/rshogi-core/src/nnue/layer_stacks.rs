@@ -159,7 +159,7 @@ impl<
     }
 
     #[cfg(all(
-        any(test, not(feature = "layerstacks-dense-concat-2304x16x64")),
+        any(test, not(ls_dense_concat)),
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
@@ -175,7 +175,7 @@ impl<
     }
 
     #[cfg(all(
-        not(feature = "layerstacks-dense-concat-2304x16x64"),
+        not(ls_dense_concat),
         feature = "nnue-threat",
         target_arch = "x86_64",
         target_feature = "avx512f",
@@ -251,7 +251,7 @@ impl<
     }
 
     #[cfg(all(
-        any(test, not(feature = "layerstacks-dense-concat-2304x16x64")),
+        any(test, not(ls_dense_concat)),
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",

@@ -23,6 +23,11 @@ const FT_FEATURES: &[&str] = &[
     "ft-halfka_hm_merged",
 ];
 
+const DENSE_CONCAT_SLOTS: &[(&str, &str)] = &[
+    ("layerstacks-dense-concat-1536x16x64", "layerstacks-1536x15x64"),
+    ("layerstacks-dense-concat-2304x16x64", "layerstacks-2304x15x64"),
+];
+
 fn use_avx512bw_fused_1536(has_feature: &dyn Fn(&str) -> bool) -> bool {
     let excluded = [
         "mode-family",
@@ -63,9 +68,14 @@ fn validate_feature_combination(
 
     let ft_count = FT_FEATURES.iter().filter(|f| has_feature(f)).count();
 
-    if has_feature("layerstacks-dense-concat-2304x16x64")
-        && !(layerstack_arch
-            && has_feature("layerstacks-2304x15x64")
+    let mut dense_concat_slots =
+        DENSE_CONCAT_SLOTS.iter().filter(|(feature, _)| has_feature(feature));
+    if let Some(&(_, slot)) = dense_concat_slots.next() {
+        if dense_concat_slots.next().is_some() {
+            return Err("DenseConcat features are mutually exclusive".to_owned());
+        }
+        if !(layerstack_arch
+            && has_feature(slot)
             && layerstacks_count == 1
             && has_feature("ft-halfka_hm_merged")
             && ft_count == 1
@@ -74,11 +84,11 @@ fn validate_feature_combination(
             && !mode_universal
             && !has_feature("nnue-effect-bucket")
             && !has_feature("prepacked-nnue"))
-    {
-        return Err(
-            "DenseConcat requires a single static HalfKaHmMerged LayerStacks slot (layerstacks-2304x15x64) without EffectBucket or prepacked-nnue"
-                .to_owned(),
-        );
+        {
+            return Err(format!(
+                "DenseConcat requires a single static HalfKaHmMerged LayerStacks slot ({slot}) without EffectBucket or prepacked-nnue"
+            ));
+        }
     }
 
     let threat_width_256 = has_feature("threat-width-256");
@@ -97,7 +107,9 @@ fn validate_feature_combination(
     }
     let static_layerstack = mode_specific && layerstack_arch && !runtime_dimensions;
     if threat_width_256 && !(static_layerstack && has_feature("layerstacks-1536x15x64")) {
-        return Err("threat-width-256 requires a static 1536x15x64 edition".to_owned());
+        return Err(
+            "threat-width-256 requires a static layerstacks-1536x15x64 slot".to_owned(),
+        );
     }
     let partial_width_l2_64 = has_feature("layerstacks-1024x15x64")
         || has_feature("layerstacks-1536x15x64")

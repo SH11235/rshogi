@@ -17,7 +17,7 @@ SqrClippedReLU 系の活性は u8 [0,127] に clamp されるため、127 到達
 | `l2_act` | SplitSkip は fc_1 の ClippedReLU（`L2` 要素）。DenseConcat は fc_1 の SqrClippedReLU と ClippedReLU（各 `L2` 要素） |
 
 1 局面あたりの `l1_act_total` / `l2_act_total` は LayerStacks 2304-15-64（SplitSkip）が 30 / 64、
-LayerStacks-DenseConcat 2304-16-64 が 32 / 128 です。
+LayerStacks-DenseConcat 1536-16-64 と 2304-16-64 はともに 32 / 128 です。
 
 **重み側**（i8 dense weight の ±127 張り付き率、FT i16 の飽和接近）は rshogi-nnue
 (tatara) の `crates/nnue-format/examples/clamp_stats.rs` が担当します。本ツールは

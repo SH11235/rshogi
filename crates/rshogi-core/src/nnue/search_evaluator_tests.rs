@@ -527,7 +527,7 @@ fn check_models() {
     check_loader_matrix();
     search_models::for_each_model(true, |name, mut bytes| {
         if name == "LayerStacks" {
-            #[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+            #[cfg(ls_dense_concat)]
             {
                 bytes = with_dense_concat_head(bytes);
             }
@@ -649,7 +649,7 @@ fn check_models() {
         material::set_material_level(MaterialLevel::Lv9);
         assert_eq!(eager.evaluate(&pos), original_value);
         material::disable_material();
-        if name == "LayerStacks" && !cfg!(feature = "layerstacks-dense-concat-2304x16x64") {
+        if name == "LayerStacks" && !cfg!(ls_dense_concat) {
             use nnue::net_delta::{NetCoefficientId, NetDelta, NetTensorKind};
             let mut standalone = NNUENetwork::from_bytes(&bytes).unwrap();
             let owner = SearchEvaluator::from_network(&standalone);
@@ -875,7 +875,7 @@ fn check_loader_matrix() {
                 cfg!(feature = "nnue-runtime-dimensions")
                     || (cfg!(feature = "layerstack-arch")
                         && !cfg!(feature = "nnue-effect-bucket")
-                        && !cfg!(feature = "layerstacks-dense-concat-2304x16x64")
+                        && !cfg!(ls_dense_concat)
                         && enabled
                         && shape_enabled),
             );
@@ -918,7 +918,7 @@ fn check_loader_matrix() {
     }
 }
 
-#[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+#[cfg(ls_dense_concat)]
 fn with_dense_concat_head(mut bytes: Vec<u8>) -> Vec<u8> {
     let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let (ft, l1, l2) =

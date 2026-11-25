@@ -11,6 +11,12 @@ use super::layers::AffineTransform;
 ))]
 use super::{layer_stacks::sqr_clipped_relu_new, ls_l1_kernel::avx512};
 
+pub(super) const DENSE_CONCAT_FT: usize = if cfg!(feature = "layerstacks-dense-concat-1536x16x64") {
+    1536
+} else {
+    2304
+};
+
 const FC1_IN: usize = 32;
 const FC2_IN: usize = 160;
 
@@ -33,9 +39,8 @@ impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
     DenseConcatBucket<L1, FC0_OUT, FC1_OUT>
 {
     fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
-        // 連結 buffer の幅は 2304-16-64 の固定値なので、型の寸法と食い違えば build で止める。
         const {
-            assert!(L1 == 2304 && FC0_OUT == 16 && FC1_OUT == 64);
+            assert!(matches!(L1, 1536 | 2304));
             assert!(FC1_IN == 2 * FC0_OUT && FC2_IN == FC1_IN + 2 * FC1_OUT);
         }
         let l1 = AffineTransform::read(reader)?;

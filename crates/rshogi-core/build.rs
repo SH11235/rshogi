@@ -27,6 +27,10 @@ fn main() {
     if let Err(msg) = validate_feature_combination(&has_feature) {
         panic!("rshogi-core build.rs: {msg}");
     }
+    println!("cargo:rustc-check-cfg=cfg(ls_dense_concat)");
+    if DENSE_CONCAT_SLOTS.iter().any(|(feature, _)| has_feature(feature)) {
+        println!("cargo:rustc-cfg=ls_dense_concat");
+    }
 
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=build/result_features.rs");

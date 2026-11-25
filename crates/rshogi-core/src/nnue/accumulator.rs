@@ -750,10 +750,7 @@ impl<T: Zeroable> WeightBox<T> {
     #[cfg(any(
         test,
         feature = "nnue-runtime-dimensions",
-        all(
-            feature = "layerstack-arch",
-            not(feature = "layerstacks-dense-concat-2304x16x64")
-        )
+        all(feature = "layerstack-arch", not(ls_dense_concat))
     ))]
     pub(crate) fn make_mut(&mut self) -> &mut [T] {
         if !matches!(self.0.backing, AlignedBoxBacking::Heap(_)) {

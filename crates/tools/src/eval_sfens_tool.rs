@@ -271,7 +271,10 @@ fn dump_debug_first<
     compare_i32_slices("LayerStack L1(simd vs scalar)", &l1_simd, &l1_scalar);
     eprintln!("[debug] l1_out={l1_simd:?}");
 
-    #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+    #[cfg(not(any(
+        feature = "layerstacks-dense-concat-2304x16x64",
+        feature = "layerstacks-dense-concat-1536x16x64"
+    )))]
     {
         let main_dim = LS_L1_OUT - 1;
         let l1_skip = l1_simd[main_dim];
@@ -361,9 +364,15 @@ fn run_eval_for_network<
         network.refresh_accumulator(&pos, &mut acc);
 
         let bucket_index = bucketer.bucket(&pos);
-        #[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+        #[cfg(any(
+            feature = "layerstacks-dense-concat-2304x16x64",
+            feature = "layerstacks-dense-concat-1536x16x64"
+        ))]
         let (value, raw) = network.evaluate_with_bucket_and_raw(&pos, &acc, bucket_index);
-        #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+        #[cfg(not(any(
+            feature = "layerstacks-dense-concat-2304x16x64",
+            feature = "layerstacks-dense-concat-1536x16x64"
+        )))]
         let (value, raw) = {
             let value = network.evaluate_with_bucket(&pos, &acc, bucket_index);
             let us = pos.side_to_move() as usize;
