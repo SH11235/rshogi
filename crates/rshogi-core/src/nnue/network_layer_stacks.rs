@@ -3214,7 +3214,7 @@ fn validate_dense_concat_dimensions(arch: &str, expected: (usize, usize, usize))
     };
     // tatara は Threat 付きの net の Features= に駒の特徴と Threat の次元の和を書く。
     let threat_dims = threat.map_or(0, |token| token["Threat=".len()..].parse().unwrap_or(0));
-    let input_dims = input_dims + threat_dims;
+    let input_dims = input_dims.checked_add(threat_dims).ok_or_else(invalid)?;
     let (ft, l1, l2) = expected;
     let actual = super::spec::parse_arch_dimensions(arch);
     if actual != expected || !matches!(ft, 1536 | 2304) || (l1, l2) != (16, 64) {
@@ -3534,8 +3534,8 @@ mod tests {
                 "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720"
             );
             #[cfg(ls_dense_concat)]
-            let mut arch = super::super::dense_concat_tests::dense_concat_arch(N, 16, L3)
-                .replace(",Head=", ",Threat=216720,Head=");
+            let mut arch =
+                super::super::dense_concat_tests::dense_concat_threat_arch(N, 16, L3, 216_720);
             if width != N {
                 use std::fmt::Write;
                 write!(arch, ",ThreatWidth={width}").unwrap();
