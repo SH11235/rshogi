@@ -164,6 +164,52 @@ class TrainerTest(unittest.TestCase):
         torch.save(state, checkpoint)
         with self.assertRaisesRegex(ResumeError, "sampling schedule"):
             self.run_training("invalid-average", config, resume=checkpoint)
+    def test_nadam_resumes_with_policy_gaps_and_rate_change(self) -> None:
+        self.check_nadam_resume()
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle CUDA device")
+    def test_cuda_eager_nadam_resumes_with_policy_gaps_and_rate_change(self) -> None:
+        self.check_nadam_resume(device="cuda", precision="bf16")
+
+    def check_nadam_resume(self, **options) -> None:
+        records = synthetic_records(seed=27, count=4)
+        for index, record in enumerate(records):
+            record["policy"] = [[record["legal_labels"][0], 1]] if index >= 2 else None
+        self.train = self.make_dataset("nadam-mixed", records)
+        config = replace(
+            self.config, optimizer="nadam", max_steps=7, batch_size=2, checkpoint_every=1,
+            weight_decay=0.1, adamw_betas=(0.9, 0.98), adamw_epsilon=1e-7,
+            learning_rate_steps=((2, 0.0005),), **options,
+        )
+        self.run_training("nadam-full", config)
+        output = self.root / "nadam-full"
+        full = load_resume(output / "resume-final.pt")
+        self.assertEqual(full["progress"]["optimizer_updates"], 7)
+        self.assertEqual(full["progress"]["policy_optimizer_updates"], 3)
+        group, = full["optimizer_state"]["param_groups"]
+        self.assertTrue(group["decoupled_weight_decay"])
+        self.assertEqual(group["betas"], (0.9, 0.98))
+        self.assertEqual(group["eps"], 1e-7)
+        self.assertEqual({state["step"].item() for state in full["optimizer_state"]["state"].values()}, {3, 7})
+        for step in (1, 2, 3):
+            self.run_training(f"nadam-resumed-{step}", config, resume=output / f"resume-{step:010d}.pt")
+            resumed = load_resume(self.root / f"nadam-resumed-{step}" / "resume-final.pt")
+            for field in ("model_state", "optimizer_state", "progress", "rng"):
+                self.assert_nested_equal(full[field], resumed[field])
+
+        for field, bad in (("mu_product", 0.5), ("step", 6.0)):
+            with self.subTest(field=field):
+                payload = load_resume(output / "resume-final.pt")
+                next(iter(payload["optimizer_state"]["state"].values()))[field] = torch.tensor(bad)
+                checkpoint = self.root / f"bad-nadam-{field}.pt"
+                torch.save(payload, checkpoint)
+                with self.assertRaisesRegex(ResumeError, "recorded parameter update count"):
+                    self.run_training(f"bad-nadam-run-{field}", config, resume=checkpoint)
+
+    def test_nadam_rejects_compilation_graphs_and_fused_optimizer(self) -> None:
+        for options in ({"execution": "compile"}, {"execution": "cuda-graph"}, {"fused_optimizer": True}):
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, "NAdam requires eager"):
+                replace(self.config, optimizer="nadam", **options)
 
     def test_weighted_loss_and_adamw_options_survive_resume(self) -> None:
         config = replace(

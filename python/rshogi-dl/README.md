@@ -328,9 +328,9 @@ python -m rshogi_dl.trainer \
 | `--prefetch-input` | CUDA Graph学習で次のbatchをCPUで先読みし、固定バッファ経由でGPUへ非同期転送する。既定は無効 |
 | `--precision` | `fp32` / `tf32` / `fp16` / `bf16`。既定fp32。FP16はGradScalerを使用 |
 | `--fused-optimizer` | CUDAのfused AdamWを明示選択。既定は無効 |
-| `--optimizer` | `adamw`（既定）/ `muon` / `batched-muon` |
+| `--optimizer` | `adamw`（既定）/ `nadam` / `muon` / `batched-muon`。NAdam は CPU と CUDA の eager 実行に対応し、weight decay を勾配から分離する。momentum decay は0.004 |
 | `--learning-rate-step STEP:RATE` | 更新試行を STEP 回終えた直後に学習率を RATE に下げる。たとえば `--learning-rate-step 10000:0.0005 --learning-rate-step 20000:0.00025`。同じ設定で途中再開でき、Muon 併用時は両 optimizer の学習率を同じ比率で下げる。学習ログの learning_rate は直近の更新試行に適用された値 |
-| `--adamw-betas BETA1 BETA2` / `--adamw-epsilon EPS` | AdamW の moment 係数と分母の安定化定数。Muon 併用時も AdamW 側に適用 |
+| `--betas BETA1 BETA2` / `--epsilon EPS` | AdamW と NAdam の moment 係数と分母の安定化定数。既存の `--adamw-betas` と `--adamw-epsilon` も使用できる。Muon 併用時は AdamW 側に適用 |
 | `--clip-grad-norm N` | 逆伝播後に全パラメータの勾配を L2 ノルム N でクリップ。0 で無効 |
 | `--policy-loss-weight W` / `--value-loss-weight W` | 学習損失の方策・価値の係数。両方の既定は1。価値の係数は正とし、方策の係数を0にすると方策ヘッドは更新しない。評価は重み付け前の値を記録 |
 | `--warmup-steps` | 最初の指定回数で学習率を線形に上げる |
