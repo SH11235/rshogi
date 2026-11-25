@@ -1590,15 +1590,13 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L1536x16x64(Box::new(net)))
             }
-            _ => {
-                let message = match l2.checked_sub(1) {
-                    Some(activation_width) => format!(
-                        "Unsupported LayerStacks architecture: {l1}x{l2}x{l3} (build size: layerstacks-{l1}x{activation_width}x{l3})"
-                    ),
-                    None => format!("Unsupported LayerStacks architecture: {l1}x{l2}x{l3}"),
-                };
-                Err(io::Error::new(io::ErrorKind::InvalidData, message))
-            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unsupported LayerStacks architecture: {l1}x{l2}x{l3} \
+                     (build サイズ名は中央の数から shortcut の 1 を除いて数える)"
+                ),
+            )),
         }
     }
 

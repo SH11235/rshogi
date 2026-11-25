@@ -164,7 +164,8 @@ feature は 5 カテゴリの組み合わせ:
    / `layerstacks-3072x15x64` / `layerstacks-1536x15x64` / `layerstacks-1024x15x64` (rshogi-core `Cargo.toml` の
    「LayerStack network L1 サイズ slot」が正典)。複数同時指定は cycles +5.5% 退行
 4. **拡張 / 最適化**: PSQT や Threat を使うモデルに合わせて `nnue-psqt` / `nnue-threat` を指定する。
-   部分幅の Threat には `threat-width-*` ごとのサイズ制限がある。
+   部分幅の Threat (`threat-width-*`) には幅ごとのサイズ制限があり、`mode-specific` と `layerstack-arch` が要る
+   (`nnue-runtime-dimensions` とは併用できない)。
    `mode-*` を指定する build では、`nnue-progress-diff` には `mode-specific` と
    `1536x15x32` / `1536x31x32` / `3072x15x32` / `2304x15x64` / `3072x15x64` /
    `1536x15x64` のいずれかが必要 (`crates/rshogi-core/build/checks.rs`)。
