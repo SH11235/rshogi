@@ -143,6 +143,11 @@ class MuonAdamW:
     def state(self):
         return self._adamw.state
 
+    def set_learning_rates(self, adamw_rate, muon_rate):
+        for optimizer, rate in ((self._adamw, adamw_rate), (self._muon, muon_rate)):
+            for group in optimizer.param_groups:
+                group["lr"] = rate
+
     def zero_grad(self, *, set_to_none):
         self._adamw.zero_grad(set_to_none=set_to_none)
         self._muon.zero_grad(set_to_none=set_to_none)
