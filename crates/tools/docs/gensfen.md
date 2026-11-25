@@ -14,16 +14,16 @@ cargo build -p tools --bin gensfen --release
 
 リリースビルドのバイナリは `target/release/gensfen` に生成される。
 
-この既定の build は、拡張なしの LayerStacks 1536x16x32・1536x16x64・2304x16x64 を静的な実装で読み、
+この既定の build は、拡張なしの LayerStacks 1536x15x32・1536x15x64・2304x15x64 を静的な実装で読み、
 それ以外の net は寸法をモデルの header から読む汎用の実装で読む。どちらで読んだかは読み込みログの
 `NNUE LayerStack implementation=static|dynamic` で分かる。
 NativeBackend で 1 つの構成の NNUE だけを使うなら、その構成の静的な実装だけを入れた build の方が
-対局がさらに速い。LayerStacks HalfKA_hm 1536x16x32 (拡張なし) の例:
+対局がさらに速い。LayerStacks HalfKA_hm 1536x15x32 (拡張なし) の例:
 
 ```bash
 cargo build --release -p tools --bin gensfen --target-dir target/gensfen-ls1536 \
   --no-default-features \
-  --features rshogi-core/layerstack-arch,layerstacks-1536x16x32,ft-halfka_hm_merged
+  --features rshogi-core/layerstack-arch,layerstacks-1536x15x32,ft-halfka_hm_merged
 ```
 
 バイナリは `target/gensfen-ls1536/release/gensfen` に生成される。

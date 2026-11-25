@@ -18,10 +18,10 @@ fn prepared() -> SearchEvaluator {
         feature = "layerstack-arch",
         any(
             all(
-                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x15x32",
                 any(feature = "ft-halfka_hm_merged", feature = "ft-halfka_hm_split")
             ),
-            all(feature = "layerstacks-1024x16x32", feature = "ft-halfka_hm_merged")
+            all(feature = "layerstacks-1024x15x32", feature = "ft-halfka_hm_merged")
         ),
         not(feature = "nnue-effect-bucket")
     )
@@ -31,7 +31,7 @@ fn spec_buckets_match_full_refresh_after_each_move_and_undo() {
     const HEAD_STEP: i32 = 1 << 20;
     let l1 = if cfg!(feature = "nnue-runtime-dimensions") {
         32
-    } else if cfg!(feature = "layerstacks-1536x16x32") {
+    } else if cfg!(feature = "layerstacks-1536x15x32") {
         1536
     } else {
         1024
@@ -132,7 +132,7 @@ fn spec_buckets_match_full_refresh_after_each_move_and_undo() {
     }
 }
 
-#[cfg(all(feature = "layerstacks-1536x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1536x15x32", feature = "ft-halfka_hm_merged"))]
 #[test]
 fn q16_static_evaluation_matches_original_board_routing() {
     use crate::movegen::{MoveList, generate_legal_all};
@@ -274,27 +274,27 @@ macro_rules! halfkx_observe {
 macro_rules! layer_observe {
     ($stack:expr, $entry:ident, $body:expr) => {
         match $stack {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             LayerStacksAccStack::L1536x16x32($entry) => $body,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             LayerStacksAccStack::L1536x32x32($entry) => $body,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             LayerStacksAccStack::L768x16x32($entry) => $body,
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             LayerStacksAccStack::L768x8x32($entry) => $body,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             LayerStacksAccStack::L512x16x32($entry) => $body,
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             LayerStacksAccStack::L1024x16x32($entry) => $body,
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             LayerStacksAccStack::L3072x16x32($entry) => $body,
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             LayerStacksAccStack::L1024x16x64($entry) => $body,
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             LayerStacksAccStack::L2304x16x64($entry) => $body,
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             LayerStacksAccStack::L3072x16x64($entry) => $body,
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             LayerStacksAccStack::L1536x16x64($entry) => $body,
         }
     };
@@ -841,17 +841,17 @@ fn check_loader_matrix() {
     ] {
         // 各 edition の有効形状と、どの静的 edition にも存在しない形状を含める。
         for (l1, l2, l3, shape_enabled) in [
-            (1536, 16, 32, cfg!(feature = "layerstacks-1536x16x32")),
-            (1536, 32, 32, cfg!(feature = "layerstacks-1536x32x32")),
-            (768, 16, 32, cfg!(feature = "layerstacks-768x16x32")),
-            (768, 8, 32, cfg!(feature = "layerstacks-768x8x32")),
-            (512, 16, 32, cfg!(feature = "layerstacks-512x16x32")),
-            (1024, 16, 32, cfg!(feature = "layerstacks-1024x16x32")),
-            (3072, 16, 32, cfg!(feature = "layerstacks-3072x16x32")),
-            (1024, 16, 64, cfg!(feature = "layerstacks-1024x16x64")),
-            (2304, 16, 64, cfg!(feature = "layerstacks-2304x16x64")),
-            (3072, 16, 64, cfg!(feature = "layerstacks-3072x16x64")),
-            (1536, 16, 64, cfg!(feature = "layerstacks-1536x16x64")),
+            (1536, 16, 32, cfg!(feature = "layerstacks-1536x15x32")),
+            (1536, 32, 32, cfg!(feature = "layerstacks-1536x31x32")),
+            (768, 16, 32, cfg!(feature = "layerstacks-768x15x32")),
+            (768, 8, 32, cfg!(feature = "layerstacks-768x7x32")),
+            (512, 16, 32, cfg!(feature = "layerstacks-512x15x32")),
+            (1024, 16, 32, cfg!(feature = "layerstacks-1024x15x32")),
+            (3072, 16, 32, cfg!(feature = "layerstacks-3072x15x32")),
+            (1024, 16, 64, cfg!(feature = "layerstacks-1024x15x64")),
+            (2304, 16, 64, cfg!(feature = "layerstacks-2304x15x64")),
+            (3072, 16, 64, cfg!(feature = "layerstacks-3072x15x64")),
+            (1536, 16, 64, cfg!(feature = "layerstacks-1536x15x64")),
             (128, 8, 16, false),
         ] {
             if !shape_enabled && l1 != 128 && (l1, l2) != (1536, 16) {
@@ -876,7 +876,7 @@ fn check_loader_matrix() {
         nnue::EffectBucketConfig::KINGFIXED_2X2,
         nnue::EffectBucketConfig::KINGFIXED_3X3,
     ] {
-        let l1 = if cfg!(feature = "layerstacks-512x16x32") {
+        let l1 = if cfg!(feature = "layerstacks-512x15x32") {
             512
         } else {
             1024

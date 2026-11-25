@@ -47,7 +47,7 @@ function main() {
             || /^CARGO_TARGET_.*_RUSTFLAGS$/i.test(key)) delete env[key];
     }
     for (const ft of selected) {
-        const edition = `edition-layerstacks-${ft}-1536x16x32-none`;
+        const edition = `edition-layerstacks-${ft}-1536x15x32-none`;
         for (const simd of [false, true]) {
             const label = `${edition} ${simd ? "+simd128" : "-simd128"}`;
             console.log(`Build: ${label}`);

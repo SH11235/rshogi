@@ -26,11 +26,11 @@ fn partial_threat_width_requires_supported_static_size() {
                 ];
                 let supported = mode == "mode-specific"
                     && match *size {
-                        "layerstacks-1536x16x64" => true,
-                        "layerstacks-1024x16x64" | "layerstacks-2304x16x64" => {
+                        "layerstacks-1536x15x64" => true,
+                        "layerstacks-1024x15x64" | "layerstacks-2304x15x64" => {
                             width != "threat-width-256"
                         }
-                        "layerstacks-1536x16x32" => width == "threat-width-512",
+                        "layerstacks-1536x15x32" => width == "threat-width-512",
                         _ => false,
                     };
                 assert_eq!(
@@ -54,7 +54,7 @@ fn partial_threat_widths_are_mutually_exclusive() {
             "mode-specific",
             "layerstack-arch",
             "ft-halfka_hm_merged",
-            "layerstacks-1536x16x64",
+            "layerstacks-1536x15x64",
             "nnue-threat",
             a,
             b,
@@ -79,7 +79,7 @@ fn unrecognized_feature_names_ignored() {
     // (mode sentinel も無いので緩和されて Ok)。
     let has = lookup(&[
         "some-unrecognized-feature",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "nnue-psqt",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -90,7 +90,7 @@ fn atomic_features_without_mode_pass() {
     // mode sentinel 未指定 (atomic feature 直指定) の build は check を緩和して Ok。
     let has = lookup(&[
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_hm_merged",
         "nnue-psqt",
         "nnue-progress-diff",
@@ -103,8 +103,8 @@ fn universal_alone_ok() {
     let has = lookup(&[
         "mode-universal",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
-        "layerstacks-768x16x32",
+        "layerstacks-1536x15x32",
+        "layerstacks-768x15x32",
         "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -132,14 +132,14 @@ fn universal_plus_family_rejected() {
 
 #[test]
 fn universal_plus_specific_rejected() {
-    let has = lookup(&["mode-universal", "mode-specific", "layerstacks-1536x16x32"]);
+    let has = lookup(&["mode-universal", "mode-specific", "layerstacks-1536x15x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("edition-universal"));
 }
 
 #[test]
 fn family_plus_specific_rejected() {
-    let has = lookup(&["mode-family", "mode-specific", "layerstacks-1536x16x32"]);
+    let has = lookup(&["mode-family", "mode-specific", "layerstacks-1536x15x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("must be exactly 1"));
 }
@@ -165,7 +165,7 @@ fn atomic_ls_arch_without_size_rejected() {
 
 #[test]
 fn atomic_ls_arch_without_ft_rejected() {
-    let has = lookup(&["layerstack-arch", "layerstacks-1536x16x32"]);
+    let has = lookup(&["layerstack-arch", "layerstacks-1536x15x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ft-* を 1 個以上"));
 }
@@ -181,8 +181,8 @@ fn specific_multiple_sizes_rejected() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
-        "layerstacks-1536x32x32",
+        "layerstacks-1536x15x32",
+        "layerstacks-1536x31x32",
         "ft-halfka_hm_merged",
     ]);
     let err = validate_feature_combination(&has).unwrap_err();
@@ -218,7 +218,7 @@ fn specific_single_size_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "nnue-psqt",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
@@ -231,7 +231,7 @@ fn progress_diff_with_512_rejected() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-512x16x32",
+        "layerstacks-512x15x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -244,7 +244,7 @@ fn progress_diff_with_768_rejected() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-768x16x32",
+        "layerstacks-768x15x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -257,7 +257,7 @@ fn progress_diff_with_1024_rejected() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1024x16x32",
+        "layerstacks-1024x15x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -266,11 +266,11 @@ fn progress_diff_with_1024_rejected() {
 }
 
 #[test]
-fn progress_diff_with_1536x32x32_ok() {
+fn progress_diff_with_1536x31x32_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x32x32",
+        "layerstacks-1536x31x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -282,7 +282,7 @@ fn progress_diff_with_3072_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-3072x16x32",
+        "layerstacks-3072x15x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -290,11 +290,11 @@ fn progress_diff_with_3072_ok() {
 }
 
 #[test]
-fn progress_diff_with_2304_16_64_ok() {
+fn progress_diff_with_2304_15_64_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-2304x16x64",
+        "layerstacks-2304x15x64",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -302,11 +302,11 @@ fn progress_diff_with_2304_16_64_ok() {
 }
 
 #[test]
-fn progress_diff_with_3072_16_64_ok() {
+fn progress_diff_with_3072_15_64_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-3072x16x64",
+        "layerstacks-3072x15x64",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -314,11 +314,11 @@ fn progress_diff_with_3072_16_64_ok() {
 }
 
 #[test]
-fn progress_diff_with_1536_16_64_ok() {
+fn progress_diff_with_1536_15_64_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x64",
+        "layerstacks-1536x15x64",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -330,7 +330,7 @@ fn progress_diff_in_family_rejected() {
     let has = lookup(&[
         "mode-family",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -343,7 +343,7 @@ fn progress_diff_in_universal_rejected() {
     let has = lookup(&[
         "mode-universal",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -356,9 +356,9 @@ fn family_multiple_sizes_ok() {
     let has = lookup(&[
         "mode-family",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
-        "layerstacks-768x16x32",
-        "layerstacks-512x16x32",
+        "layerstacks-1536x15x32",
+        "layerstacks-768x15x32",
+        "layerstacks-512x15x32",
         "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -370,7 +370,7 @@ fn ls_arch_plus_halfkx_arch_ok() {
         "mode-universal",
         "layerstack-arch",
         "halfkx-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -381,7 +381,7 @@ fn ls_specific_with_ft_halfkp_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfkp",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -392,7 +392,7 @@ fn ls_specific_with_ft_halfka_split_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_split",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -403,7 +403,7 @@ fn ls_specific_with_ft_halfka_merged_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -414,7 +414,7 @@ fn ls_specific_with_ft_halfka_hm_split_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_hm_split",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -425,7 +425,7 @@ fn ls_specific_with_ft_halfka_hm_merged_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -437,7 +437,7 @@ fn halfka_effect_bucket_specific_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-512x16x32",
+        "layerstacks-512x15x32",
         "ft-halfka_hm_merged",
         "nnue-effect-bucket",
         "effect-bucket-2x2-kingfixed",
@@ -450,7 +450,7 @@ fn halfka_effect_bucket_1024_3x3_kingfixed_specific_ok() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-1024x16x32",
+        "layerstacks-1024x15x32",
         "ft-halfka_hm_merged",
         "nnue-effect-bucket",
         "effect-bucket-3x3-kingfixed",
@@ -462,7 +462,7 @@ fn halfka_effect_bucket_1024_3x3_kingfixed_specific_ok() {
 fn halfka_effect_bucket_without_mode_rejected() {
     let has = lookup(&[
         "layerstack-arch",
-        "layerstacks-512x16x32",
+        "layerstacks-512x15x32",
         "ft-halfka_hm_merged",
         "nnue-effect-bucket",
         "effect-bucket-2x2-kingfixed",
@@ -476,8 +476,8 @@ fn halfka_effect_bucket_in_universal_rejected() {
     let has = lookup(&[
         "mode-universal",
         "layerstack-arch",
-        "layerstacks-512x16x32",
-        "layerstacks-1024x16x32",
+        "layerstacks-512x15x32",
+        "layerstacks-1024x15x32",
         "ft-halfkp",
         "ft-halfka_hm_merged",
         "nnue-effect-bucket",
@@ -492,7 +492,7 @@ fn halfka_effect_bucket_with_extra_ft_rejected() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-512x16x32",
+        "layerstacks-512x15x32",
         "ft-halfka_hm_merged",
         "ft-halfka_split",
         "nnue-effect-bucket",
@@ -507,7 +507,7 @@ fn halfka_effect_bucket_with_threat_rejected() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-512x16x32",
+        "layerstacks-512x15x32",
         "ft-halfka_hm_merged",
         "nnue-threat",
         "nnue-effect-bucket",
@@ -522,7 +522,7 @@ fn halfka_effect_bucket_with_psqt_rejected() {
     let has = lookup(&[
         "mode-specific",
         "layerstack-arch",
-        "layerstacks-512x16x32",
+        "layerstacks-512x15x32",
         "ft-halfka_hm_merged",
         "nnue-psqt",
         "nnue-effect-bucket",
@@ -539,7 +539,7 @@ fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
         "mode-specific",
         "layerstack-arch",
         "halfkx-arch",
-        "layerstacks-512x16x32",
+        "layerstacks-512x15x32",
         "ft-halfkp",
         "halfkx-activation-crelu",
     ]);
@@ -551,8 +551,8 @@ fn ls_only_family_with_multi_ft_ok() {
     let has = lookup(&[
         "mode-family",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
-        "layerstacks-768x16x32",
+        "layerstacks-1536x15x32",
+        "layerstacks-768x15x32",
         "ft-halfkp",
         "ft-halfka_hm_merged",
     ]);
@@ -564,7 +564,7 @@ fn ls_only_universal_with_all_ft_ok() {
     let has = lookup(&[
         "mode-universal",
         "layerstack-arch",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "ft-halfkp",
         "ft-halfka_split",
         "ft-halfka_merged",
@@ -576,7 +576,7 @@ fn ls_only_universal_with_all_ft_ok() {
 
 #[test]
 fn ls_arch_without_ft_rejected() {
-    let has = lookup(&["mode-specific", "layerstack-arch", "layerstacks-1536x16x32"]);
+    let has = lookup(&["mode-specific", "layerstack-arch", "layerstacks-1536x15x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ft-* を 1 個以上"));
 }
@@ -612,7 +612,7 @@ fn fused_1536_requires_a_single_measured_architecture() {
     let required = [
         "layerstack-arch",
         "ft-halfka_hm_merged",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
     ];
     assert!(use_avx512bw_fused_1536(&lookup(&required)));
     let mut specific = required.to_vec();
@@ -629,16 +629,16 @@ fn fused_1536_requires_a_single_measured_architecture() {
         "ft-halfka_split",
         "ft-halfka_merged",
         "ft-halfka_hm_split",
-        "layerstacks-1536x32x32",
-        "layerstacks-768x16x32",
-        "layerstacks-768x8x32",
-        "layerstacks-512x16x32",
-        "layerstacks-1024x16x32",
-        "layerstacks-3072x16x32",
-        "layerstacks-1024x16x64",
-        "layerstacks-2304x16x64",
-        "layerstacks-3072x16x64",
-        "layerstacks-1536x16x64",
+        "layerstacks-1536x31x32",
+        "layerstacks-768x15x32",
+        "layerstacks-768x7x32",
+        "layerstacks-512x15x32",
+        "layerstacks-1024x15x32",
+        "layerstacks-3072x15x32",
+        "layerstacks-1024x15x64",
+        "layerstacks-2304x15x64",
+        "layerstacks-3072x15x64",
+        "layerstacks-1536x15x64",
     ] {
         let mut features = required.to_vec();
         features.push(feature);

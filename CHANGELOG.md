@@ -14,6 +14,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+- LayerStacks の Cargo feature と edition / xtask preset のサイズ名は、中央の数から shortcut 1 個を除きます。
+  `1536x16x32` → `1536x15x32`、`1536x32x32` → `1536x31x32`、`768x8x32` → `768x7x32` となります。
+  build の指定を新しい名前に置き換えてください。既存の NNUE ファイルはそのまま使えます。
+
 ## v1.10.2 — 2026-11-23
 
 build 時にエンジン名を変えられるようにするリリース。crates.io の `rshogi-core` は変えていない

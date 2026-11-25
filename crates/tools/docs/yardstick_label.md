@@ -22,14 +22,14 @@ labeler（NNUE 評価器 + 固定 depth）の**決定的探索**で評価し、�
 # 1536 HalfKaHmMerged none（既定 feature でビルド可）
 cargo build -p tools --bin yardstick_label --release
 
-# Threat モデル（例: 1024x16x32 / 1536x16x32 の Threat）は nnue-threat と LS サイズを明示
+# Threat モデル（例: 1024x15x32 / 1536x15x32 の Threat）は nnue-threat と LS サイズを明示
 cargo build -p tools --bin yardstick_label --release \
   --no-default-features \
-  --features layerstacks-1536x16x32,nnue-threat,ft-halfka_hm_merged
+  --features layerstacks-1536x15x32,nnue-threat,ft-halfka_hm_merged
 ```
 
-default feature は LS サイズ slot として `layerstacks-1536x16x32`・`layerstacks-1536x16x64`・
-`layerstacks-2304x16x64` を含みます。それ以外のサイズ（1024 等）や Threat モデルを使う時は
+default feature は LS サイズ slot として `layerstacks-1536x15x32`・`layerstacks-1536x15x64`・
+`layerstacks-2304x15x64` を含みます。それ以外のサイズ（1024 等）や Threat モデルを使う時は
 `--no-default-features` で、そのモデルのサイズの slot を指定します。
 
 ONNX labeler モード（`--onnx-model`）は `dlshogi-onnx` feature（default 有効）でビルドすれば動きます

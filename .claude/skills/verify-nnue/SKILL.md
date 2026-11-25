@@ -67,7 +67,7 @@ tatara checkout は環境変数 `$TATARA_DIR` があればそれを使い、無�
 sed -n 's/^[^#|][^|]*| //p' crates/tools/docs/fixtures/search_only_sentinel_4pos.txt > sfens.txt
 
 # rshogi: TSV (sfen / bucket / raw / score / score_cp) を stdout、fv_scale を stderr に出す。
-# 既定 features で読めない arch (768x16x32 + Threat 等) は
+# 既定 features で読めないモデル (layerstacks-768x15x32 + Threat 等) は
 # --no-default-features --features nnue-arch,<dim>,nnue-threat[,<threat-profile>] で build する
 cargo run --release -p tools --bin eval_sfens -- \
   --nnue <net.bin> --sfens sfens.txt \
@@ -158,9 +158,9 @@ Threat profile 付き net では rshogi も同じ profile feature で build す�
 
 ```bash
 cargo build --release -p tools --no-default-features \
-  --features layerstack-arch,layerstacks-768x16x32,ft-halfka_hm_merged,nnue-threat,threat-profile-same-class
+  --features layerstack-arch,layerstacks-768x15x32,ft-halfka_hm_merged,nnue-threat,threat-profile-same-class
 cargo build --release -p rshogi-usi --no-default-features \
-  --features rshogi-core/layerstack-arch,rshogi-core/layerstacks-768x16x32,rshogi-core/ft-halfka_hm_merged,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-usi/layerstack-arch,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
+  --features rshogi-core/layerstack-arch,rshogi-core/layerstacks-768x15x32,rshogi-core/ft-halfka_hm_merged,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-usi/layerstack-arch,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
 ```
 
 `threat-profile-same-class` は対象 profile の feature に全て置き換える。

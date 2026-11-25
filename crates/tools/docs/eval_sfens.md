@@ -50,15 +50,15 @@ Linux で共有メモリの新規確保に失敗した重みは、プロセス�
 ### L2=64 の専用モデル
 
 静的 LayerStacks の解析には、モデルの寸法に合わせて
-`--features layerstacks-1024x16x64`、`--features layerstacks-1536x16x64`、
-`--features layerstacks-2304x16x64` または `--features layerstacks-3072x16x64`
+`--features layerstacks-1024x15x64`、`--features layerstacks-1536x15x64`、
+`--features layerstacks-2304x15x64` または `--features layerstacks-3072x15x64`
 をビルド時に追加する。L2 の中間出力も指定した幅で計算する。
 
-HalfKA_hm merged 1536x16x64、Threat 幅 512 のモデル向けのビルド例。
+HalfKA_hm merged 1536x15x64、Threat 幅 512 のモデル向けのビルド例。
 
 ```sh
 cargo build --release -p tools --bin eval_sfens --no-default-features \
-  --features layerstack-arch,layerstacks-1536x16x64,ft-halfka_hm_merged,nnue-threat,rshogi-core/threat-width-512,rshogi-core/mode-specific
+  --features layerstack-arch,layerstacks-1536x15x64,ft-halfka_hm_merged,nnue-threat,rshogi-core/threat-width-512,rshogi-core/mode-specific
 ```
 
 Threat 付きモデルでは、`score` (と `score_cp`) はエンジンと同じく Threat を含むが、TSV の `raw` 列と
@@ -69,7 +69,7 @@ Threat 付きモデルでは、`score` (と `score_cp`) はエンジンと同じ
 
 ### tatara との手動照合
 
-以下は HalfKA_hm merged 1536x16x64、Threat・PSQT なしの spec 付きネットを照合する例。
+以下は HalfKA_hm merged 1536x15x64、Threat・PSQT なしの spec 付きネットを照合する例。
 rshogi のルートで実行する。`NETS` に比較する `.bin` のパスを並べ、`EXTRA_SFENS` に
 平手初期局面と玉を進めた局面から合法手をランダムに指して採取した SFEN ファイルを指定する。
 4 件の sentinel だけで試す場合は `EXTRA_SFENS=/dev/null` を指定する。
@@ -78,7 +78,7 @@ rshogi のルートで実行する。`NETS` に比較する `.bin` のパスを�
 set -e
 export CARGO_BUILD_JOBS=8
 cargo build --release -p tools --bin eval_sfens --no-default-features \
-  --features rshogi-core/edition-layerstacks-halfka_hm_merged-1536x16x64-none,layerstack-arch,layerstacks-1536x16x64,ft-halfka_hm_merged
+  --features rshogi-core/edition-layerstacks-halfka_hm_merged-1536x15x64-none,layerstack-arch,layerstacks-1536x15x64,ft-halfka_hm_merged
 (cd /path/to/tatara && cargo build --release -p eval-sfen --target-dir /tmp/tatara-evalsfen-target)
 export TATARA_EVAL=/tmp/tatara-evalsfen-target/release/eval_sfen
 export RSHOGI_EVAL=target/release/eval_sfens

@@ -88,17 +88,17 @@ Git が起動できない、リポジトリを特定できない、index を読�
 cargo xtask list-editions
 
 # 1 preset を build (engines/rshogi-usi-<preset> に配置)
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-psqt
 
 # 複数 preset を順次 build (カンマ区切り or --edition 複数回)
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt,layerstacks-halfka_hm_merged-1536x16x32-threat
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-psqt,layerstacks-halfka_hm_merged-1536x15x32-threat
 cargo xtask build --edition X --edition Y
 
 # list-editions に表示される全 preset を build
 cargo xtask build --all-presets
 
 # Edition 軸と直交する opt-in feature を追加 (engines/rshogi-usi-<preset>+mimalloc に配置)
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --features mimalloc
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-none --features mimalloc
 
 # engines/ 配下の binary 一覧 + manifest を表表示
 cargo xtask list-binaries
@@ -118,14 +118,14 @@ build target で、5 カテゴリ × 複数 concrete preset の構造を持つ�
 | **HalfKX family** | 旧 NNUE 系統 (HalfKP / HalfKa\*) を dispatch | `edition-halfkx`, `edition-halfkx-any` | HalfKX 全 variant |
 | **HalfKX specific** | HalfKX 単一 architecture 専用 | `edition-halfkp-crelu`, `edition-halfka_hm_merged-screlu` | 1 architecture 固定 |
 | **LayerStack family** | LS 全 FT / size / ext を dispatch | `edition-layerstacks`, `edition-layerstacks-any-any-any` | ビルドに含む LS 構成 |
-| **LayerStack specific** | LS 単一構成専用、tournament 用 | `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt` 等 | 1 構成固定 |
+| **LayerStack specific** | LS 単一構成専用、tournament 用 | `edition-layerstacks-halfka_hm_merged-1536x15x32-psqt` 等 | 1 構成固定 |
 
 ### どれを選ぶか (典型ケース)
 
 | 状況 | 選ぶ preset | 理由 |
 |---|---|---|
 | `cargo build` で困っていない | `edition-universal` (= default) | 対応するモデルを実行時に構成 |
-| 同じ NNUE モデルで SPRT / selfplay を回したい | specific preset (例 `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt`) | モデル構成に絞った専用ビルド |
+| 同じ NNUE モデルで SPRT / selfplay を回したい | specific preset (例 `edition-layerstacks-halfka_hm_merged-1536x15x32-psqt`) | モデル構成に絞った専用ビルド |
 | HalfKX 系モデル数本を切替えながら触りたい | `edition-halfkx-any` | activation 含む全 HalfKX を 1 binary でカバー |
 | LS 系を size 違いで切替えたい | `edition-layerstacks-any-any-any` | size / ext を runtime dispatch |
 | 全 arch / 任意 size をまとめて動作確認したい | `edition-universal` | header 駆動で対応 family を 1 binary に集約できる |
@@ -160,11 +160,15 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 - LS family alias: `edition-layerstacks[-any-any-any]`
 - universal: `edition-universal`
 
+LayerStacks の `{size}` と Cargo feature `layerstacks-{size}` の中央の数は、shortcut を除いた
+`fc_0` の活性化出力の数です。たとえば `2304x15x64` は `fc_0` に活性化出力 15 個と
+shortcut 1 個を持ち、NNUE ヘッダーの `l2` は出力の合計である `16` です。
+
 ### slot 値の意味論
 
 | slot 値 | 意味 |
 |---|---|
-| 具体値 (`1536x16x32`, `psqt`, `crelu`, `halfka_hm_merged` 等) | コンパイル時固定、その値以外はサポート外 |
+| 具体値 (`1536x15x32`, `psqt`, `crelu`, `halfka_hm_merged` 等) | コンパイル時固定、その値以外はサポート外 |
 | `none` (ext slot のみ) | 拡張なしを **明示** (省略との区別) |
 | `any` | runtime dispatch、その軸の全候補を build に含める |
 
@@ -179,9 +183,9 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
   dispatch したいときは `any` を書く。
 - ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
   `_` で結合する (`psqt_threat`)。
-- `threat256` は 1536x16x64 で256列の Threat を使う静的 edition。
-- `threat512` は 1024x16x64 / 1536x16x32 / 1536x16x64 / 2304x16x64 で512列の Threat を使う静的 edition。
-  `threat768` は 1024x16x64 / 1536x16x64 / 2304x16x64 で768列の Threat を使う。形式と変換は
+- `threat256` は 1536x15x64 で256列の Threat を使う静的 edition。
+- `threat512` は 1024x15x64 / 1536x15x32 / 1536x15x64 / 2304x15x64 で512列の Threat を使う静的 edition。
+  `threat768` は 1024x15x64 / 1536x15x64 / 2304x15x64 で768列の Threat を使う。形式と変換は
   [`resize_nnue_threat`](../crates/tools/docs/resize_nnue_threat.md) を参照。
 - `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
   `edition-layerstacks-any-any-any` の短縮形。利用可能な preset は `cargo xtask list-editions` で確認する。
@@ -293,11 +297,11 @@ RSHOGI_ENGINE_NAME="RAMU 2304" cargo xtask build --edition <preset>
 
 例:
 ```
-edition=edition-layerstacks-halfka_hm_merged-1536x16x32-psqt
-  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt
+edition=edition-layerstacks-halfka_hm_merged-1536x15x32-psqt
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt
 
-edition=edition-layerstacks-halfka_hm_merged-1536x16x32-none, features=search-stats,mimalloc
-  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc+search-stats
+edition=edition-layerstacks-halfka_hm_merged-1536x15x32-none, features=search-stats,mimalloc
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-none+mimalloc+search-stats
 ```
 
 ### `cargo xtask list-editions`
@@ -313,8 +317,8 @@ edition-halfkx
 edition-halfkx-any
 edition-layerstacks
 edition-layerstacks-any-any-any
-edition-layerstacks-halfka_hm_merged-1536x16x32-none
-edition-layerstacks-halfka_hm_merged-1536x16x32-psqt
+edition-layerstacks-halfka_hm_merged-1536x15x32-none
+edition-layerstacks-halfka_hm_merged-1536x15x32-psqt
 ...
 edition-universal
 ```
@@ -326,8 +330,8 @@ edition-universal
 ```bash
 $ cargo xtask list-binaries
 BINARY                                            EDITION                                        PROFILE     COMMIT    AGE  SIZE    STATUS
-rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt    edition-layerstacks-halfka_hm_merged-1536x16x32-psqt    production  5616ea7c  2h   2.9 MB  current
-rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-threat  edition-layerstacks-halfka_hm_merged-1536x16x32-threat  production  4a34e06b  5d   2.8 MB  stale
+rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt    edition-layerstacks-halfka_hm_merged-1536x15x32-psqt    production  5616ea7c  2h   2.9 MB  current
+rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-threat  edition-layerstacks-halfka_hm_merged-1536x15x32-threat  production  4a34e06b  5d   2.8 MB  stale
 ```
 
 STATUS 列:
@@ -348,20 +352,20 @@ xtask 経由 build では `engines/<binary>.meta.toml` を同階層に書き出�
 例:
 ```toml
 schema_version = 1
-edition = "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt"
+edition = "edition-layerstacks-halfka_hm_merged-1536x15x32-psqt"
 profile = "production"
 commit = "5616ea7c056ff21b6705c0ef00ca7266b7b2849f"
 commit_dirty = false
 built_at = "2026-05-24T22:30:00+09:00"
 rustc = "rustc 1.85.0 (abc 2026-01-01)"
-binary = "rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt"
+binary = "rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt"
 ```
 
 `--features` 付きで build した場合だけ、`edition` の次に `features` が入る
 (追加なしの build では field ごと省略され、上の例と同じ内容になる):
 
 ```toml
-edition = "edition-layerstacks-halfka_hm_merged-1536x16x32-none"
+edition = "edition-layerstacks-halfka_hm_merged-1536x15x32-none"
 features = ["mimalloc"]
 ```
 
@@ -405,7 +409,7 @@ build じゃないか？」) で使う。
 
 ```bash
 cargo run --release -p xtask -- build \
-  --edition layerstacks-halfka_hm_merged-1536x16x32-none \
+  --edition layerstacks-halfka_hm_merged-1536x15x32-none \
   --profile production-profiling
 ```
 
@@ -437,18 +441,18 @@ tools (`rescore_psv`・`gensfen` など、rshogi-core の NNUE の評価・探�
 
 ## L2=64 の LayerStacks
 
-`layerstacks-halfka_hm_merged-3072x16x64-none`、
-`layerstacks-halfka_hm_merged-2304x16x64-none`、
-`layerstacks-halfka_hm_merged-1536x16x64-none`、
-`layerstacks-halfka_hm_merged-1024x16x64-none` は、L1 層の出力 16、L2 層の出力 64 (ヘッダーの `l2=16,l3=64`) の専用 edition。
+`layerstacks-halfka_hm_merged-3072x15x64-none`、
+`layerstacks-halfka_hm_merged-2304x15x64-none`、
+`layerstacks-halfka_hm_merged-1536x15x64-none`、
+`layerstacks-halfka_hm_merged-1024x15x64-none` は、L1 層の出力 16、L2 層の出力 64 (ヘッダーの `l2=16,l3=64`) の専用 edition。
 FT 幅と L2 幅がモデルに一致する edition を選ぶ。
 `edition-universal` はヘッダーから寸法を読み、L2=32 / 64 の両方を扱う。
 
 ```sh
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-3072x16x64-none --profile production
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-none --profile production
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1024x16x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-3072x15x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x15x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x15x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1024x15x64-none --profile production
 ```
 
 Threat 付きの net は、FT 幅とヘッダーの `ThreatWidth` に合う edition を選ぶ。
@@ -457,21 +461,21 @@ Threat 付きの net は、FT 幅とヘッダーの `ThreatWidth` に合う edit
 
 | FT 幅 | Threat 幅 | edition |
 |---:|---:|---|
-| 1024 | 全幅 | `layerstacks-halfka_hm_merged-1024x16x64-threat` |
-| 1024 | 512 | `layerstacks-halfka_hm_merged-1024x16x64-threat512` |
-| 1024 | 768 | `layerstacks-halfka_hm_merged-1024x16x64-threat768` |
-| 1536 | 全幅 | `layerstacks-halfka_hm_merged-1536x16x64-threat` |
-| 1536 | 256 | `layerstacks-halfka_hm_merged-1536x16x64-threat256` |
-| 1536 | 512 | `layerstacks-halfka_hm_merged-1536x16x64-threat512` |
-| 1536 | 768 | `layerstacks-halfka_hm_merged-1536x16x64-threat768` |
-| 2304 | 全幅 | `layerstacks-halfka_hm_merged-2304x16x64-threat` |
-| 2304 | 512 | `layerstacks-halfka_hm_merged-2304x16x64-threat512` |
-| 2304 | 768 | `layerstacks-halfka_hm_merged-2304x16x64-threat768` |
+| 1024 | 全幅 | `layerstacks-halfka_hm_merged-1024x15x64-threat` |
+| 1024 | 512 | `layerstacks-halfka_hm_merged-1024x15x64-threat512` |
+| 1024 | 768 | `layerstacks-halfka_hm_merged-1024x15x64-threat768` |
+| 1536 | 全幅 | `layerstacks-halfka_hm_merged-1536x15x64-threat` |
+| 1536 | 256 | `layerstacks-halfka_hm_merged-1536x15x64-threat256` |
+| 1536 | 512 | `layerstacks-halfka_hm_merged-1536x15x64-threat512` |
+| 1536 | 768 | `layerstacks-halfka_hm_merged-1536x15x64-threat768` |
+| 2304 | 全幅 | `layerstacks-halfka_hm_merged-2304x15x64-threat` |
+| 2304 | 512 | `layerstacks-halfka_hm_merged-2304x15x64-threat512` |
+| 2304 | 768 | `layerstacks-halfka_hm_merged-2304x15x64-threat768` |
 
 ```sh
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-threat --profile production
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-threat512 --profile production
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-threat768 --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x15x64-threat --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x15x64-threat512 --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x15x64-threat768 --profile production
 ```
 
 AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融合出力 kernel を使う。出力 64 は
@@ -485,7 +489,7 @@ AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融�
 
 ```sh
 cargo xtask build --edition universal --target wasm32-wasip1 --profile dev
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --target wasm32-unknown-unknown
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-none --target wasm32-unknown-unknown
 ```
 
 成果物は `target/<target>/<profile>/rshogi-usi.wasm`（dev は debug）から
@@ -511,7 +515,7 @@ WASI での `MaterialLevel=1` の起動確認には `scripts/run_wasi.mjs` を�
 ## fixed edition の WebAssembly ビルド
 
 WASI では `node scripts/check_fixed_wasm.mjs` で、5 FT の fixed
-`1536x16x32-none` edition を SIMD128 on/off の 10 構成で検証できます。
+`1536x15x32-none` edition を SIMD128 on/off の 10 構成で検証できます。
 スクリプトは `cargo build -p rshogi-usi --target wasm32-wasip1 --no-default-features`
 に edition feature を渡して実際にリンクし、各成果物に USI startup smoke を実行します。
 xtask を経由しません。準備・単一 FT の再検証・target directory は

@@ -53,9 +53,9 @@ new[block][group][j][lane][dword][byte] = old[chunk][output][byte]
 ## 検証
 
 ```sh
-cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x16x64-none,prepacked-nnue,diagnostics synthetic_fused_shapes
-cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x16x64-none,prepacked-nnue,diagnostics kernel_tests
-cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-3072x16x64-none,prepacked-nnue,diagnostics packed_fused_shapes
+cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x15x64-none,prepacked-nnue,diagnostics synthetic_fused_shapes
+cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x15x64-none,prepacked-nnue,diagnostics kernel_tests
+cargo test -j 4 -p rshogi-core --lib --no-default-features --features edition-layerstacks-halfka_hm_merged-3072x15x64-none,prepacked-nnue,diagnostics packed_fused_shapes
 ```
 
 非 ignore のテストで、合成重みの L1=1536 / 2304 / 3072、出力16 のネットワークを使い、全 9 bucket の
@@ -68,8 +68,8 @@ AVX-512 を持たない機械ではカーネルを実行せず、次の静的検
 明示的な `--target` により build script / proc macro は host 向けに構築する。
 
 ```sh
-RUSTFLAGS="-C target-feature=+avx512f,+avx512bw,+avx512vnni" CARGO_TARGET_DIR=target/avx512chk cargo check -j 4 --target x86_64-unknown-linux-gnu -p rshogi-core -p rshogi-usi --tests --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x16x64-none,prepacked-nnue,diagnostics
-RUSTFLAGS="-C target-feature=+avx512f,+avx512bw,+avx512vnni" CARGO_TARGET_DIR=target/avx512chk cargo clippy -j 4 --target x86_64-unknown-linux-gnu -p rshogi-core -p rshogi-usi --tests --no-default-features --features edition-layerstacks-halfka_hm_merged-3072x16x64-none,prepacked-nnue,diagnostics -- -D warnings
+RUSTFLAGS="-C target-feature=+avx512f,+avx512bw,+avx512vnni" CARGO_TARGET_DIR=target/avx512chk cargo check -j 4 --target x86_64-unknown-linux-gnu -p rshogi-core -p rshogi-usi --tests --no-default-features --features edition-layerstacks-halfka_hm_merged-2304x15x64-none,prepacked-nnue,diagnostics
+RUSTFLAGS="-C target-feature=+avx512f,+avx512bw,+avx512vnni" CARGO_TARGET_DIR=target/avx512chk cargo clippy -j 4 --target x86_64-unknown-linux-gnu -p rshogi-core -p rshogi-usi --tests --no-default-features --features edition-layerstacks-halfka_hm_merged-3072x15x64-none,prepacked-nnue,diagnostics -- -D warnings
 ```
 
 カーネルの実行テストには対応 ISA を有効にした build が必要。

@@ -31,21 +31,21 @@ use super::constants::{
     DEFAULT_NUM_BUCKETS, FV_SCALE_HALFKA, MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS,
     NNUE_VERSION_HALFKA, NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
 };
-#[cfg(feature = "layerstacks-768x8x32")]
+#[cfg(feature = "layerstacks-768x7x32")]
 use super::constants::{LAYER_STACK_8X32_L1_OUT, LAYER_STACK_8X32_L2_IN};
 #[cfg(any(
-    feature = "layerstacks-1536x16x32",
-    feature = "layerstacks-768x16x32",
-    feature = "layerstacks-512x16x32",
-    feature = "layerstacks-1024x16x32",
-    feature = "layerstacks-3072x16x32",
-    feature = "layerstacks-1024x16x64",
-    feature = "layerstacks-2304x16x64",
-    feature = "layerstacks-3072x16x64",
-    feature = "layerstacks-1536x16x64"
+    feature = "layerstacks-1536x15x32",
+    feature = "layerstacks-768x15x32",
+    feature = "layerstacks-512x15x32",
+    feature = "layerstacks-1024x15x32",
+    feature = "layerstacks-3072x15x32",
+    feature = "layerstacks-1024x15x64",
+    feature = "layerstacks-2304x15x64",
+    feature = "layerstacks-3072x15x64",
+    feature = "layerstacks-1536x15x64"
 ))]
 use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
-#[cfg(feature = "layerstacks-1536x32x32")]
+#[cfg(feature = "layerstacks-1536x31x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{
@@ -1039,7 +1039,7 @@ impl<
 
 // 旧 alias (HalfKaHmMerged 固定の名前): 既存 tools / tests からの参照を切らないため
 // 互換のため保持する。新規コードは `NetworkLayerStacks<L1, ..., FT>` を直接書く。
-#[cfg(all(feature = "layerstacks-1536x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1536x15x32", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks1536x16x32 = NetworkLayerStacks<
     1536,
     LAYER_STACK_16X32_L1_OUT,
@@ -1047,7 +1047,7 @@ pub type NetworkLayerStacks1536x16x32 = NetworkLayerStacks<
     32,
     HalfKaHmMergedSpec,
 >;
-#[cfg(all(feature = "layerstacks-1536x32x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1536x31x32", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks1536x32x32 = NetworkLayerStacks<
     1536,
     LAYER_STACK_32X32_L1_OUT,
@@ -1055,7 +1055,7 @@ pub type NetworkLayerStacks1536x32x32 = NetworkLayerStacks<
     64,
     HalfKaHmMergedSpec,
 >;
-#[cfg(all(feature = "layerstacks-768x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-768x15x32", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks768x16x32 = NetworkLayerStacks<
     768,
     LAYER_STACK_16X32_L1_OUT,
@@ -1063,7 +1063,7 @@ pub type NetworkLayerStacks768x16x32 = NetworkLayerStacks<
     32,
     HalfKaHmMergedSpec,
 >;
-#[cfg(all(feature = "layerstacks-768x8x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-768x7x32", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks768x8x32 = NetworkLayerStacks<
     768,
     LAYER_STACK_8X32_L1_OUT,
@@ -1071,7 +1071,7 @@ pub type NetworkLayerStacks768x8x32 = NetworkLayerStacks<
     32,
     HalfKaHmMergedSpec,
 >;
-#[cfg(all(feature = "layerstacks-512x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-512x15x32", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks512x16x32 = NetworkLayerStacks<
     512,
     LAYER_STACK_16X32_L1_OUT,
@@ -1079,7 +1079,7 @@ pub type NetworkLayerStacks512x16x32 = NetworkLayerStacks<
     32,
     HalfKaHmMergedSpec,
 >;
-#[cfg(all(feature = "layerstacks-1024x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1024x15x32", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks1024x16x32 = NetworkLayerStacks<
     1024,
     LAYER_STACK_16X32_L1_OUT,
@@ -1087,7 +1087,7 @@ pub type NetworkLayerStacks1024x16x32 = NetworkLayerStacks<
     32,
     HalfKaHmMergedSpec,
 >;
-#[cfg(all(feature = "layerstacks-3072x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-3072x15x32", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks3072x16x32 = NetworkLayerStacks<
     3072,
     LAYER_STACK_16X32_L1_OUT,
@@ -1095,7 +1095,7 @@ pub type NetworkLayerStacks3072x16x32 = NetworkLayerStacks<
     32,
     HalfKaHmMergedSpec,
 >;
-#[cfg(all(feature = "layerstacks-1024x16x64", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1024x15x64", feature = "ft-halfka_hm_merged"))]
 /// HalfKaHmMerged の固定寸法 1024×16×64 の LayerStacks。
 pub type NetworkLayerStacks1024x16x64 = NetworkLayerStacks<
     1024,
@@ -1105,7 +1105,7 @@ pub type NetworkLayerStacks1024x16x64 = NetworkLayerStacks<
     HalfKaHmMergedSpec,
     64,
 >;
-#[cfg(all(feature = "layerstacks-2304x16x64", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-2304x15x64", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks2304x16x64 = NetworkLayerStacks<
     2304,
     LAYER_STACK_16X32_L1_OUT,
@@ -1114,7 +1114,7 @@ pub type NetworkLayerStacks2304x16x64 = NetworkLayerStacks<
     HalfKaHmMergedSpec,
     64,
 >;
-#[cfg(all(feature = "layerstacks-3072x16x64", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-3072x15x64", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks3072x16x64 = NetworkLayerStacks<
     3072,
     LAYER_STACK_16X32_L1_OUT,
@@ -1123,7 +1123,7 @@ pub type NetworkLayerStacks3072x16x64 = NetworkLayerStacks<
     HalfKaHmMergedSpec,
     64,
 >;
-#[cfg(all(feature = "layerstacks-1536x16x64", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1536x15x64", feature = "ft-halfka_hm_merged"))]
 pub type NetworkLayerStacks1536x16x64 = NetworkLayerStacks<
     1536,
     LAYER_STACK_16X32_L1_OUT,
@@ -1146,70 +1146,70 @@ pub type NetworkLayerStacks1536x16x64 = NetworkLayerStacks<
 /// バリアントを同時有効にすると dispatch match の overhead が出る (実測 ~5%)。
 #[derive(Clone)]
 pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
-    #[cfg(feature = "layerstacks-1536x16x32")]
+    #[cfg(feature = "layerstacks-1536x15x32")]
     L1536x16x32(
         Box<NetworkLayerStacks<1536, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
     ),
-    #[cfg(feature = "layerstacks-1536x32x32")]
+    #[cfg(feature = "layerstacks-1536x31x32")]
     L1536x32x32(
         Box<NetworkLayerStacks<1536, LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN, 64, FT>>,
     ),
-    #[cfg(feature = "layerstacks-1024x16x32")]
+    #[cfg(feature = "layerstacks-1024x15x32")]
     L1024x16x32(
         Box<NetworkLayerStacks<1024, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
     ),
-    #[cfg(feature = "layerstacks-3072x16x32")]
+    #[cfg(feature = "layerstacks-3072x15x32")]
     L3072x16x32(
         Box<NetworkLayerStacks<3072, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
     ),
-    #[cfg(feature = "layerstacks-1024x16x64")]
+    #[cfg(feature = "layerstacks-1024x15x64")]
     L1024x16x64(
         Box<
             NetworkLayerStacks<1024, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT, 64>,
         >,
     ),
-    #[cfg(feature = "layerstacks-2304x16x64")]
+    #[cfg(feature = "layerstacks-2304x15x64")]
     L2304x16x64(
         Box<
             NetworkLayerStacks<2304, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT, 64>,
         >,
     ),
-    #[cfg(feature = "layerstacks-3072x16x64")]
+    #[cfg(feature = "layerstacks-3072x15x64")]
     L3072x16x64(
         Box<
             NetworkLayerStacks<3072, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT, 64>,
         >,
     ),
-    #[cfg(feature = "layerstacks-1536x16x64")]
+    #[cfg(feature = "layerstacks-1536x15x64")]
     L1536x16x64(
         Box<
             NetworkLayerStacks<1536, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT, 64>,
         >,
     ),
-    #[cfg(feature = "layerstacks-768x16x32")]
+    #[cfg(feature = "layerstacks-768x15x32")]
     L768x16x32(
         Box<NetworkLayerStacks<768, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
     ),
-    #[cfg(feature = "layerstacks-768x8x32")]
+    #[cfg(feature = "layerstacks-768x7x32")]
     L768x8x32(
         Box<NetworkLayerStacks<768, LAYER_STACK_8X32_L1_OUT, LAYER_STACK_8X32_L2_IN, 32, FT>>,
     ),
-    #[cfg(feature = "layerstacks-512x16x32")]
+    #[cfg(feature = "layerstacks-512x15x32")]
     L512x16x32(
         Box<NetworkLayerStacks<512, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
     ),
     #[cfg(not(any(
-        feature = "layerstacks-1536x16x32",
-        feature = "layerstacks-1536x32x32",
-        feature = "layerstacks-768x16x32",
-        feature = "layerstacks-768x8x32",
-        feature = "layerstacks-512x16x32",
-        feature = "layerstacks-1024x16x32",
-        feature = "layerstacks-3072x16x32",
-        feature = "layerstacks-1024x16x64",
-        feature = "layerstacks-2304x16x64",
-        feature = "layerstacks-3072x16x64",
-        feature = "layerstacks-1536x16x64",
+        feature = "layerstacks-1536x15x32",
+        feature = "layerstacks-1536x31x32",
+        feature = "layerstacks-768x15x32",
+        feature = "layerstacks-768x7x32",
+        feature = "layerstacks-512x15x32",
+        feature = "layerstacks-1024x15x32",
+        feature = "layerstacks-3072x15x32",
+        feature = "layerstacks-1024x15x64",
+        feature = "layerstacks-2304x15x64",
+        feature = "layerstacks-3072x15x64",
+        feature = "layerstacks-1536x15x64",
     )))]
     _Unused(std::convert::Infallible, PhantomData<FT>),
 }
@@ -1221,40 +1221,40 @@ pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
 macro_rules! ls_match_size {
     ($val:expr, $pat:ident => $body:expr) => {
         match $val {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             LsNetByFt::L1536x16x32($pat) => $body,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             LsNetByFt::L1536x32x32($pat) => $body,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             LsNetByFt::L768x16x32($pat) => $body,
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             LsNetByFt::L768x8x32($pat) => $body,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             LsNetByFt::L512x16x32($pat) => $body,
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             LsNetByFt::L1024x16x32($pat) => $body,
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             LsNetByFt::L3072x16x32($pat) => $body,
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             LsNetByFt::L1024x16x64($pat) => $body,
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             LsNetByFt::L2304x16x64($pat) => $body,
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             LsNetByFt::L3072x16x64($pat) => $body,
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             LsNetByFt::L1536x16x64($pat) => $body,
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-1024x16x64",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64",
+                feature = "layerstacks-1536x15x32",
+                feature = "layerstacks-1536x31x32",
+                feature = "layerstacks-768x15x32",
+                feature = "layerstacks-768x7x32",
+                feature = "layerstacks-512x15x32",
+                feature = "layerstacks-1024x15x32",
+                feature = "layerstacks-3072x15x32",
+                feature = "layerstacks-1024x15x64",
+                feature = "layerstacks-2304x15x64",
+                feature = "layerstacks-3072x15x64",
+                feature = "layerstacks-1536x15x64",
             )))]
             _ => unreachable!("no LayerStacks size variant enabled"),
         }
@@ -1265,40 +1265,40 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             Self::L1536x16x32(_) => 1536,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             Self::L1536x32x32(_) => 1536,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             Self::L768x16x32(_) => 768,
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             Self::L768x8x32(_) => 768,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             Self::L512x16x32(_) => 512,
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             Self::L1024x16x32(_) => 1024,
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             Self::L3072x16x32(_) => 3072,
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             Self::L1024x16x64(_) => 1024,
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => 2304,
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => 3072,
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             Self::L1536x16x64(_) => 1536,
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-1024x16x64",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64",
+                feature = "layerstacks-1536x15x32",
+                feature = "layerstacks-1536x31x32",
+                feature = "layerstacks-768x15x32",
+                feature = "layerstacks-768x7x32",
+                feature = "layerstacks-512x15x32",
+                feature = "layerstacks-1024x15x32",
+                feature = "layerstacks-3072x15x32",
+                feature = "layerstacks-1024x15x64",
+                feature = "layerstacks-2304x15x64",
+                feature = "layerstacks-3072x15x64",
+                feature = "layerstacks-1536x15x64",
             )))]
             _ => unreachable!("no LayerStacks size variant enabled"),
         }
@@ -1307,40 +1307,40 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     /// (L1, L2, L3) を取得
     pub fn architecture_dims(&self) -> (usize, usize, usize) {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             Self::L1536x16x32(_) => (1536, 16, 32),
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             Self::L1536x32x32(_) => (1536, 32, 32),
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             Self::L768x16x32(_) => (768, 16, 32),
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             Self::L768x8x32(_) => (768, 8, 32),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             Self::L512x16x32(_) => (512, 16, 32),
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             Self::L1024x16x32(_) => (1024, 16, 32),
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             Self::L3072x16x32(_) => (3072, 16, 32),
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             Self::L1024x16x64(_) => (1024, 16, 64),
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => (2304, 16, 64),
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => (3072, 16, 64),
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             Self::L1536x16x64(_) => (1536, 16, 64),
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-1024x16x64",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64",
+                feature = "layerstacks-1536x15x32",
+                feature = "layerstacks-1536x31x32",
+                feature = "layerstacks-768x15x32",
+                feature = "layerstacks-768x7x32",
+                feature = "layerstacks-512x15x32",
+                feature = "layerstacks-1024x15x32",
+                feature = "layerstacks-3072x15x32",
+                feature = "layerstacks-1024x15x64",
+                feature = "layerstacks-2304x15x64",
+                feature = "layerstacks-3072x15x64",
+                feature = "layerstacks-1536x15x64",
             )))]
             _ => unreachable!("no LayerStacks size variant enabled"),
         }
@@ -1410,7 +1410,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
         match (l1, l2, l3) {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             (1536, 16, 32) => {
                 let net = NetworkLayerStacks::<
                     1536,
@@ -1426,7 +1426,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L1536x16x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             (1536, 32, 32) => {
                 let net = NetworkLayerStacks::<
                     1536,
@@ -1442,7 +1442,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L1536x32x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             (768, 16, 32) => {
                 let net = NetworkLayerStacks::<
                     768,
@@ -1458,7 +1458,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L768x16x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             (768, 8, 32) => {
                 let net = NetworkLayerStacks::<
                     768,
@@ -1474,7 +1474,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L768x8x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             (512, 16, 32) => {
                 let net = NetworkLayerStacks::<
                     512,
@@ -1490,7 +1490,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L512x16x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             (1024, 16, 32) => {
                 let net = NetworkLayerStacks::<
                     1024,
@@ -1506,7 +1506,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L1024x16x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             (3072, 16, 32) => {
                 let net = NetworkLayerStacks::<
                     3072,
@@ -1522,7 +1522,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L3072x16x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             (1024, 16, 64) => {
                 let net = NetworkLayerStacks::<
                     1024,
@@ -1539,7 +1539,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L1024x16x64(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             (2304, 16, 64) => {
                 let net = NetworkLayerStacks::<
                     2304,
@@ -1556,7 +1556,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L2304x16x64(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             (3072, 16, 64) => {
                 let net = NetworkLayerStacks::<
                     3072,
@@ -1573,7 +1573,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L3072x16x64(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             (1536, 16, 64) => {
                 let net = NetworkLayerStacks::<
                     1536,
@@ -1652,7 +1652,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         // すべての any(all(...)) を C(N,2) に揃えて同期更新すること (match arm は
         // item ではないため共通 cfg を file-local macro に括り出せない)。
         match (self, stack) {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             (
                 Self::L1536x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
@@ -1660,7 +1660,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             (
                 Self::L1536x32x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
@@ -1668,7 +1668,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             (
                 Self::L768x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(st),
@@ -1676,7 +1676,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             (
                 Self::L768x8x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x8x32(st),
@@ -1684,7 +1684,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             (
                 Self::L512x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
@@ -1692,7 +1692,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             (
                 Self::L1024x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(st),
@@ -1700,7 +1700,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             (
                 Self::L3072x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x32(st),
@@ -1708,7 +1708,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             (
                 Self::L1024x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x64(st),
@@ -1716,7 +1716,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             (
                 Self::L2304x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L2304x16x64(st),
@@ -1724,7 +1724,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             (
                 Self::L3072x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x64(st),
@@ -1732,7 +1732,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             (
                 Self::L1536x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x64(st),
@@ -1741,64 +1741,64 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 None => net.evaluate(pos, &st.current().accumulator),
             },
             #[cfg(any(
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x32x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x8x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x8x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-768x8x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-2304x16x64", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-3072x16x64", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-2304x16x64", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-3072x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-3072x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-3072x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x31x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x7x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x7x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-768x7x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-2304x15x64", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-3072x15x64", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-2304x15x64", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-3072x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-3072x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-3072x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-1536x15x64"),
                 all(
-                    feature = "layerstacks-1024x16x64",
+                    feature = "layerstacks-1024x15x64",
                     any(
-                        feature = "layerstacks-1536x16x32",
-                        feature = "layerstacks-1536x32x32",
-                        feature = "layerstacks-768x16x32",
-                        feature = "layerstacks-768x8x32",
-                        feature = "layerstacks-512x16x32",
-                        feature = "layerstacks-1024x16x32",
-                        feature = "layerstacks-3072x16x32",
-                        feature = "layerstacks-2304x16x64",
-                        feature = "layerstacks-3072x16x64",
-                        feature = "layerstacks-1536x16x64",
+                        feature = "layerstacks-1536x15x32",
+                        feature = "layerstacks-1536x31x32",
+                        feature = "layerstacks-768x15x32",
+                        feature = "layerstacks-768x7x32",
+                        feature = "layerstacks-512x15x32",
+                        feature = "layerstacks-1024x15x32",
+                        feature = "layerstacks-3072x15x32",
+                        feature = "layerstacks-2304x15x64",
+                        feature = "layerstacks-3072x15x64",
+                        feature = "layerstacks-1536x15x64",
                     )
                 ),
             ))]
@@ -1822,127 +1822,127 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         // mutable borrow されるため arm 内では参照できない)。2 サイズ以上 enable の
         // ときだけ mismatch arm が到達可能なので同じ cfg gate を共有する。
         #[cfg(any(
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x32x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x8x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x8x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-768x8x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-2304x16x64", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-3072x16x64", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-2304x16x64", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-3072x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-3072x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-3072x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x31x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x7x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x7x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-768x7x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-2304x15x64", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-3072x15x64", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-2304x15x64", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-3072x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-3072x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-3072x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-1536x15x64"),
             all(
-                feature = "layerstacks-1024x16x64",
+                feature = "layerstacks-1024x15x64",
                 any(
-                    feature = "layerstacks-1536x16x32",
-                    feature = "layerstacks-1536x32x32",
-                    feature = "layerstacks-768x16x32",
-                    feature = "layerstacks-768x8x32",
-                    feature = "layerstacks-512x16x32",
-                    feature = "layerstacks-1024x16x32",
-                    feature = "layerstacks-3072x16x32",
-                    feature = "layerstacks-2304x16x64",
-                    feature = "layerstacks-3072x16x64",
-                    feature = "layerstacks-1536x16x64",
+                    feature = "layerstacks-1536x15x32",
+                    feature = "layerstacks-1536x31x32",
+                    feature = "layerstacks-768x15x32",
+                    feature = "layerstacks-768x7x32",
+                    feature = "layerstacks-512x15x32",
+                    feature = "layerstacks-1024x15x32",
+                    feature = "layerstacks-3072x15x32",
+                    feature = "layerstacks-2304x15x64",
+                    feature = "layerstacks-3072x15x64",
+                    feature = "layerstacks-1536x15x64",
                 )
             ),
         ))]
         let net_dims = self.architecture_dims();
         #[cfg(any(
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x32x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x8x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x8x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-768x8x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-512x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-1024x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-2304x16x64", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-3072x16x64", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-2304x16x64", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-768x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-768x8x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-512x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x32"),
-            all(feature = "layerstacks-3072x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-3072x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-3072x16x32", feature = "layerstacks-1536x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
-            all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x31x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x7x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x7x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-768x7x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-512x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-1024x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-2304x15x64", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-3072x15x64", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-2304x15x64", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-768x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-768x7x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-512x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x32"),
+            all(feature = "layerstacks-3072x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-3072x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-3072x15x32", feature = "layerstacks-1536x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-2304x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x64"),
+            all(feature = "layerstacks-1024x15x32", feature = "layerstacks-1536x15x64"),
             all(
-                feature = "layerstacks-1024x16x64",
+                feature = "layerstacks-1024x15x64",
                 any(
-                    feature = "layerstacks-1536x16x32",
-                    feature = "layerstacks-1536x32x32",
-                    feature = "layerstacks-768x16x32",
-                    feature = "layerstacks-768x8x32",
-                    feature = "layerstacks-512x16x32",
-                    feature = "layerstacks-1024x16x32",
-                    feature = "layerstacks-3072x16x32",
-                    feature = "layerstacks-2304x16x64",
-                    feature = "layerstacks-3072x16x64",
-                    feature = "layerstacks-1536x16x64",
+                    feature = "layerstacks-1536x15x32",
+                    feature = "layerstacks-1536x31x32",
+                    feature = "layerstacks-768x15x32",
+                    feature = "layerstacks-768x7x32",
+                    feature = "layerstacks-512x15x32",
+                    feature = "layerstacks-1024x15x32",
+                    feature = "layerstacks-3072x15x32",
+                    feature = "layerstacks-2304x15x64",
+                    feature = "layerstacks-3072x15x64",
+                    feature = "layerstacks-1536x15x64",
                 )
             ),
         ))]
@@ -1962,77 +1962,77 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         }
 
         match (self, stack) {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             (
                 Self::L1536x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
             ) => {
                 do_update!(net, st, L1536x16x32);
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             (
                 Self::L1536x32x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
             ) => {
                 do_update!(net, st, L1536x32x32);
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             (
                 Self::L768x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(st),
             ) => {
                 do_update!(net, st, L768x16x32);
             }
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             (
                 Self::L768x8x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x8x32(st),
             ) => {
                 do_update!(net, st, L768x8x32);
             }
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             (
                 Self::L512x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
             ) => {
                 do_update!(net, st, L512x16x32);
             }
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             (
                 Self::L1024x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(st),
             ) => {
                 do_update!(net, st, L1024x16x32);
             }
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             (
                 Self::L3072x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x32(st),
             ) => {
                 do_update!(net, st, L3072x16x32);
             }
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             (
                 Self::L1024x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x64(st),
             ) => {
                 do_update!(net, st, L1024x16x64);
             }
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             (
                 Self::L2304x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L2304x16x64(st),
             ) => {
                 do_update!(net, st, L2304x16x64);
             }
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             (
                 Self::L3072x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x64(st),
             ) => {
                 do_update!(net, st, L3072x16x64);
             }
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             (
                 Self::L1536x16x64(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x64(st),
@@ -2040,64 +2040,64 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 do_update!(net, st, L1536x16x64);
             }
             #[cfg(any(
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x32x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x8x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-768x8x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-768x8x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-512x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-1024x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-2304x16x64", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-3072x16x64", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-2304x16x64", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1536x32x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-768x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-768x8x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-512x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x32"),
-                all(feature = "layerstacks-3072x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-3072x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-3072x16x32", feature = "layerstacks-1536x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-2304x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-3072x16x64"),
-                all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x31x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-768x7x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-768x7x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-768x7x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-512x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-1024x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1536x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-2304x15x64", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-3072x15x64", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-2304x15x64", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1536x31x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-768x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-768x7x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-512x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x32"),
+                all(feature = "layerstacks-3072x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-3072x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-3072x15x32", feature = "layerstacks-1536x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-2304x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-3072x15x64"),
+                all(feature = "layerstacks-1024x15x32", feature = "layerstacks-1536x15x64"),
                 all(
-                    feature = "layerstacks-1024x16x64",
+                    feature = "layerstacks-1024x15x64",
                     any(
-                        feature = "layerstacks-1536x16x32",
-                        feature = "layerstacks-1536x32x32",
-                        feature = "layerstacks-768x16x32",
-                        feature = "layerstacks-768x8x32",
-                        feature = "layerstacks-512x16x32",
-                        feature = "layerstacks-1024x16x32",
-                        feature = "layerstacks-3072x16x32",
-                        feature = "layerstacks-2304x16x64",
-                        feature = "layerstacks-3072x16x64",
-                        feature = "layerstacks-1536x16x64",
+                        feature = "layerstacks-1536x15x32",
+                        feature = "layerstacks-1536x31x32",
+                        feature = "layerstacks-768x15x32",
+                        feature = "layerstacks-768x7x32",
+                        feature = "layerstacks-512x15x32",
+                        feature = "layerstacks-1024x15x32",
+                        feature = "layerstacks-3072x15x32",
+                        feature = "layerstacks-2304x15x64",
+                        feature = "layerstacks-3072x15x64",
+                        feature = "layerstacks-1536x15x64",
                     )
                 ),
             ))]
@@ -2112,82 +2112,82 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     #[cfg(feature = "layerstack-arch")]
     pub fn new_acc_stack(&self) -> super::accumulator_layer_stacks::LayerStacksAccStack {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             Self::L1536x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             Self::L1536x32x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             Self::L768x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<768>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             Self::L768x8x32(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L768x8x32(
                 super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<768>::new(),
             ),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             Self::L512x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<512>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             Self::L1024x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1024>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             Self::L3072x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<3072>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             Self::L1024x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x64(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1024>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L2304x16x64(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<2304>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x64(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<3072>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             Self::L1536x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x64(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
                 )
             }
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-1024x16x64",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64",
+                feature = "layerstacks-1536x15x32",
+                feature = "layerstacks-1536x31x32",
+                feature = "layerstacks-768x15x32",
+                feature = "layerstacks-768x7x32",
+                feature = "layerstacks-512x15x32",
+                feature = "layerstacks-1024x15x32",
+                feature = "layerstacks-3072x15x32",
+                feature = "layerstacks-1024x15x64",
+                feature = "layerstacks-2304x15x64",
+                feature = "layerstacks-3072x15x64",
+                feature = "layerstacks-1536x15x64",
             )))]
             _ => unreachable!("no LayerStacks size variant enabled"),
         }
@@ -2197,82 +2197,82 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     #[cfg(feature = "layerstack-arch")]
     pub fn new_acc_cache(&self) -> super::accumulator_layer_stacks::LayerStacksAccCache {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             Self::L1536x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1536x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             Self::L1536x32x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1536x32x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             Self::L768x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L768x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<768>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             Self::L768x8x32(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L768x8x32(
                 super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<768>::new(),
             ),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             Self::L512x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L512x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<512>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             Self::L1024x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1024x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1024>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             Self::L3072x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L3072x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<3072>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             Self::L1024x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1024x16x64(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1024>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L2304x16x64(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<2304>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L3072x16x64(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<3072>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             Self::L1536x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1536x16x64(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
                 )
             }
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-1024x16x64",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64",
+                feature = "layerstacks-1536x15x32",
+                feature = "layerstacks-1536x31x32",
+                feature = "layerstacks-768x15x32",
+                feature = "layerstacks-768x7x32",
+                feature = "layerstacks-512x15x32",
+                feature = "layerstacks-1024x15x32",
+                feature = "layerstacks-3072x15x32",
+                feature = "layerstacks-1024x15x64",
+                feature = "layerstacks-2304x15x64",
+                feature = "layerstacks-3072x15x64",
+                feature = "layerstacks-1536x15x64",
             )))]
             _ => unreachable!("no LayerStacks size variant enabled"),
         }
@@ -2284,84 +2284,84 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     #[cfg(all(feature = "layerstack-arch", feature = "diagnostics"))]
     pub fn refresh_and_evaluate_with_diagnostics(&self, pos: &Position) -> Value {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x15x32")]
             Self::L1536x16x32(net) => {
                 let mut acc = AccumulatorLayerStacks::<1536>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x31x32")]
             Self::L1536x32x32(net) => {
                 let mut acc = AccumulatorLayerStacks::<1536>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "layerstacks-768x15x32")]
             Self::L768x16x32(net) => {
                 let mut acc = AccumulatorLayerStacks::<768>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-768x8x32")]
+            #[cfg(feature = "layerstacks-768x7x32")]
             Self::L768x8x32(net) => {
                 let mut acc = AccumulatorLayerStacks::<768>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "layerstacks-512x15x32")]
             Self::L512x16x32(net) => {
                 let mut acc = AccumulatorLayerStacks::<512>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-1024x16x32")]
+            #[cfg(feature = "layerstacks-1024x15x32")]
             Self::L1024x16x32(net) => {
                 let mut acc = AccumulatorLayerStacks::<1024>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-3072x16x32")]
+            #[cfg(feature = "layerstacks-3072x15x32")]
             Self::L3072x16x32(net) => {
                 let mut acc = AccumulatorLayerStacks::<3072>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-1024x16x64")]
+            #[cfg(feature = "layerstacks-1024x15x64")]
             Self::L1024x16x64(net) => {
                 let mut acc = AccumulatorLayerStacks::<1024>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-2304x16x64")]
+            #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(net) => {
                 let mut acc = AccumulatorLayerStacks::<2304>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-3072x16x64")]
+            #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(net) => {
                 let mut acc = AccumulatorLayerStacks::<3072>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
-            #[cfg(feature = "layerstacks-1536x16x64")]
+            #[cfg(feature = "layerstacks-1536x15x64")]
             Self::L1536x16x64(net) => {
                 let mut acc = AccumulatorLayerStacks::<1536>::new();
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-1024x16x64",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64",
+                feature = "layerstacks-1536x15x32",
+                feature = "layerstacks-1536x31x32",
+                feature = "layerstacks-768x15x32",
+                feature = "layerstacks-768x7x32",
+                feature = "layerstacks-512x15x32",
+                feature = "layerstacks-1024x15x32",
+                feature = "layerstacks-3072x15x32",
+                feature = "layerstacks-1024x15x64",
+                feature = "layerstacks-2304x15x64",
+                feature = "layerstacks-3072x15x64",
+                feature = "layerstacks-1536x15x64",
             )))]
             _ => unreachable!("no LayerStacks size variant enabled"),
         }
@@ -2414,267 +2414,267 @@ pub enum LayerStacksNetwork {
 macro_rules! ls_dispatch_ft_size {
     ($net:expr, |$inner:ident| $body:expr, _ => $fallback:expr $(,)?) => {
         match $net {
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1536x16x32"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1536x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L1536x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1536x32x32"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1536x31x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L1536x32x32($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-768x16x32"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-768x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L768x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-768x8x32"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-768x7x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L768x8x32($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-512x16x32"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-512x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L512x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1024x16x32"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1024x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L1024x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-3072x16x32"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-3072x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1024x16x64"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1024x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L1024x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-2304x16x64"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-2304x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-3072x16x64"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-3072x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L3072x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1536x16x64"))]
+            #[cfg(all(feature = "nnue-effect-bucket", feature = "layerstacks-1536x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMergedEffectBucket(
                 $crate::nnue::LsNetByFt::L1536x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1536x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1536x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L1536x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1536x32x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1536x31x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L1536x32x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-768x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-768x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L768x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-768x8x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-768x7x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L768x8x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-512x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-512x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L512x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1024x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1024x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L1024x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-3072x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-3072x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1024x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1024x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L1024x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-2304x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-2304x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-3072x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-3072x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L3072x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1536x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-1536x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L1536x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1536x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1536x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L1536x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1536x32x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1536x31x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L1536x32x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-768x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-768x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L768x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-768x8x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-768x7x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L768x8x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-512x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-512x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L512x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1024x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1024x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L1024x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-3072x16x32"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-3072x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1024x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1024x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L1024x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-2304x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-2304x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-3072x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-3072x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L3072x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1536x16x64"))]
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "layerstacks-1536x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
                 $crate::nnue::LsNetByFt::L1536x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1536x16x32"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1536x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L1536x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1536x32x32"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1536x31x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L1536x32x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-768x16x32"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-768x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L768x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-768x8x32"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-768x7x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged($crate::nnue::LsNetByFt::L768x8x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-512x16x32"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-512x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L512x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1024x16x32"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1024x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L1024x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-3072x16x32"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-3072x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1024x16x64"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1024x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L1024x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-2304x16x64"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-2304x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-3072x16x64"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-3072x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L3072x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1536x16x64"))]
+            #[cfg(all(feature = "ft-halfka_merged", feature = "layerstacks-1536x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaMerged(
                 $crate::nnue::LsNetByFt::L1536x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1536x16x32"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1536x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L1536x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1536x32x32"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1536x31x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L1536x32x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-768x16x32"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-768x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit($crate::nnue::LsNetByFt::L768x16x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-768x8x32"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-768x7x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit($crate::nnue::LsNetByFt::L768x8x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-512x16x32"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-512x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit($crate::nnue::LsNetByFt::L512x16x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1024x16x32"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1024x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L1024x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-3072x16x32"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-3072x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L3072x16x32($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1024x16x64"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1024x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L1024x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-2304x16x64"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-2304x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-3072x16x64"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-3072x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L3072x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1536x16x64"))]
+            #[cfg(all(feature = "ft-halfka_split", feature = "layerstacks-1536x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaSplit(
                 $crate::nnue::LsNetByFt::L1536x16x64($inner),
             ) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1536x16x32"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1536x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1536x16x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1536x32x32"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1536x31x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1536x32x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-768x16x32"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-768x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L768x16x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-768x8x32"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-768x7x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L768x8x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-512x16x32"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-512x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L512x16x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1024x16x32"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1024x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1024x16x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-3072x16x32"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-3072x15x32"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L3072x16x32(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1024x16x64"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1024x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1024x16x64(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-2304x16x64"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-2304x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L2304x16x64(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-3072x16x64"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-3072x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L3072x16x64(
                 $inner,
             )) => $body,
-            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1536x16x64"))]
+            #[cfg(all(feature = "ft-halfkp", feature = "layerstacks-1536x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1536x16x64(
                 $inner,
             )) => $body,
@@ -2687,17 +2687,17 @@ macro_rules! ls_dispatch_ft_size {
                 feature = "ft-halfka_merged",
                 feature = "ft-halfka_split",
                 feature = "ft-halfkp",
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-768x8x32",
-                feature = "layerstacks-512x16x32",
-                feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32",
-                feature = "layerstacks-1024x16x64",
-                feature = "layerstacks-2304x16x64",
-                feature = "layerstacks-3072x16x64",
-                feature = "layerstacks-1536x16x64",
+                feature = "layerstacks-1536x15x32",
+                feature = "layerstacks-1536x31x32",
+                feature = "layerstacks-768x15x32",
+                feature = "layerstacks-768x7x32",
+                feature = "layerstacks-512x15x32",
+                feature = "layerstacks-1024x15x32",
+                feature = "layerstacks-3072x15x32",
+                feature = "layerstacks-1024x15x64",
+                feature = "layerstacks-2304x15x64",
+                feature = "layerstacks-3072x15x64",
+                feature = "layerstacks-1536x15x64",
             )))]
             _ => $fallback,
         }
@@ -3031,17 +3031,17 @@ pub(super) fn static_slot_available(
         || (matches!(feature, FeatureSet::HalfKaHmSplit) && cfg!(feature = "ft-halfka_hm_split"))
         || (matches!(feature, FeatureSet::HalfKaHmMerged) && cfg!(feature = "ft-halfka_hm_merged"));
     ft && match dims {
-        (1536, 16, 32) => cfg!(feature = "layerstacks-1536x16x32"),
-        (1536, 32, 32) => cfg!(feature = "layerstacks-1536x32x32"),
-        (768, 16, 32) => cfg!(feature = "layerstacks-768x16x32"),
-        (768, 8, 32) => cfg!(feature = "layerstacks-768x8x32"),
-        (512, 16, 32) => cfg!(feature = "layerstacks-512x16x32"),
-        (1024, 16, 32) => cfg!(feature = "layerstacks-1024x16x32"),
-        (3072, 16, 32) => cfg!(feature = "layerstacks-3072x16x32"),
-        (1024, 16, 64) => cfg!(feature = "layerstacks-1024x16x64"),
-        (2304, 16, 64) => cfg!(feature = "layerstacks-2304x16x64"),
-        (3072, 16, 64) => cfg!(feature = "layerstacks-3072x16x64"),
-        (1536, 16, 64) => cfg!(feature = "layerstacks-1536x16x64"),
+        (1536, 16, 32) => cfg!(feature = "layerstacks-1536x15x32"),
+        (1536, 32, 32) => cfg!(feature = "layerstacks-1536x31x32"),
+        (768, 16, 32) => cfg!(feature = "layerstacks-768x15x32"),
+        (768, 8, 32) => cfg!(feature = "layerstacks-768x7x32"),
+        (512, 16, 32) => cfg!(feature = "layerstacks-512x15x32"),
+        (1024, 16, 32) => cfg!(feature = "layerstacks-1024x15x32"),
+        (3072, 16, 32) => cfg!(feature = "layerstacks-3072x15x32"),
+        (1024, 16, 64) => cfg!(feature = "layerstacks-1024x15x64"),
+        (2304, 16, 64) => cfg!(feature = "layerstacks-2304x15x64"),
+        (3072, 16, 64) => cfg!(feature = "layerstacks-3072x15x64"),
+        (1536, 16, 64) => cfg!(feature = "layerstacks-1536x15x64"),
         _ => false,
     }
 }
@@ -3142,7 +3142,7 @@ mod tests {
     use super::*;
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x15x32",
         feature = "ft-halfka_hm_merged"
     ))]
     use crate::position::{Position, SFEN_HIRATE};
@@ -3295,9 +3295,9 @@ mod tests {
     #[cfg(all(feature = "nnue-threat", feature = "layerstack-arch"))]
     #[test]
     fn partial_threat_forward_matches_zero_padded_scalar_and_avx512_lane_model() {
-        const N: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+        const N: usize = if cfg!(feature = "layerstacks-1024x15x64") {
             1024
-        } else if cfg!(feature = "layerstacks-2304x16x64") {
+        } else if cfg!(feature = "layerstacks-2304x15x64") {
             2304
         } else {
             1536
@@ -3357,17 +3357,17 @@ mod tests {
     ))]
     #[test]
     fn loader_checks_threat_width_before_reading_ft() {
-        const N: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+        const N: usize = if cfg!(feature = "layerstacks-1024x15x64") {
             1024
-        } else if cfg!(feature = "layerstacks-2304x16x64") {
+        } else if cfg!(feature = "layerstacks-2304x15x64") {
             2304
         } else {
             1536
         };
         const L3: usize = if cfg!(any(
-            feature = "layerstacks-1024x16x64",
-            feature = "layerstacks-2304x16x64",
-            feature = "layerstacks-1536x16x64"
+            feature = "layerstacks-1024x15x64",
+            feature = "layerstacks-2304x15x64",
+            feature = "layerstacks-1536x15x64"
         )) {
             64
         } else {
@@ -3885,11 +3885,11 @@ mod tests {
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn synthetic_threat_evaluation_matches_scalar_for_both_sides() {
-        if cfg!(feature = "layerstacks-1024x16x64") {
+        if cfg!(feature = "layerstacks-1024x15x64") {
             synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(true);
-        } else if cfg!(feature = "layerstacks-1536x16x64") {
+        } else if cfg!(feature = "layerstacks-1536x15x64") {
             synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(true);
-        } else if cfg!(feature = "layerstacks-2304x16x64") {
+        } else if cfg!(feature = "layerstacks-2304x15x64") {
             synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(true);
         } else {
             synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(true);
@@ -3908,7 +3908,7 @@ mod tests {
     /// - Initial position score: 0 (epoch82は学習初期のため)
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x15x32",
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
@@ -4197,7 +4197,7 @@ mod tests {
 
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-512x16x32",
+        feature = "layerstacks-512x15x32",
         feature = "ft-halfka_hm_merged",
         not(feature = "nnue-effect-bucket")
     ))]

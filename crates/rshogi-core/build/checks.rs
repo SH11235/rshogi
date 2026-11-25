@@ -2,17 +2,17 @@
 // 環境変数や Cargo 連携には依存させず、`has_feature` lookup を引数で受け取る。
 
 const LAYERSTACK_FEATURES: &[&str] = &[
-    "layerstacks-1536x16x32",
-    "layerstacks-1536x32x32",
-    "layerstacks-768x16x32",
-    "layerstacks-768x8x32",
-    "layerstacks-512x16x32",
-    "layerstacks-1024x16x32",
-    "layerstacks-3072x16x32",
-    "layerstacks-1024x16x64",
-    "layerstacks-2304x16x64",
-    "layerstacks-3072x16x64",
-    "layerstacks-1536x16x64",
+    "layerstacks-1536x15x32",
+    "layerstacks-1536x31x32",
+    "layerstacks-768x15x32",
+    "layerstacks-768x7x32",
+    "layerstacks-512x15x32",
+    "layerstacks-1024x15x32",
+    "layerstacks-3072x15x32",
+    "layerstacks-1024x15x64",
+    "layerstacks-2304x15x64",
+    "layerstacks-3072x15x64",
+    "layerstacks-1536x15x64",
 ];
 
 const FT_FEATURES: &[&str] = &[
@@ -34,7 +34,7 @@ fn use_avx512bw_fused_1536(has_feature: &dyn Fn(&str) -> bool) -> bool {
     ];
     has_feature("layerstack-arch")
         && has_feature("ft-halfka_hm_merged")
-        && has_feature("layerstacks-1536x16x32")
+        && has_feature("layerstacks-1536x15x32")
         && FT_FEATURES.iter().filter(|f| has_feature(f)).count() == 1
         && LAYERSTACK_FEATURES.iter().filter(|f| has_feature(f)).count() == 1
         && excluded.iter().all(|f| !has_feature(f))
@@ -78,19 +78,19 @@ fn validate_feature_combination(
         );
     }
     let static_layerstack = mode_specific && layerstack_arch && !runtime_dimensions;
-    if threat_width_256 && !(static_layerstack && has_feature("layerstacks-1536x16x64")) {
-        return Err("threat-width-256 requires a static 1536x16x64 edition".to_owned());
+    if threat_width_256 && !(static_layerstack && has_feature("layerstacks-1536x15x64")) {
+        return Err("threat-width-256 requires a static 1536x15x64 edition".to_owned());
     }
-    let partial_width_l2_64 = has_feature("layerstacks-1024x16x64")
-        || has_feature("layerstacks-1536x16x64")
-        || has_feature("layerstacks-2304x16x64");
+    let partial_width_l2_64 = has_feature("layerstacks-1024x15x64")
+        || has_feature("layerstacks-1536x15x64")
+        || has_feature("layerstacks-2304x15x64");
     if threat_width_512
-        && !(static_layerstack && (partial_width_l2_64 || has_feature("layerstacks-1536x16x32")))
+        && !(static_layerstack && (partial_width_l2_64 || has_feature("layerstacks-1536x15x32")))
     {
-        return Err("threat-width-512 requires a static 1024x16x64, 1536x16x32, 1536x16x64 or 2304x16x64 edition".to_owned());
+        return Err("threat-width-512 requires a static 1024x15x64, 1536x15x32, 1536x15x64 or 2304x15x64 edition".to_owned());
     }
     if threat_width_768 && !(static_layerstack && partial_width_l2_64) {
-        return Err("threat-width-768 requires a static 1024x16x64, 1536x16x64 or 2304x16x64 edition".to_owned());
+        return Err("threat-width-768 requires a static 1024x15x64, 1536x15x64 or 2304x15x64 edition".to_owned());
     }
 
     if has_feature("nnue-effect-bucket") {
@@ -192,20 +192,20 @@ fn validate_feature_combination(
         }
     }
 
-    // nnue-progress-diff は L2=32 の L0=1536 系 / L0=3072 で性能向上、2304x16x64 で中立 (実測)、
+    // nnue-progress-diff は L2=32 の L0=1536 系 / L0=3072 で性能向上、2304x15x64 で中立 (実測)、
     // L0=768/512 で退行する trade-off。退行構成での誤指定を弾く。
     if has_feature("nnue-progress-diff") {
         let valid = mode_specific
-            && (has_feature("layerstacks-1536x16x32")
-                || has_feature("layerstacks-1536x32x32")
-                || has_feature("layerstacks-3072x16x32")
-                || has_feature("layerstacks-2304x16x64")
-                || has_feature("layerstacks-3072x16x64")
-                || has_feature("layerstacks-1536x16x64"));
+            && (has_feature("layerstacks-1536x15x32")
+                || has_feature("layerstacks-1536x31x32")
+                || has_feature("layerstacks-3072x15x32")
+                || has_feature("layerstacks-2304x15x64")
+                || has_feature("layerstacks-3072x15x64")
+                || has_feature("layerstacks-1536x15x64"));
         if !valid {
             return Err(
-                "nnue-progress-diff は mode-specific + layerstacks-1536x16x32 / layerstacks-1536x32x32 \
-                 / layerstacks-3072x16x32 / layerstacks-2304x16x64 / layerstacks-3072x16x64 / layerstacks-1536x16x64 でのみ有効です。他構成では NPS が退行します。"
+                "nnue-progress-diff は mode-specific + layerstacks-1536x15x32 / layerstacks-1536x31x32 \
+                 / layerstacks-3072x15x32 / layerstacks-2304x15x64 / layerstacks-3072x15x64 / layerstacks-1536x15x64 でのみ有効です。他構成では NPS が退行します。"
                     .to_string(),
             );
         }

@@ -8,11 +8,11 @@ pub fn for_each_model(include_l2_64: bool, mut check: impl FnMut(&str, Vec<u8>))
         for_each_halfkx_model(&mut check);
     }
     for (l1, l3, enabled) in [
-        (1536, 32, cfg!(feature = "layerstacks-1536x16x32")),
-        (1536, 64, cfg!(feature = "layerstacks-1536x16x64")),
-        (1024, 64, cfg!(feature = "layerstacks-1024x16x64")),
-        (2304, 64, cfg!(feature = "layerstacks-2304x16x64")),
-        (3072, 64, cfg!(feature = "layerstacks-3072x16x64")),
+        (1536, 32, cfg!(feature = "layerstacks-1536x15x32")),
+        (1536, 64, cfg!(feature = "layerstacks-1536x15x64")),
+        (1024, 64, cfg!(feature = "layerstacks-1024x15x64")),
+        (2304, 64, cfg!(feature = "layerstacks-2304x15x64")),
+        (3072, 64, cfg!(feature = "layerstacks-3072x15x64")),
     ] {
         if l3 == 64 && !include_l2_64 {
             continue;

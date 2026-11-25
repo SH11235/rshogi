@@ -488,8 +488,8 @@ jobs:
           CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: "-C target-feature=+simd128"
         shell: bash
         run: |
-          cargo xtask build --edition universal,layerstacks-halfka_hm_merged-1536x16x32-none --target wasm32-wasip1 --profile dev
-          for edition in universal layerstacks-halfka_hm_merged-1536x16x32-none; do
+          cargo xtask build --edition universal,layerstacks-halfka_hm_merged-1536x15x32-none --target wasm32-wasip1 --profile dev
+          for edition in universal layerstacks-halfka_hm_merged-1536x15x32-none; do
             output=$(printf 'usi\nsetoption name MaterialLevel value 1\nsetoption name USI_Hash value 1\nisready\nquit\n' | node scripts/run_wasi.mjs "engines/rshogi-usi-${edition}--wasm32-wasip1.wasm")
             printf '%s\n' "$output"
             grep -qx 'usiok' <<< "$output"

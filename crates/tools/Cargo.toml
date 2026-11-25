@@ -23,9 +23,9 @@ default = ["nnue-arch", "dlshogi-onnx", "kifu-player"]
 nnue-arch = [
     "rshogi-core/edition-universal",
     "layerstack-arch",
-    "layerstacks-1536x16x32",
-    "layerstacks-1536x16x64",
-    "layerstacks-2304x16x64",
+    "layerstacks-1536x15x32",
+    "layerstacks-1536x15x64",
+    "layerstacks-2304x15x64",
     "ft-halfkp",
     "ft-halfka_split",
     "ft-halfka_merged",
@@ -52,17 +52,17 @@ threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
 # build では、これを指定しなければ rescore_psv 等の汎用ツールだけが build される。
 layerstack-arch = ["rshogi-core/layerstack-arch"]
 # LS L1 サイズ slot
-layerstacks-1536x16x32 = ["rshogi-core/layerstacks-1536x16x32"]
-layerstacks-1536x32x32 = ["rshogi-core/layerstacks-1536x32x32"]
-layerstacks-768x16x32  = ["rshogi-core/layerstacks-768x16x32"]
-layerstacks-768x8x32   = ["rshogi-core/layerstacks-768x8x32"]
-layerstacks-512x16x32  = ["rshogi-core/layerstacks-512x16x32"]
-layerstacks-1024x16x32 = ["rshogi-core/layerstacks-1024x16x32"]
-layerstacks-3072x16x32 = ["rshogi-core/layerstacks-3072x16x32"]
-layerstacks-1024x16x64 = ["rshogi-core/layerstacks-1024x16x64"]
-layerstacks-2304x16x64 = ["rshogi-core/layerstacks-2304x16x64"]
-layerstacks-3072x16x64 = ["rshogi-core/layerstacks-3072x16x64"]
-layerstacks-1536x16x64 = ["rshogi-core/layerstacks-1536x16x64"]
+layerstacks-1536x15x32 = ["rshogi-core/layerstacks-1536x15x32"]
+layerstacks-1536x31x32 = ["rshogi-core/layerstacks-1536x31x32"]
+layerstacks-768x15x32  = ["rshogi-core/layerstacks-768x15x32"]
+layerstacks-768x7x32   = ["rshogi-core/layerstacks-768x7x32"]
+layerstacks-512x15x32  = ["rshogi-core/layerstacks-512x15x32"]
+layerstacks-1024x15x32 = ["rshogi-core/layerstacks-1024x15x32"]
+layerstacks-3072x15x32 = ["rshogi-core/layerstacks-3072x15x32"]
+layerstacks-1024x15x64 = ["rshogi-core/layerstacks-1024x15x64"]
+layerstacks-2304x15x64 = ["rshogi-core/layerstacks-2304x15x64"]
+layerstacks-3072x15x64 = ["rshogi-core/layerstacks-3072x15x64"]
+layerstacks-1536x15x64 = ["rshogi-core/layerstacks-1536x15x64"]
 # LS 拡張 slot
 nnue-psqt   = ["rshogi-core/nnue-psqt"]
 nnue-threat = ["rshogi-core/nnue-threat"]

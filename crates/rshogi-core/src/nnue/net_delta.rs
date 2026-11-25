@@ -301,7 +301,7 @@ pub mod test_utils {
                     feature = "threat-width-256",
                     feature = "threat-width-512",
                     feature = "threat-width-768",
-                    feature = "layerstacks-1024x16x64"
+                    feature = "layerstacks-1024x15x64"
                 )
             )
         ))]
@@ -432,7 +432,7 @@ pub mod test_utils {
                         feature = "threat-width-256",
                         feature = "threat-width-512",
                         feature = "threat-width-768",
-                        feature = "layerstacks-1024x16x64"
+                        feature = "layerstacks-1024x15x64"
                     )
                 )
             ))]

@@ -2013,7 +2013,7 @@ mod tests {
 
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x15x32",
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
@@ -2160,7 +2160,7 @@ mod tests {
 
     #[cfg(all(
         feature = "layerstack-arch",
-        any(feature = "layerstacks-1536x16x32", feature = "layerstacks-1024x16x64"),
+        any(feature = "layerstacks-1536x15x32", feature = "layerstacks-1024x15x64"),
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
@@ -2181,15 +2181,15 @@ mod tests {
                 assert!(matches!(selected, NNUENetwork::LayerStacks(_)));
             }
         }
-        #[cfg(feature = "layerstacks-1536x16x32")]
+        #[cfg(feature = "layerstacks-1536x15x32")]
         check(1536, 32);
-        #[cfg(feature = "layerstacks-1024x16x64")]
+        #[cfg(feature = "layerstacks-1024x15x64")]
         check(1024, 64);
     }
 
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x15x32",
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
@@ -2222,7 +2222,7 @@ mod tests {
 
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x15x32",
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
@@ -2295,7 +2295,7 @@ mod tests {
 
     #[cfg(all(
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x15x32",
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]

@@ -156,7 +156,7 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 
 ### 単一構成の build
 
-既定の `nnue-arch` は汎用実装と 1536x16x32・1536x16x64・2304x16x64、5 種の FT の静的実装を含み、
+既定の `nnue-arch` は汎用実装と 1536x15x32・1536x15x64・2304x15x64、5 種の FT の静的実装を含み、
 対応する拡張なしの LayerStacks を静的に読む。PSQT・Threat・effect bucket・
 `ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使う。
 別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読める。
@@ -174,11 +174,11 @@ rshogi-core の NNUE の評価・探索を直接呼ぶほかのツール (`gensf
 | 構成 | feature |
 |---|---|
 | HalfKX (HalfKP / HalfKA 系) | `rshogi-core/halfkx-arch,rshogi-core/halfkx-activation-<crelu\|screlu\|pairwise>,ft-<FT>` |
-| LayerStacks | `rshogi-core/layerstack-arch,layerstacks-<寸法>,ft-<FT>`、拡張があれば `nnue-psqt` / `nnue-threat` を足す |
+| LayerStacks | `rshogi-core/layerstack-arch,layerstacks-<サイズ>,ft-<FT>`、拡張があれば `nnue-psqt` / `nnue-threat` を足す |
 
 `<FT>` は `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged`、
-`<寸法>` は [NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks)の L1 構成
-(`1536x16x32` など)。LayerStacks の `layerstack-arch` は寸法と FT の slot が無いと build エラーになる。
+`<サイズ>` は `1536x15x32` などの build 名のサイズを指定します。[NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks)
+でモデルの実寸法に対応するサイズを確認できます。`layerstack-arch` はサイズと FT の slot が無いと build エラーになる。
 build に含まれない構成の NNUE は読み込み時にエラーになる。
 
 ```bash
@@ -186,10 +186,10 @@ build に含まれない構成の NNUE は読み込み時にエラーになる�
 cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-halfkp \
   --no-default-features \
   --features rshogi-core/halfkx-arch,rshogi-core/halfkx-activation-crelu,ft-halfkp
-# LayerStacks HalfKA_hm 1536x16x32、拡張なし
+# LayerStacks HalfKA_hm 1536x15x32、拡張なし
 cargo build --release -p tools --bin rescore_psv --target-dir target/rescore-ls1536 \
   --no-default-features \
-  --features rshogi-core/layerstack-arch,layerstacks-1536x16x32,ft-halfka_hm_merged
+  --features rshogi-core/layerstack-arch,layerstacks-1536x15x32,ft-halfka_hm_merged
 ```
 
 上の 2 つの build では、水匠5 と progresskpabs の LayerStacks の net を深さ 9 の探索でリスコアした出力が、

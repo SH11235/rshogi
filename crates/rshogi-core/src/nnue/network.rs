@@ -2001,40 +2001,40 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
             );
             #[cfg(feature = "nnue-progress-diff")]
             match stack {
-                #[cfg(feature = "layerstacks-1536x16x32")]
+                #[cfg(feature = "layerstacks-1536x15x32")]
                 LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-1536x32x32")]
+                #[cfg(feature = "layerstacks-1536x31x32")]
                 LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-768x16x32")]
+                #[cfg(feature = "layerstacks-768x15x32")]
                 LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-768x8x32")]
+                #[cfg(feature = "layerstacks-768x7x32")]
                 LayerStacksAccStack::L768x8x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-512x16x32")]
+                #[cfg(feature = "layerstacks-512x15x32")]
                 LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-1024x16x32")]
+                #[cfg(feature = "layerstacks-1024x15x32")]
                 LayerStacksAccStack::L1024x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-3072x16x32")]
+                #[cfg(feature = "layerstacks-3072x15x32")]
                 LayerStacksAccStack::L3072x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-1024x16x64")]
+                #[cfg(feature = "layerstacks-1024x15x64")]
                 LayerStacksAccStack::L1024x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-2304x16x64")]
+                #[cfg(feature = "layerstacks-2304x15x64")]
                 LayerStacksAccStack::L2304x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-3072x16x64")]
+                #[cfg(feature = "layerstacks-3072x15x64")]
                 LayerStacksAccStack::L3072x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
-                #[cfg(feature = "layerstacks-1536x16x64")]
+                #[cfg(feature = "layerstacks-1536x15x64")]
                 LayerStacksAccStack::L1536x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
                 #[cfg(not(any(
-                    feature = "layerstacks-1536x16x32",
-                    feature = "layerstacks-1536x32x32",
-                    feature = "layerstacks-768x16x32",
-                    feature = "layerstacks-768x8x32",
-                    feature = "layerstacks-512x16x32",
-                    feature = "layerstacks-1024x16x32",
-                    feature = "layerstacks-3072x16x32",
-                    feature = "layerstacks-1024x16x64",
-                    feature = "layerstacks-2304x16x64",
-                    feature = "layerstacks-3072x16x64",
-                    feature = "layerstacks-1536x16x64"
+                    feature = "layerstacks-1536x15x32",
+                    feature = "layerstacks-1536x31x32",
+                    feature = "layerstacks-768x15x32",
+                    feature = "layerstacks-768x7x32",
+                    feature = "layerstacks-512x15x32",
+                    feature = "layerstacks-1024x15x32",
+                    feature = "layerstacks-3072x15x32",
+                    feature = "layerstacks-1024x15x64",
+                    feature = "layerstacks-2304x15x64",
+                    feature = "layerstacks-3072x15x64",
+                    feature = "layerstacks-1536x15x64"
                 )))]
                 _ => unreachable!("no LayerStacks variant enabled"),
             }
@@ -2725,7 +2725,7 @@ mod tests {
     #[cfg(all(
         feature = "nnue-runtime-dimensions",
         feature = "layerstack-arch",
-        feature = "layerstacks-1536x16x32",
+        feature = "layerstacks-1536x15x32",
         feature = "ft-halfka_hm_merged"
     ))]
     #[test]
@@ -2869,7 +2869,7 @@ mod tests {
         all(
             feature = "layerstack-arch",
             feature = "nnue-effect-bucket",
-            feature = "layerstacks-512x16x32"
+            feature = "layerstacks-512x15x32"
         )
     ))]
     #[test]
@@ -2928,7 +2928,7 @@ mod tests {
     #[cfg(all(
         feature = "layerstack-arch",
         feature = "ft-halfka_hm_merged",
-        feature = "layerstacks-512x16x32",
+        feature = "layerstacks-512x15x32",
         not(feature = "nnue-runtime-dimensions"),
         not(feature = "nnue-psqt"),
         not(feature = "nnue-threat"),
@@ -3625,17 +3625,17 @@ mod tests {
         bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
         let (l1, l2, l3) = [
-            (cfg!(feature = "layerstacks-1536x16x32"), (1536, 16, 32)),
-            (cfg!(feature = "layerstacks-1536x32x32"), (1536, 32, 32)),
-            (cfg!(feature = "layerstacks-768x16x32"), (768, 16, 32)),
-            (cfg!(feature = "layerstacks-768x8x32"), (768, 8, 32)),
-            (cfg!(feature = "layerstacks-512x16x32"), (512, 16, 32)),
-            (cfg!(feature = "layerstacks-1024x16x32"), (1024, 16, 32)),
-            (cfg!(feature = "layerstacks-3072x16x32"), (3072, 16, 32)),
-            (cfg!(feature = "layerstacks-1024x16x64"), (1024, 16, 64)),
-            (cfg!(feature = "layerstacks-2304x16x64"), (2304, 16, 64)),
-            (cfg!(feature = "layerstacks-3072x16x64"), (3072, 16, 64)),
-            (cfg!(feature = "layerstacks-1536x16x64"), (1536, 16, 64)),
+            (cfg!(feature = "layerstacks-1536x15x32"), (1536, 16, 32)),
+            (cfg!(feature = "layerstacks-1536x31x32"), (1536, 32, 32)),
+            (cfg!(feature = "layerstacks-768x15x32"), (768, 16, 32)),
+            (cfg!(feature = "layerstacks-768x7x32"), (768, 8, 32)),
+            (cfg!(feature = "layerstacks-512x15x32"), (512, 16, 32)),
+            (cfg!(feature = "layerstacks-1024x15x32"), (1024, 16, 32)),
+            (cfg!(feature = "layerstacks-3072x15x32"), (3072, 16, 32)),
+            (cfg!(feature = "layerstacks-1024x15x64"), (1024, 16, 64)),
+            (cfg!(feature = "layerstacks-2304x15x64"), (2304, 16, 64)),
+            (cfg!(feature = "layerstacks-3072x15x64"), (3072, 16, 64)),
+            (cfg!(feature = "layerstacks-1536x15x64"), (1536, 16, 64)),
         ]
         .into_iter()
         .find_map(|(enabled, dims)| enabled.then_some(dims))
@@ -3823,13 +3823,13 @@ mod tests {
         let mut num_buckets_header = Vec::new();
         num_buckets_header.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
         num_buckets_header.extend_from_slice(&0u32.to_le_bytes());
-        let (l1, l3) = if cfg!(feature = "layerstacks-1024x16x64") {
+        let (l1, l3) = if cfg!(feature = "layerstacks-1024x15x64") {
             (1024, 64)
-        } else if cfg!(feature = "layerstacks-2304x16x64") {
+        } else if cfg!(feature = "layerstacks-2304x15x64") {
             (2304, 64)
-        } else if cfg!(feature = "layerstacks-3072x16x64") {
+        } else if cfg!(feature = "layerstacks-3072x15x64") {
             (3072, 64)
-        } else if cfg!(feature = "layerstacks-1536x16x64") {
+        } else if cfg!(feature = "layerstacks-1536x15x64") {
             (1536, 64)
         } else {
             (1536, 32)
