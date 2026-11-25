@@ -31,7 +31,7 @@ mod spsa_schedule_validation;
 // bin が無くて落ちる。合成 net も HalfKaHmMerged × 1536x16x32 固定なので、その構成に限る。
 #[cfg(all(
     feature = "layerstack-arch",
-    feature = "layerstacks-1536x16x32",
+    feature = "layerstacks-1536x15x32",
     feature = "ft-halfka_hm_merged"
 ))]
 mod static_layer_stacks_load;
@@ -47,7 +47,7 @@ mod csa_terminal_outcomes;
 
 #[cfg(all(
     feature = "layerstack-arch",
-    feature = "layerstacks-1536x16x64",
+    feature = "layerstacks-1536x15x64",
     feature = "ft-halfka_hm_merged"
 ))]
 mod eval_sfens_spec;

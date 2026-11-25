@@ -171,7 +171,7 @@ NNUE の構成ごとのバイナリを `engines/` に並べて管理したい場
 cargo xtask list-editions
 
 # 特定 preset を build (engines/rshogi-usi-<edition> に配置 + .meta.toml 記録)
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-psqt
 
 # 複数 preset を一気に build
 cargo xtask build --edition X,Y

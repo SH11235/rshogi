@@ -22,7 +22,7 @@ edition-universal = [
 ]
 mode-universal = []
 nnue-runtime-dimensions = []
-layerstacks-1536x16x32 = []
+layerstacks-1536x15x32 = []
 threat-profile-same-class = []
 
 [dependencies]
@@ -39,7 +39,7 @@ fn neutral_features_are_dropped_and_unknown_ones_count() {
         "edition-universal",
         "mode-universal",
         "nnue-runtime-dimensions",
-        "layerstacks-1536x16x32",
+        "layerstacks-1536x15x32",
         "threat-profile-same-class",
         "serde",
     ]);
@@ -83,11 +83,11 @@ fn real_manifest_lists_every_feature_and_default_build_is_neutral() {
     assert!(result_features(&manifest, &has).is_empty());
     let specific = |name: &str| {
         [
-            "edition-layerstacks-halfka_hm_merged-1536x16x32-none",
+            "edition-layerstacks-halfka_hm_merged-1536x15x32-none",
             "mode-specific",
             "layerstack-arch",
             "ft-halfka_hm_merged",
-            "layerstacks-1536x16x32",
+            "layerstacks-1536x15x32",
             "nnue-progress-diff",
             "use-lazy-evaluate",
         ]

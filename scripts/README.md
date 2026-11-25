@@ -113,7 +113,7 @@ sudo perf report -i perf_reuse.data
 
 ## fixed edition の WASI 起動検証
 
-`node scripts/check_fixed_wasm.mjs` は 5 FT の `1536x16x32-none` edition を、
+`node scripts/check_fixed_wasm.mjs` は 5 FT の `1536x15x32-none` edition を、
 SIMD128 無効・有効の順に direct `cargo build` し、各 build の直後に Node WASI で起動を検証します。
 全処理は直列で、Cargo は jobs=2 です。Node.js 20 以降と、リポジトリで指定した Rust toolchain の
 `wasm32-wasip1` target が必要です。target は事前に `rustup target add wasm32-wasip1` で追加してください。

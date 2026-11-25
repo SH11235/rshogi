@@ -45,17 +45,17 @@
 #[cfg(all(
     feature = "layerstack-arch",
     not(any(
-        feature = "layerstacks-1536x16x32",
-        feature = "layerstacks-1536x32x32",
-        feature = "layerstacks-768x16x32",
-        feature = "layerstacks-768x8x32",
-        feature = "layerstacks-512x16x32",
-        feature = "layerstacks-1024x16x32",
-        feature = "layerstacks-3072x16x32",
-        feature = "layerstacks-1024x16x64",
-        feature = "layerstacks-2304x16x64",
-        feature = "layerstacks-3072x16x64",
-        feature = "layerstacks-1536x16x64"
+        feature = "layerstacks-1536x15x32",
+        feature = "layerstacks-1536x31x32",
+        feature = "layerstacks-768x15x32",
+        feature = "layerstacks-768x7x32",
+        feature = "layerstacks-512x15x32",
+        feature = "layerstacks-1024x15x32",
+        feature = "layerstacks-3072x15x32",
+        feature = "layerstacks-1024x15x64",
+        feature = "layerstacks-2304x15x64",
+        feature = "layerstacks-3072x15x64",
+        feature = "layerstacks-1536x15x64"
     ))
 ))]
 compile_error!(

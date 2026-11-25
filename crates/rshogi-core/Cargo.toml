@@ -107,18 +107,18 @@ layerstack-arch     = []
 halfkx-arch = []
 
 # LayerStack network L1 サイズ slot
-layerstacks-1536x16x32 = []
-layerstacks-1536x32x32 = []
-layerstacks-768x16x32  = []
-layerstacks-768x8x32   = []
-layerstacks-512x16x32  = []
-layerstacks-1024x16x32 = []
-layerstacks-3072x16x32 = []
-layerstacks-1024x16x64 = []
-layerstacks-2304x16x64 = []
+layerstacks-1536x15x32 = []
+layerstacks-1536x31x32 = []
+layerstacks-768x15x32  = []
+layerstacks-768x7x32   = []
+layerstacks-512x15x32  = []
+layerstacks-1024x15x32 = []
+layerstacks-3072x15x32 = []
+layerstacks-1024x15x64 = []
+layerstacks-2304x15x64 = []
 layerstacks-2304-sparse-l1 = []
-layerstacks-3072x16x64 = []
-layerstacks-1536x16x64 = []
+layerstacks-3072x15x64 = []
+layerstacks-1536x15x64 = []
 
 # LayerStack 拡張 slot (psqt / threat)
 # - nnue-psqt:   AccumulatorLayerStacks に psqt_accumulation を含める。PSQT モデル読み込み可。
@@ -166,11 +166,11 @@ mode-specific  = []
 # NNUE progresskpabs バケットの差分更新最適化
 # - 有効時: StackEntry に progress_sum/computed_progress フィールド追加、
 #   ensure_progress_bucket で DirtyPiece 差分から O(1) 更新
-# - 実測: L2=32 の L0=1536 系 / L0=3072 で性能向上、2304x16x64 は命令数/node が減り
+# - 実測: L2=32 の L0=1536 系 / L0=3072 で性能向上、2304x15x64 は命令数/node が減り
 #   cycles/node は中立、L0=768/512 で退行する trade-off
-# - 適用条件: build.rs で mode-specific + layerstacks-1536x16x32 / layerstacks-1536x32x32 /
-#   layerstacks-3072x16x32 / layerstacks-2304x16x64 / layerstacks-3072x16x64 /
-#   layerstacks-1536x16x64 に限定
+# - 適用条件: build.rs で mode-specific + layerstacks-1536x15x32 / layerstacks-1536x31x32 /
+#   layerstacks-3072x15x32 / layerstacks-2304x15x64 / layerstacks-3072x15x64 /
+#   layerstacks-1536x15x64 に限定
 #   (mode-* が未指定の互換 build では check 緩和、user 責任で組合せ可)
 nnue-progress-diff = []
 
@@ -200,7 +200,7 @@ edition-layerstacks             = ["edition-layerstacks-any-any-any"]
 edition-layerstacks-any-any-any = [
   "mode-family", "layerstack-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32", "layerstacks-3072x16x32", "layerstacks-1024x16x64", "layerstacks-2304x16x64", "layerstacks-3072x16x64", "layerstacks-1536x16x64",
+  "layerstacks-1536x15x32", "layerstacks-1536x31x32", "layerstacks-768x15x32", "layerstacks-768x7x32", "layerstacks-512x15x32", "layerstacks-1024x15x32", "layerstacks-3072x15x32", "layerstacks-1024x15x64", "layerstacks-2304x15x64", "layerstacks-3072x15x64", "layerstacks-1536x15x64",
   "nnue-psqt", "nnue-threat",
 ]
 
@@ -221,143 +221,143 @@ edition-halfka_hm_merged-screlu = [
   "ft-halfka_hm_merged", "halfkx-activation-screlu",
 ]
 
-# LayerStack specific (1536x16x32、全 ext 組合せ)。L0=1536 系は progress-diff 同梱。
-edition-layerstacks-halfka_hm_merged-1536x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x32",
+# LayerStack specific (1536x15x32、全 ext 組合せ)。L0=1536 系は progress-diff 同梱。
+edition-layerstacks-halfka_hm_merged-1536x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x15x32",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_hm_merged-1536x16x32-psqt = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x32", "nnue-psqt",
+edition-layerstacks-halfka_hm_merged-1536x15x32-psqt = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x15x32", "nnue-psqt",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_hm_merged-1536x16x32-threat512 = ["edition-layerstacks-halfka_hm_merged-1536x16x32-threat", "threat-width-512"]
-edition-layerstacks-halfka_hm_merged-1536x16x32-threat = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x32", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1536x15x32-threat512 = ["edition-layerstacks-halfka_hm_merged-1536x15x32-threat", "threat-width-512"]
+edition-layerstacks-halfka_hm_merged-1536x15x32-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x15x32", "nnue-threat",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_hm_merged-1536x16x32-psqt_threat = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x32",
+edition-layerstacks-halfka_hm_merged-1536x15x32-psqt_threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x15x32",
   "nnue-psqt", "nnue-threat",
   "nnue-progress-diff",
 ]
 # threat 版に full-symdedup profile を束ねた変種 (dims は -threat と同一、canonical-dead
 # 対称 edge を列挙時に drop)。engine と net の profile 一致は EvalFile load 時の
 # THREAT_PROFILE_ID 照合で reject される。
-edition-layerstacks-halfka_hm_merged-1536x16x32-threat_symdedup = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x32", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1536x15x32-threat_symdedup = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x15x32", "nnue-threat",
   "threat-profile-full-symdedup",
   "nnue-progress-diff",
 ]
 
-# LayerStack specific (1536x32x32、none 1 構成のみ最初に整備)。L0=1536 系。
-edition-layerstacks-halfka_hm_merged-1536x32x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x32x32",
+# LayerStack specific (1536x31x32、拡張なし)。
+edition-layerstacks-halfka_hm_merged-1536x31x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x31x32",
   "nnue-progress-diff",
 ]
 
-# LayerStack specific (1024x16x32 / 768x16x32 / 768x8x32 / 512x16x32、none のみ)。L0=1024/768/512 系は progress-diff 不可。
-edition-layerstacks-halfka_hm_merged-1024x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32",
+# LayerStack specific (1024x15x32 / 768x15x32 / 768x7x32 / 512x15x32、none のみ)。L0=1024/768/512 系は progress-diff 不可。
+edition-layerstacks-halfka_hm_merged-1024x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x32",
 ]
-edition-layerstacks-halfka_hm_merged-1024x16x32-threat = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1024x15x32-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x32", "nnue-threat",
 ]
 # 1024 threat の削減 profile 版 (nnue-threat に threat-profile-* を 1 つ束ねた変種)。
 # L0=1024 系のため nnue-progress-diff は含めない (build.rs ポリシー)。
 # engine と学習 net の threat profile id 一致は EvalFile load 時に dims mismatch で reject される。
-edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1024x15x32-threat_same_class = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x32", "nnue-threat",
   "threat-profile-same-class",
 ]
-edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class_major_pawn = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1024x15x32-threat_same_class_major_pawn = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x32", "nnue-threat",
   "threat-profile-same-class-major-pawn",
 ]
-edition-layerstacks-halfka_hm_merged-1024x16x32-threat_step_attacker = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1024x15x32-threat_step_attacker = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x32", "nnue-threat",
   "threat-profile-step-attacker",
 ]
-edition-layerstacks-halfka_hm_merged-768x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x16x32",
+edition-layerstacks-halfka_hm_merged-768x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x15x32",
 ]
-edition-layerstacks-halfka_hm_merged-768x16x32-threat = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x16x32", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-768x15x32-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x15x32", "nnue-threat",
 ]
-edition-layerstacks-halfka_hm_merged-768x8x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x8x32",
+edition-layerstacks-halfka_hm_merged-768x7x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x7x32",
 ]
-edition-layerstacks-halfka_hm_merged-512x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-512x16x32",
+edition-layerstacks-halfka_hm_merged-512x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-512x15x32",
 ]
-edition-layerstacks-halfka_hm_merged_effect_bucket-512x16x32-2x2_kingfixed = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-512x16x32",
+edition-layerstacks-halfka_hm_merged_effect_bucket-512x15x32-2x2_kingfixed = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-512x15x32",
   "nnue-effect-bucket", "effect-bucket-2x2-kingfixed",
 ]
-edition-layerstacks-halfka_hm_merged_effect_bucket-1024x16x32-2x2_kingfixed = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32",
+edition-layerstacks-halfka_hm_merged_effect_bucket-1024x15x32-2x2_kingfixed = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x32",
   "nnue-effect-bucket", "effect-bucket-2x2-kingfixed",
 ]
-edition-layerstacks-halfka_hm_merged_effect_bucket-1024x16x32-3x3_kingfixed = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32",
+edition-layerstacks-halfka_hm_merged_effect_bucket-1024x15x32-3x3_kingfixed = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x32",
   "nnue-effect-bucket", "effect-bucket-3x3-kingfixed",
 ]
-# LayerStack specific (3072x16x32、none のみ)。FT_OUT=3072 の大型 FT。
+# LayerStack specific (3072x15x32、none のみ)。FT_OUT=3072 の大型 FT。
 # L0=3072 も progress-diff の NPS 改善を実測で確認済みのため 1536 系と同様に同梱する。
-edition-layerstacks-halfka_hm_merged-3072x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x16x32",
+edition-layerstacks-halfka_hm_merged-3072x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x15x32",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_hm_merged-1024x16x64-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x64",
+edition-layerstacks-halfka_hm_merged-1024x15x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x64",
 ]
-edition-layerstacks-halfka_hm_merged-1024x16x64-threat = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x64", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1024x15x64-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x15x64", "nnue-threat",
 ]
-edition-layerstacks-halfka_hm_merged-1024x16x64-threat512 = ["edition-layerstacks-halfka_hm_merged-1024x16x64-threat", "threat-width-512"]
-edition-layerstacks-halfka_hm_merged-1024x16x64-threat768 = ["edition-layerstacks-halfka_hm_merged-1024x16x64-threat", "threat-width-768"]
-edition-layerstacks-halfka_hm_merged-2304x16x64-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2304x16x64",
+edition-layerstacks-halfka_hm_merged-1024x15x64-threat512 = ["edition-layerstacks-halfka_hm_merged-1024x15x64-threat", "threat-width-512"]
+edition-layerstacks-halfka_hm_merged-1024x15x64-threat768 = ["edition-layerstacks-halfka_hm_merged-1024x15x64-threat", "threat-width-768"]
+edition-layerstacks-halfka_hm_merged-2304x15x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2304x15x64",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_hm_merged-2304x16x64-threat = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2304x16x64", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-2304x15x64-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2304x15x64", "nnue-threat",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_hm_merged-2304x16x64-threat512 = ["edition-layerstacks-halfka_hm_merged-2304x16x64-threat", "threat-width-512"]
-edition-layerstacks-halfka_hm_merged-2304x16x64-threat768 = ["edition-layerstacks-halfka_hm_merged-2304x16x64-threat", "threat-width-768"]
-edition-layerstacks-halfka_hm_merged-3072x16x64-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x16x64",
+edition-layerstacks-halfka_hm_merged-2304x15x64-threat512 = ["edition-layerstacks-halfka_hm_merged-2304x15x64-threat", "threat-width-512"]
+edition-layerstacks-halfka_hm_merged-2304x15x64-threat768 = ["edition-layerstacks-halfka_hm_merged-2304x15x64-threat", "threat-width-768"]
+edition-layerstacks-halfka_hm_merged-3072x15x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x15x64",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_hm_merged-1536x16x64-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x64",
-  "nnue-progress-diff",
-]
-
-edition-layerstacks-halfka_hm_merged-1536x16x64-threat256 = ["edition-layerstacks-halfka_hm_merged-1536x16x64-threat", "threat-width-256"]
-edition-layerstacks-halfka_hm_merged-1536x16x64-threat512 = ["edition-layerstacks-halfka_hm_merged-1536x16x64-threat", "threat-width-512"]
-edition-layerstacks-halfka_hm_merged-1536x16x64-threat768 = ["edition-layerstacks-halfka_hm_merged-1536x16x64-threat", "threat-width-768"]
-edition-layerstacks-halfka_hm_merged-1536x16x64-threat = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x16x64", "nnue-threat",
+edition-layerstacks-halfka_hm_merged-1536x15x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x15x64",
   "nnue-progress-diff",
 ]
 
-# LS specific preset (halfka_hm_merged 以外の 4 FT、1536x16x32-none で代表整備)。
+edition-layerstacks-halfka_hm_merged-1536x15x64-threat256 = ["edition-layerstacks-halfka_hm_merged-1536x15x64-threat", "threat-width-256"]
+edition-layerstacks-halfka_hm_merged-1536x15x64-threat512 = ["edition-layerstacks-halfka_hm_merged-1536x15x64-threat", "threat-width-512"]
+edition-layerstacks-halfka_hm_merged-1536x15x64-threat768 = ["edition-layerstacks-halfka_hm_merged-1536x15x64-threat", "threat-width-768"]
+edition-layerstacks-halfka_hm_merged-1536x15x64-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x15x64", "nnue-threat",
+  "nnue-progress-diff",
+]
+
+# LS specific preset (halfka_hm_merged 以外の 4 FT、1536x15x32-none で代表整備)。
 # 残りの (size × ext) 組合せは需要発生時に同パターンで追加する。
-edition-layerstacks-halfka_hm_split-1536x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_hm_split", "layerstacks-1536x16x32",
+edition-layerstacks-halfka_hm_split-1536x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_split", "layerstacks-1536x15x32",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_merged-1536x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_merged", "layerstacks-1536x16x32",
+edition-layerstacks-halfka_merged-1536x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_merged", "layerstacks-1536x15x32",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfka_split-1536x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfka_split", "layerstacks-1536x16x32",
+edition-layerstacks-halfka_split-1536x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_split", "layerstacks-1536x15x32",
   "nnue-progress-diff",
 ]
-edition-layerstacks-halfkp-1536x16x32-none = [
-  "mode-specific", "layerstack-arch", "ft-halfkp", "layerstacks-1536x16x32",
+edition-layerstacks-halfkp-1536x15x32-none = [
+  "mode-specific", "layerstack-arch", "ft-halfkp", "layerstacks-1536x15x32",
   "nnue-progress-diff",
 ]
 
@@ -372,5 +372,5 @@ path = "src/lib.rs"
 name = "dump_psqt_stats"
 path = "src/bin/dump_psqt_stats.rs"
 required-features = [
-  "layerstack-arch", "nnue-psqt", "layerstacks-1536x16x32", "ft-halfka_hm_merged",
+  "layerstack-arch", "nnue-psqt", "layerstacks-1536x15x32", "ft-halfka_hm_merged",
 ]

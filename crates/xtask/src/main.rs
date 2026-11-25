@@ -983,20 +983,20 @@ mod tests {
         let core_editions = preset_editions(CORE_CARGO_TOML).unwrap();
         let usi_editions = preset_editions(USI_CARGO_TOML).unwrap();
         for edition in [
-            "layerstacks-halfka_hm_merged-1024x16x64-none",
-            "layerstacks-halfka_hm_merged-1024x16x64-threat",
-            "layerstacks-halfka_hm_merged-1024x16x64-threat512",
-            "layerstacks-halfka_hm_merged-1024x16x64-threat768",
-            "layerstacks-halfka_hm_merged-2304x16x64-none",
-            "layerstacks-halfka_hm_merged-2304x16x64-threat",
-            "layerstacks-halfka_hm_merged-2304x16x64-threat512",
-            "layerstacks-halfka_hm_merged-2304x16x64-threat768",
-            "layerstacks-halfka_hm_merged-3072x16x64-none",
-            "layerstacks-halfka_hm_merged-1536x16x64-none",
-            "layerstacks-halfka_hm_merged-1536x16x64-threat",
-            "layerstacks-halfka_hm_merged-1536x16x64-threat256",
-            "layerstacks-halfka_hm_merged-1536x16x64-threat512",
-            "layerstacks-halfka_hm_merged-1536x16x64-threat768",
+            "layerstacks-halfka_hm_merged-1024x15x64-none",
+            "layerstacks-halfka_hm_merged-1024x15x64-threat",
+            "layerstacks-halfka_hm_merged-1024x15x64-threat512",
+            "layerstacks-halfka_hm_merged-1024x15x64-threat768",
+            "layerstacks-halfka_hm_merged-2304x15x64-none",
+            "layerstacks-halfka_hm_merged-2304x15x64-threat",
+            "layerstacks-halfka_hm_merged-2304x15x64-threat512",
+            "layerstacks-halfka_hm_merged-2304x15x64-threat768",
+            "layerstacks-halfka_hm_merged-3072x15x64-none",
+            "layerstacks-halfka_hm_merged-1536x15x64-none",
+            "layerstacks-halfka_hm_merged-1536x15x64-threat",
+            "layerstacks-halfka_hm_merged-1536x15x64-threat256",
+            "layerstacks-halfka_hm_merged-1536x15x64-threat512",
+            "layerstacks-halfka_hm_merged-1536x15x64-threat768",
         ] {
             let edition = normalize_edition(edition);
             assert!(core_editions.contains(&edition), "{edition}");
@@ -1009,8 +1009,8 @@ mod tests {
         assert_eq!(normalize_edition("layerstacks"), "edition-layerstacks");
         assert_eq!(normalize_edition("edition-layerstacks"), "edition-layerstacks");
         assert_eq!(
-            normalize_edition("layerstacks-halfka_hm_merged-1536x16x32-psqt"),
-            "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt"
+            normalize_edition("layerstacks-halfka_hm_merged-1536x15x32-psqt"),
+            "edition-layerstacks-halfka_hm_merged-1536x15x32-psqt"
         );
     }
 
@@ -1021,7 +1021,7 @@ mod tests {
             "edition-universal",
             "edition-halfkx",
             "edition-layerstacks",
-            "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt",
+            "edition-layerstacks-halfka_hm_merged-1536x15x32-psqt",
         ] {
             assert!(
                 editions.iter().any(|e| e == required),
@@ -1034,10 +1034,10 @@ mod tests {
     fn engines_path_strips_edition_prefix() {
         let root = PathBuf::from("/tmp/rshogi");
         let p =
-            engines_path(&root, "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt", &[], None)
+            engines_path(&root, "edition-layerstacks-halfka_hm_merged-1536x15x32-psqt", &[], None)
                 .unwrap();
         let expected = format!(
-            "/tmp/rshogi/engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt{}",
+            "/tmp/rshogi/engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt{}",
             std::env::consts::EXE_SUFFIX
         );
         assert_eq!(p, PathBuf::from(expected));
@@ -1108,7 +1108,7 @@ mod tests {
             ("edition-no-such", "is a preset edition"),
             ("mode-specific", "building block"),
             ("layerstack-arch", "building block"),
-            ("layerstacks-1536x16x32", "building block"),
+            ("layerstacks-1536x15x32", "building block"),
             ("ft-halfka_hm_merged", "building block"),
             ("nnue-psqt", "building block"),
             ("nnue-progress-diff", "building block"),

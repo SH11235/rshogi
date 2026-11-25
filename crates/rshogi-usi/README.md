@@ -333,8 +333,8 @@ Large Pages は明示指定時だけ要求します。`rescore_psv` などのツ
 
 ```bash
 # preset edition に mimalloc を追加して build
-# → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc に配置
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --features mimalloc
+# → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-none+mimalloc に配置
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-none --features mimalloc
 ```
 
 `--features` の仕様と binary の命名規則は [`docs/build.md`](../../docs/build.md) を参照してください。
@@ -342,7 +342,7 @@ xtask を使わない場合は cargo に直接指定します。
 
 ```bash
 cargo build --profile production -p rshogi-usi --no-default-features \
-  --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,mimalloc
+  --features edition-layerstacks-halfka_hm_merged-1536x15x32-none,mimalloc
 ```
 
 固定 depth の探索（MultiPV 1 と 3）では、既定 build と nodes / score / bestmove / PV が

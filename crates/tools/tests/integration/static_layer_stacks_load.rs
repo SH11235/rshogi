@@ -40,7 +40,7 @@ struct Fixture {
 
 impl Fixture {
     /// tools ビルド (nnue-arch) で静的に有効な LS variant は
-    /// ft-halfka_hm_merged × layerstacks-1536x16x32。
+    /// ft-halfka_hm_merged × layerstacks-1536x15x32。
     /// num_buckets = 1 なら progresskpabs routing は no-op なので progress 係数が要らない。
     fn new() -> Self {
         Self::with_buckets(1)

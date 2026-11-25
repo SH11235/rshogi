@@ -65,17 +65,20 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 既定で有効です。TUI・ONNX 依存を外す場合は
 `--no-default-features --features nnue-arch` をビルド引数に追加します。
 `prepack_nnue` は追加の `--features prepacked-nnue` が必要です。
-既定の `nnue-arch` は汎用実装と 1536x16x32・1536x16x64・2304x16x64、5 種の FT の静的実装を含み、
+既定の `nnue-arch` は汎用実装と 1536x15x32・1536x15x64・2304x15x64、5 種の FT の静的実装を含み、
 対応する拡張なしの LayerStacks を静的に読みます。PSQT・Threat・effect bucket・
 `ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使います。
-別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読めます。
+別の寸法は `--features layerstacks-<サイズ>` の追加でも静的に読めます。`<サイズ>` の中央の数は
+shortcut を除いた数です。実寸法との対応は [NNUE 対応表](../../docs/nnue-supported-architectures.md#layerstacks) を参照してください。
 gensfen と rescore_psv の NativeBackend は読み込みログに
 `NNUE LayerStack implementation=static|dynamic` を出力します。
 1 つの NNUE 構成だけを入れた速い build (`rescore_psv`・`gensfen` など、rshogi-core の NNUE の評価・探索を直接呼ぶツール) は
 [rescore_psv の単一構成の build](docs/rescore_psv.md#単一構成の-build) を参照してください。
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` / `eval_sfens` / `nnue_saturation` /
 `verify_nnue_accumulator`) には、tools の `layerstack-arch` feature (`nnue-arch` に含まれる) が必要です。
-診断するモデルに合わせて寸法を指定します。1024×16×64 には `layerstacks-1024x16x64` を使います。
+診断するモデルに合わせてサイズを指定します。feature 名の中央の数は shortcut を除くため、
+実寸法が 1024×16×64 のモデルには `layerstacks-1024x15x64` を使います。
+サイズの対応は [NNUE 対応表](../../docs/nnue-supported-architectures.md#layerstacks)を参照してください。
 
 [`eval_sfens`](docs/eval_sfens.md)、[`nnue_saturation`](docs/nnue_saturation.md)、
 [`bench_nnue_eval`](docs/bench_nnue_eval.md) は、ネットに `ls_bucket=` がある場合に

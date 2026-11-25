@@ -910,7 +910,7 @@ mod tests {
         feature = "threat-width-256",
         feature = "threat-width-512",
         feature = "threat-width-768",
-        feature = "layerstacks-1024x16x64"
+        feature = "layerstacks-1024x15x64"
     )
 ))]
 mod extension_tests {
@@ -926,15 +926,15 @@ mod extension_tests {
     #[test]
     fn prepacked_preserves_piece_ft_and_extensions() {
         const WIDE_L2: bool = cfg!(any(
-            feature = "layerstacks-1024x16x64",
-            feature = "layerstacks-1536x16x64",
-            feature = "layerstacks-2304x16x64"
+            feature = "layerstacks-1024x15x64",
+            feature = "layerstacks-1536x15x64",
+            feature = "layerstacks-2304x15x64"
         ));
-        const L1: usize = if cfg!(feature = "layerstacks-1024x16x64") {
+        const L1: usize = if cfg!(feature = "layerstacks-1024x15x64") {
             1024
-        } else if cfg!(feature = "layerstacks-2304x16x64") {
+        } else if cfg!(feature = "layerstacks-2304x15x64") {
             2304
-        } else if cfg!(feature = "layerstacks-1536x16x64") {
+        } else if cfg!(feature = "layerstacks-1536x15x64") {
             1536
         } else if expected_threat_width(64) != 64 {
             768

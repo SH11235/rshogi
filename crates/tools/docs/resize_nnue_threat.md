@@ -23,15 +23,15 @@ cargo run -p tools --no-default-features --bin resize_nnue_threat -- \
 - PSQT は従来の独立した駒由来 i32 accumulator です。Threat 重みの PSQT 項はありません。
 
 部分幅の net は FT と後段の寸法、Threat 幅が一致する edition で読み込みます。
-256列では 1536x16x64 の `threat256` を選びます。
-512列では 1024x16x64 / 1536x16x32 / 1536x16x64 / 2304x16x64 の `threat512`、768列では
-1024x16x64 / 1536x16x64 / 2304x16x64 の `threat768` を選びます。全幅の net は同じ寸法の `threat` edition を使います。
+256列では 1536x15x64 の `threat256` を選びます。
+512列では 1024x15x64 / 1536x15x32 / 1536x15x64 / 2304x15x64 の `threat512`、768列では
+1024x15x64 / 1536x15x64 / 2304x15x64 の `threat768` を選びます。全幅の net は同じ寸法の `threat` edition を使います。
 `edition-universal` は全幅の profile 0 に対応します。
 edition 名は [ビルドガイド](../../../docs/build.md) を参照してください。
 
 ```bash
 cargo run -q -p xtask -- build \
-  --edition layerstacks-halfka_hm_merged-1536x16x64-threat256 \
+  --edition layerstacks-halfka_hm_merged-1536x15x64-threat256 \
   --features use-lazy-evaluate --profile production
 ```
 
@@ -39,5 +39,5 @@ PSQT 付き net 用の engine は、`cargo build` で edition と `nnue-psqt` �
 
 ```bash
 cargo build -p rshogi-usi --no-default-features --profile production \
-  --features edition-layerstacks-halfka_hm_merged-1536x16x64-threat256,nnue-psqt,use-lazy-evaluate
+  --features edition-layerstacks-halfka_hm_merged-1536x15x64-threat256,nnue-psqt,use-lazy-evaluate
 ```

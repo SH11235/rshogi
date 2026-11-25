@@ -23,13 +23,13 @@ preset の選び方・slot 値の意味論・manifest フィールドの詳細�
 cargo xtask list-editions
 
 # 1 preset を build (engines/rshogi-usi-<edition slug> に配置)
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-psqt
 
 # 複数 preset を順次 build
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt,layerstacks-halfka_hm_merged-1536x16x32-none
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-psqt,layerstacks-halfka_hm_merged-1536x15x32-none
 
 # Edition 軸と直交する opt-in feature を追加 (binary 名に +<feature> が付く)
-cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --features mimalloc
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x15x32-none --features mimalloc
 
 # engines/ 配下の binary 一覧 + manifest を整形表示
 cargo xtask list-binaries
@@ -48,13 +48,13 @@ engines/rshogi-usi-<edition slug>[+<feature>...][.exe]
 例:
 
 ```
-edition=edition-layerstacks-halfka_hm_merged-1536x16x32-psqt
-  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt
-  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt.meta.toml
+edition=edition-layerstacks-halfka_hm_merged-1536x15x32-psqt
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt.meta.toml
 
-edition=edition-layerstacks-halfka_hm_merged-1536x16x32-none, features=mimalloc
-  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc
-  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc.meta.toml
+edition=edition-layerstacks-halfka_hm_merged-1536x15x32-none, features=mimalloc
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-none+mimalloc
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-none+mimalloc.meta.toml
 ```
 
 ### manifest
