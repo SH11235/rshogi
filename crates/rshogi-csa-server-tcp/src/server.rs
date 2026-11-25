@@ -4020,11 +4020,8 @@ fn compute_timeup_deadline(
     room: &GameRoom,
     start_instant: tokio::time::Instant,
 ) -> tokio::time::Instant {
-    let deadline_ms = room.current_turn_deadline_ms().unwrap_or(0);
-    start_instant
-        + Duration::from_millis(
-            deadline_ms.saturating_add(room.time_margin_ms()).saturating_add(250),
-        )
+    let deadline_ms = room.current_turn_deadline_with_margin_ms().unwrap_or(room.time_margin_ms());
+    start_instant + Duration::from_millis(deadline_ms.saturating_add(250))
 }
 
 /// Time_Unit 単位の broadcast を CSA V2 棋譜用の秒へ換算する。

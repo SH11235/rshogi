@@ -111,6 +111,8 @@ mod kifu_import_api;
 mod lobby;
 #[cfg(target_arch = "wasm32")]
 mod router;
+#[cfg(any(target_arch = "wasm32", test))]
+mod turn_alarm;
 #[cfg(target_arch = "wasm32")]
 mod viewer_api;
 
