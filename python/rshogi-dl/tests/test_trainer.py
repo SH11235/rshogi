@@ -211,6 +211,61 @@ class TrainerTest(unittest.TestCase):
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, "NAdam requires eager"):
                 replace(self.config, optimizer="nadam", **options)
 
+    def test_sgd_momentum_and_nesterov_resume_with_policy_gaps(self) -> None:
+        self.check_sgd_resume()
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle CUDA device")
+    def test_cuda_eager_sgd_momentum_and_nesterov_resume(self) -> None:
+        self.check_sgd_resume(device="cuda", precision="bf16")
+
+    def check_sgd_resume(self, **options) -> None:
+        records = synthetic_records(seed=27, count=4)
+        for index, record in enumerate(records):
+            record["policy"] = [[record["legal_labels"][0], 1]] if index >= 2 else None
+        self.train = self.make_dataset("sgd-mixed", records)
+        for momentum, nesterov in ((0.0, False), (0.9, False), (0.9, True)):
+            with self.subTest(momentum=momentum, nesterov=nesterov):
+                config = replace(
+                    self.config, optimizer="sgd", sgd_momentum=momentum, sgd_nesterov=nesterov,
+                    max_steps=7, batch_size=2, checkpoint_every=1, weight_decay=0.1,
+                    learning_rate_steps=((2, 0.0005),), **options,
+                )
+                prefix = f"sgd-{momentum}-{nesterov}"
+                self.run_training(prefix, config)
+                output = self.root / prefix
+                full = load_resume(output / "resume-final.pt")
+                state = full["optimizer_state"]
+                self.assertEqual((state["updates"], state["policy_updates"]), (7, 3))
+                self.assertEqual(state["param_groups"][0]["momentum"], momentum)
+                self.assertEqual(state["param_groups"][0]["nesterov"], nesterov)
+                self.assertEqual(bool(state["state"]), bool(momentum))
+                for step in (1, 2, 3):
+                    resumed_name = f"{prefix}-resumed-{step}"
+                    self.run_training(resumed_name, config, resume=output / f"resume-{step:010d}.pt")
+                    resumed = load_resume(self.root / resumed_name / "resume-final.pt")
+                    for field in ("model_state", "optimizer_state", "progress", "rng"):
+                        self.assert_nested_equal(full[field], resumed[field])
+                state["policy_updates"] = 7
+                checkpoint = self.root / f"{prefix}-bad.pt"
+                torch.save(full, checkpoint)
+                with self.assertRaisesRegex(ResumeError, "SGD optimizer receipts"):
+                    self.run_training(f"{prefix}-bad-run", config, resume=checkpoint)
+                if momentum:
+                    state["policy_updates"] = 3
+                    first_buffer = next(iter(state["state"].values()))
+                    first_buffer["momentum_buffer"].fill_(float("nan"))
+                    bad_buffer = self.root / f"{prefix}-bad-buffer.pt"
+                    torch.save(full, bad_buffer)
+                    with self.assertRaisesRegex(ResumeError, "invalid SGD momentum buffer"):
+                        self.run_training(f"{prefix}-bad-buffer-run", config, resume=bad_buffer)
+
+    def test_sgd_rejects_nesterov_without_momentum_and_compiled_execution(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires positive momentum"):
+            replace(self.config, optimizer="sgd", sgd_nesterov=True)
+        for options in ({"execution": "compile"}, {"execution": "cuda-graph"}, {"fused_optimizer": True}):
+            with self.subTest(options=options), self.assertRaisesRegex(ValueError, "SGD requires eager"):
+                replace(self.config, optimizer="sgd", **options)
+
     def test_weighted_loss_and_adamw_options_survive_resume(self) -> None:
         config = replace(
             self.config, log_every=1, policy_loss_weight=0.5, value_loss_weight=2.0,
