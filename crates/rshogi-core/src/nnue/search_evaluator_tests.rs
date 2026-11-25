@@ -975,6 +975,14 @@ fn with_auxiliary_weights(
     };
     if let Some(head) = arch.find("Head=DenseConcat,") {
         arch.insert_str(head, &extensions);
+        #[cfg(feature = "nnue-threat")]
+        if has_threat {
+            arch = arch.replacen(
+                &format!("[{dimensions}->"),
+                &format!("[{}->", dimensions + nnue::threat_features::THREAT_DIMENSIONS),
+                1,
+            );
+        }
     } else {
         arch.push(',');
         arch.push_str(extensions.trim_end_matches(','));

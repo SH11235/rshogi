@@ -15,6 +15,17 @@ pub(super) fn dense_concat_arch(ft: usize, l1: usize, l2: usize) -> String {
     )
 }
 
+#[cfg(ls_dense_concat)]
+/// tatara と同じく、Threat 付きの net は Features= の入力次元に Threat の次元を足す。
+pub(super) fn dense_concat_threat_arch(ft: usize, l1: usize, l2: usize, threat: usize) -> String {
+    dense_concat_arch(ft, l1, l2)
+        .replace(
+            &format!("[{HALFKA_HM_DIMENSIONS}->"),
+            &format!("[{}->", HALFKA_HM_DIMENSIONS + threat),
+        )
+        .replace(",Head=", &format!(",Threat={threat},Head="))
+}
+
 fn header(arch: &str) -> Vec<u8> {
     let mut bytes = NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes().to_vec();
     bytes.extend_from_slice(&0x4443_4e43_u32.to_le_bytes());
@@ -148,6 +159,24 @@ fn dense_concat_rejects_noncanonical_arch_tokens() {
         let err = static_read_error(&malformed, DENSE_CONCAT_FT);
         assert!(err.contains("Invalid DenseConcat network architecture"), "{malformed}: {err}");
     }
+}
+
+#[cfg(ls_dense_concat)]
+#[test]
+fn dense_concat_threat_arch_counts_threat_dimensions_in_features() {
+    let ft = DENSE_CONCAT_FT;
+    let threat = 216_720;
+    let with_threat = dense_concat_threat_arch(ft, 16, 64, threat)
+        + ",ThreatWidth=512,ls_bucket=ownking:2/3/7+oppking:2/3/7";
+    let err = static_read_error(&with_threat, ft);
+    assert!(!err.contains("DenseConcat"), "{err}");
+
+    let piece_dims_only = with_threat.replace(
+        &format!("[{}->", HALFKA_HM_DIMENSIONS + threat),
+        &format!("[{HALFKA_HM_DIMENSIONS}->"),
+    );
+    let err = static_read_error(&piece_dims_only, ft);
+    assert!(err.contains("Invalid DenseConcat network architecture"), "{err}");
 }
 
 #[cfg(ls_dense_concat)]
