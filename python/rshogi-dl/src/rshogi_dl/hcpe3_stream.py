@@ -10,6 +10,7 @@ import random
 import re
 import stat
 import subprocess
+from sys import float_info
 import tempfile
 
 from .contract import INPUT_FORMAT, POLICY_FORMAT, TOKEN_COUNT, VALUE_FORMAT
@@ -48,7 +49,7 @@ def _manifest(path):
     raw = path.read_bytes()
     config = json.loads(raw)
     required = {"format", "encoder", "encoder_sha256", "archives", "protected_tokens", "heldout_modulus", "seed"}
-    optional = {"interleave_archives", "protected_games"}
+    optional = {"interleave_archives", "protected_games", "value_eval_weight", "value_eval_scale", "policy_temperature"}
     if (
         type(config) is not dict
         or not required <= config.keys() <= required | optional
@@ -58,6 +59,15 @@ def _manifest(path):
         or config["heldout_modulus"] < 0 or config["heldout_modulus"] == 1
     ):
         raise DatasetError("invalid HCPE3 input manifest")
+    weight = config.get("value_eval_weight", 0.0)
+    scale = config.get("value_eval_scale", 0.0013226)
+    temperature = config.get("policy_temperature", 1.0)
+    if type(weight) not in (int, float) or not 0 <= weight <= 1:
+        raise DatasetError("value_eval_weight must be in 0..1")
+    if type(scale) not in (int, float) or not 0 < scale <= float_info.max:
+        raise DatasetError("value_eval_scale must be positive and finite")
+    if type(temperature) not in (int, float) or not 0 <= temperature <= float_info.max:
+        raise DatasetError("policy_temperature must be finite and nonnegative")
     interleave = config.get("interleave_archives", 1)
     if type(interleave) is not int or not 1 <= interleave <= _MAX_INTERLEAVE_ARCHIVES:
         raise DatasetError(f"interleave_archives must be in 1..{_MAX_INTERLEAVE_ARCHIVES}")
@@ -120,7 +130,7 @@ def hcpe3_dataset_info(path):
 
 
 @contextmanager
-def _replay(encoder, path):
+def _replay(encoder, path, arguments):
     with ExitStack() as stack:
         processes = []
         try:
@@ -133,7 +143,7 @@ def _replay(encoder, path):
             else:
                 input_pipe, source = None, path
             child = stack.enter_context(subprocess.Popen(
-                [encoder, "--skip-invalid-games", source], stdin=input_pipe, stdout=subprocess.PIPE,
+                [encoder, "--skip-invalid-games", *arguments, source], stdin=input_pipe, stdout=subprocess.PIPE,
             ))
             processes.insert(0, child)
             if input_pipe is not None:
@@ -165,10 +175,12 @@ def _archive_rows(encoder, archive, config, protected, protected_games):
     if _signature(source) != signature or _hash(source) != digest or _signature(source) != signature:
         raise DatasetError(f"HCPE3 archive contents changed: {source}")
     modulus = config["heldout_modulus"]
+    weight = config.get("value_eval_weight", 0.0)
+    arguments = ["--value-eval-weight", str(weight), "--value-eval-scale", str(config.get("value_eval_scale", 0.0013226))] if weight else []
     try:
-        with _replay(encoder, source) as stream:
+        with _replay(encoder, source, arguments) as stream:
             retained = True
-            for frame in iter_packed_frames(stream):
+            for frame in iter_packed_frames(stream, mixed_values=bool(weight)):
                 if isinstance(frame, GameFrame):
                     retained = frame.key not in protected_games and (
                         not modulus or int.from_bytes(frame.key[:8], "big") % modulus != 0
@@ -239,10 +251,7 @@ def _mixed_blocks(encoder, group, config, protected, protected_games, index):
                 yield block
 
 
-def _ordered_rows(path, start_row, expected_fingerprint):
-    root, encoder, config, archives, protected, protected_games, _, fingerprint = _manifest(path)
-    if expected_fingerprint is not None and expected_fingerprint != fingerprint:
-        raise DatasetError("HCPE3 input changed before opening the training stream")
+def _ordered_rows(root, encoder, config, archives, protected, protected_games, fingerprint, start_row):
     index = root.with_name(f"{root.name}.counts") / fingerprint
     index.mkdir(parents=True, exist_ok=True)
     interleave = config.get("interleave_archives", 1)
@@ -270,9 +279,12 @@ def iter_hcpe3_batches(path, batch_size, *, start_row=0, expected_fingerprint=No
         raise DatasetError("invalid HCPE3 batch size")
     if type(start_row) is not int or start_row < 0:
         raise DatasetError("invalid HCPE3 resume cursor")
-    rows = _ordered_rows(path, start_row, expected_fingerprint)
+    root, encoder, config, archives, protected, protected_games, _, fingerprint = _manifest(path)
+    if expected_fingerprint is not None and expected_fingerprint != fingerprint:
+        raise DatasetError("HCPE3 input changed before opening the training stream")
+    rows = _ordered_rows(root, encoder, config, archives, protected, protected_games, fingerprint, start_row)
     try:
-        for columns, count in assemble_shards(rows, batch_size):
+        for columns, count in assemble_shards(rows, batch_size, policy_temperature=config.get("policy_temperature", 1.0)):
             scratch = _scratch(count)
             width = _append(scratch, 0, columns, 0, count)
             yield _batch(scratch, count, width)
