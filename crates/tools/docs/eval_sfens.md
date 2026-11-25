@@ -49,12 +49,12 @@ Linux で共有メモリの新規確保に失敗した重みは、プロセス�
 
 ### L2=64 の専用モデル
 
-静的 LayerStacks の解析には、モデルの寸法に合わせて
+静的 LayerStacks の解析には、モデルのサイズ (shortcut を除いた数え方) に合わせて
 `--features layerstacks-1024x15x64`、`--features layerstacks-1536x15x64`、
 `--features layerstacks-2304x15x64` または `--features layerstacks-3072x15x64`
 をビルド時に追加する。L2 の中間出力も指定した幅で計算する。
 
-HalfKA_hm merged 1536x15x64、Threat 幅 512 のモデル向けのビルド例。
+HalfKA_hm merged 1536x15x64 (ヘッダーの実寸法は 1536x16x64)、Threat 幅 512 のモデル向けのビルド例。
 
 ```sh
 cargo build --release -p tools --bin eval_sfens --no-default-features \
