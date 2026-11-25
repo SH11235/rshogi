@@ -79,6 +79,8 @@ class TrainerTest(unittest.TestCase):
         self.assertEqual(first["progress"]["epoch"], 1)
         resumed_report = self.run_training("resumed", resume=self.root / "first" / "resume-final.pt")
         full = load_resume(self.root / "full" / "resume-final.pt")
+        self.assertNotIn("averaging_state", full)
+        self.assertNotIn("weight_average", full["trainer_config"])
         resumed = load_resume(self.root / "resumed" / "resume-final.pt")
         for field in ("model_state", "optimizer_state", "scaler_state", "scheduler_state", "progress", "rng"):
             self.assert_nested_equal(full[field], resumed[field])
@@ -113,6 +115,55 @@ class TrainerTest(unittest.TestCase):
             self.assertEqual(report["progress"], full["progress"])
             self.assert_nested_equal(resumed["model_state"], expected["model_state"])
             self.assert_nested_equal(resumed["optimizer_state"], expected["optimizer_state"])
+
+    def test_weight_averages_follow_snapshot_schedule_and_resume(self) -> None:
+        baseline = replace(self.config, checkpoint_every=1)
+        self.run_training("average-reference", baseline)
+        reference = self.root / "average-reference"
+        snapshots = [
+            load_resume(reference / filename)["model_state"]
+            for filename in ("resume-0000000003.pt", "resume-0000000005.pt", "resume-final.pt")
+        ]
+        for method, decay, weights in (("swa", baseline.ema_decay, (1 / 3,) * 3),
+                                       ("ema", 0.5, (0.25, 0.25, 0.5))):
+            with self.subTest(method=method):
+                config = replace(
+                    baseline, weight_average=method, weight_average_start_step=3, weight_average_every=2,
+                    ema_decay=decay,
+                )
+                report = self.run_training(f"{method}-full", config)
+                complete_dir = self.root / f"{method}-full"
+                full = load_resume(complete_dir / "resume-final.pt")
+                self.assert_nested_equal(full["model_state"], snapshots[-1])
+                self.assertEqual(report["weight_average_samples"], 3)
+                self.assertEqual(report["averaged_validation"]["rows"], report["validation"]["rows"])
+                exported = load_checkpoint(complete_dir / report["averaged_checkpoint"])
+                self.assertEqual(exported.optimizer_state, {})
+                self.assertEqual(exported.step, 7)
+                self.assert_nested_equal(dict(exported.model.state_dict()), full["averaging_state"]["weights"])
+                for name, weight in exported.model.state_dict().items():
+                    expected = sum(scale * snapshot[name] for scale, snapshot in zip(weights, snapshots, strict=True))
+                    torch.testing.assert_close(weight, expected)
+                for split in (2, 5):
+                    first_report = self.run_training(f"{method}-first-{split}", replace(config, max_steps=split))
+                    if split == 2:
+                        self.assertEqual(first_report["weight_average_samples"], 0)
+                        self.assertNotIn("averaged_checkpoint", first_report)
+                    resume = self.root / f"{method}-first-{split}" / "resume-final.pt"
+                    self.run_training(f"{method}-resumed-{split}", config, resume=resume)
+                    resumed = load_resume(self.root / f"{method}-resumed-{split}" / "resume-final.pt")
+                    self.assert_nested_equal(resumed["averaging_state"], full["averaging_state"])
+                    self.assert_nested_equal(resumed["optimizer_state"], full["optimizer_state"])
+
+    def test_resume_rejects_invalid_weight_average_sample_count(self) -> None:
+        config = replace(self.config, max_steps=2, weight_average="swa")
+        self.run_training("average-source", config)
+        state = load_resume(self.root / "average-source" / "resume-final.pt")
+        state["averaging_state"]["samples"] = 3
+        checkpoint = self.root / "invalid-average.pt"
+        torch.save(state, checkpoint)
+        with self.assertRaisesRegex(ResumeError, "sampling schedule"):
+            self.run_training("invalid-average", config, resume=checkpoint)
 
     def test_weighted_loss_and_adamw_options_survive_resume(self) -> None:
         config = replace(
@@ -749,6 +800,26 @@ class TrainerTest(unittest.TestCase):
         with mock.patch.object(optimizer, "_symmetric_polynomial") as symmetric:
             optimizer.step()
             symmetric.assert_not_called()
+
+    @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
+    def test_cuda_graph_weight_average_matches_padded_eager(self) -> None:
+        records = synthetic_records(seed=27, count=8)
+        for record in records:
+            record["policy"] = [[record["legal_labels"][0], 1]]
+        self.train = self.make_dataset("average-policy", records)
+        config = replace(
+            self.config, max_steps=9, batch_size=2, device="cuda", precision="bf16", fused_optimizer=True,
+            execution="cuda-graph", attention_backend="sdpa", weight_average="ema",
+            weight_average_start_step=3, weight_average_every=2, ema_decay=0.5,
+        )
+        report = self.run_training("average-graph", config)
+        self.assertGreater(report["cuda_graph_replayed_steps"], 0)
+        with mock.patch("rshogi_dl._step_graph._WARMUP_STEPS", config.max_steps):
+            self.run_training("average-eager", config)
+        graph = load_resume(self.root / "average-graph" / "resume-final.pt")
+        eager = load_resume(self.root / "average-eager" / "resume-final.pt")
+        self.assert_nested_equal(graph["model_state"], eager["model_state"])
+        self.assert_nested_equal(graph["averaging_state"], eager["averaging_state"])
 
     @unittest.skipUnless(os.environ.get("RSHOGI_DL_RUN_CUDA_TESTS") == "1", "requires an idle BF16 CUDA device")
     def test_cuda_graph_clipped_weighted_objective_matches_padded_eager(self) -> None:

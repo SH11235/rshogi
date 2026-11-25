@@ -336,6 +336,9 @@ python -m rshogi_dl.trainer \
 | `--warmup-steps` | 最初の指定回数で学習率を線形に上げる |
 | `--cosine-end-step` | warmup 後から指定回まで cosine 減衰する。段階減衰との同時指定は不可 |
 | `--cosine-min-ratio` | cosine 減衰後に維持する学習率の倍率。既定は 0.1 |
+| `--weight-average {swa,ema}` | 更新後の重みを等重み平均（SWA）または指数移動平均（EMA）。既定は無効 |
+| `--weight-average-start-step STEP` / `--weight-average-every N` | 最初に採取する更新試行番号と、それ以降の採取間隔。既定は両方1 |
+| `--ema-decay RATE` | EMA が保持する直前の平均の重み。範囲は0以上1未満、既定0.999 |
 | `--muon-learning-rate` | `muon` / `batched-muon` の学習率。両方式で必須 |
 | `--fuse-muon-symmetric-polynomial` | `batched-muon` のNewton–Schulz反復で、対称な二次項のタイルを再利用する。短辺256・長辺が32の倍数の行列が対象。NVIDIA CUDA compute capability 8.0以上とTritonが必要。丸め順が変わる場合がある。既定は無効 |
 | `--threads` | CPU thread数、既定1 |
@@ -389,6 +392,8 @@ FP16 の scaler は `growth_factor=2.0`、`backoff_factor=0.5`、`growth_interva
 dataset 指紋は生成済み manifest の内容 root を使い、通常の run/resume で全 shard・全 sample を走査しません。dataset は使用中に変更しないでください。train/validation の path・指紋に加えて `dataset_content_sha256` が同じ場合も拒否します。並べ替えや shard の分け方が異なる dataset 間の局面・対局の重複検出は行わないため、game 単位で分割した独立 held-out を dataset 作成側で用意してください。
 
 `resume-final.pt` は再開専用です。別に保存する `checkpoint.pt` は既存の `export` と `parity` CLI で読める v1 形式で、元の reader の契約は変更しません。最終の model・optimizer 検査後、held-out 評価より先に両 checkpoint を保存します。評価に失敗して `report.json` が書かれない場合も、保存済み状態から再開できます。同一環境の CPU で中断前後の model/AdamW/cursor/RNG が一致することをテストしています。CUDA や異なる hardware・実行方式を跨いだ bit 一致を保証するものではありません。
+
+SWA または EMA を有効にすると、最初の採取点で平均を初期化し、以降は設定した間隔で学習直後の重みを加えます。FP16 の AMP が更新をスキップした試行も間隔に含め、採取点ではその時点の重みを使います。平均のためにモデル重み1組分のメモリを追加で使います。再開時は同じ平均化設定を指定します。標本が1つ以上ある場合は、最後の採取点の番号を持つ推論用 `checkpoint-averaged.pt` と、同じ held-out で測った `averaged_validation` を追加します。平均化前の重みも `checkpoint.pt` と `validation` で確認できます。
 
 ### 同じプロセスで複数の学習を実行
 

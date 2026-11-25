@@ -164,7 +164,7 @@ def load_resume(path: str | Path) -> dict:
         payload = torch.load(path, map_location="cpu", weights_only=True)
     except (OSError, RuntimeError, ValueError, EOFError, pickle.UnpicklingError, TypeError) as error:
         raise ResumeError(f"cannot read resume checkpoint: {error}") from error
-    if type(payload) is not dict or set(payload) != _KEYS:
+    if type(payload) is not dict or not _KEYS <= payload.keys() <= _KEYS | {"averaging_state"}:
         raise ResumeError("unexpected resume checkpoint layout")
     if any(type(payload[key]) is not str or payload[key] != value for key, value in CONTRACT.items()):
         raise ResumeError("unexpected resume checkpoint contract")
@@ -182,7 +182,7 @@ def export_checkpoint(path, model, optimizer, *, step: int, seed: int) -> Path:
         "training_status": TRAINING_STATUS,
         "model_config": model.config.to_dict(),
         "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
+        "optimizer_state": optimizer.state_dict() if optimizer is not None else {},
         "step": step,
         "seed": seed,
     })
