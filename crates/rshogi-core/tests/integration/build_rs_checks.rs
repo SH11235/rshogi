@@ -84,6 +84,63 @@ fn dense_concat_slots_are_mutually_exclusive() {
     assert!(error.contains("DenseConcat features are mutually exclusive"), "{error}");
 }
 
+#[test]
+fn dense_concat_rejects_split_skip_editions_of_the_same_slot() {
+    for (dense_concat, split_skip) in [
+        (
+            "edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none",
+            "edition-layerstacks-halfka_hm_merged-1536x15x64-none",
+        ),
+        (
+            "edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat512",
+            "edition-layerstacks-halfka_hm_merged-2304x15x64-threat512",
+        ),
+    ] {
+        let slot = if dense_concat.contains("1536") {
+            "1536x"
+        } else {
+            "2304x"
+        };
+        let features = [
+            "mode-specific",
+            "layerstack-arch",
+            "ft-halfka_hm_merged",
+            if slot == "1536x" {
+                "layerstacks-dense-concat-1536x16x64"
+            } else {
+                "layerstacks-dense-concat-2304x16x64"
+            },
+            if slot == "1536x" {
+                "layerstacks-1536x15x64"
+            } else {
+                "layerstacks-2304x15x64"
+            },
+            dense_concat,
+            split_skip,
+        ];
+        let error = validate_feature_combination(&lookup(&features)).unwrap_err();
+        assert!(error.contains(split_skip), "{error}");
+    }
+}
+
+#[test]
+fn split_skip_editions_sharing_dense_concat_slots_match_the_manifest() {
+    let manifest = include_str!("../../Cargo.toml");
+    let declared: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.split_once(" = ").map(|(name, _)| name.trim()))
+        .filter(|name| {
+            name.starts_with("edition-layerstacks-halfka_hm_merged-1536x15x64-")
+                || name.starts_with("edition-layerstacks-halfka_hm_merged-2304x15x64-")
+        })
+        .collect();
+    let mut expected = SPLIT_SKIP_EDITIONS_SHARING_DENSE_CONCAT_SLOTS.to_vec();
+    let mut actual = declared;
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
 /// 与えられた feature 名集合を `has_feature` lookup に変換するヘルパー。
 fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {
     let owned: Vec<String> = features.iter().map(|s| (*s).to_string()).collect();
