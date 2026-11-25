@@ -53,6 +53,26 @@ class PolicyValueLossTest(unittest.TestCase):
         self.assertAlmostEqual(loss.value.item(), expected_value, places=5)
         self.assertAlmostEqual(loss.total.item(), expected_policy + expected_value, places=5)
 
+    def test_entropy_is_over_legal_moves_in_rows_with_policy(self) -> None:
+        batch = batch_of(
+            record([10, 500, 999], [[10, 1]], 0.25), record([7, 8], None, 1.0), record([12], [[12, 1]], 0.5),
+        )
+        policy, value = logits_for(3)
+        loss = policy_value_loss(policy, value, batch, compute_policy_entropy=True)
+        distribution = torch.softmax(policy[0, [10, 500, 999]], dim=0)
+        expected = -(distribution * distribution.log()).sum() / 2
+        torch.testing.assert_close(loss.policy_entropy, expected)
+        (loss.total - 0.1 * loss.policy_entropy).backward()
+        self.assertTrue(torch.isfinite(policy.grad).all())
+        self.assertEqual(policy.grad[0].nonzero().flatten().tolist(), [10, 500, 999])
+        self.assertFalse(bool(policy.grad[1:].any()))
+
+    def test_entropy_is_stable_for_large_equal_logits(self) -> None:
+        batch = batch_of(record([10, 500], [[10, 1]], 0.5))
+        logits = torch.full((1, POLICY_SIZE), 1e8)
+        loss = policy_value_loss(logits, torch.zeros((1, 1)), batch, compute_policy_entropy=True)
+        self.assertAlmostEqual(loss.policy_entropy.item(), math.log(2), places=6)
+
     def test_illegal_logits_do_not_affect_loss_or_receive_gradient(self) -> None:
         batch = batch_of(record([10, 500], [[10, 1]], 0.5))
         policy, value = logits_for(1)

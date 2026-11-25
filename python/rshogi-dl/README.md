@@ -340,6 +340,7 @@ python -m rshogi_dl.trainer \
 | `--weight-average {swa,ema}` | 更新後の重みを等重み平均（SWA）または指数移動平均（EMA）。既定は無効 |
 | `--weight-average-start-step STEP` / `--weight-average-every N` | 最初に採取する更新試行番号と、それ以降の採取間隔。既定は両方1 |
 | `--ema-decay RATE` | EMA が保持する直前の平均の重み。範囲は0以上1未満、既定0.999 |
+| `--policy-entropy-weight W` | 方策教師付きの行で、合法手上の予測エントロピーの W 倍を方策損失から引く。既定0で無効。ログの `policy_loss` はエントロピーを引く前の交差エントロピー |
 | `--muon-learning-rate` | `muon` / `batched-muon` の学習率。両方式で必須 |
 | `--fuse-muon-symmetric-polynomial` | `batched-muon` のNewton–Schulz反復で、対称な二次項のタイルを再利用する。短辺256・長辺が32の倍数の行列が対象。NVIDIA CUDA compute capability 8.0以上とTritonが必要。丸め順が変わる場合がある。既定は無効 |
 | `--threads` | CPU thread数、既定1 |
