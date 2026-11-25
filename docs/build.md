@@ -482,6 +482,34 @@ AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融�
 活性化と出力層の内積を融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
 それ以外の AVX2 環境では32要素ずつ処理し、最後に一度だけ水平加算する。評価ごとのヒープ確保は行わない。
 
+## LayerStacks-DenseConcat
+
+LayerStacks-DenseConcat 1536-16-64 と 2304-16-64 は、どちらも `fc_0` の 16 出力すべてを活性化し、`fc_2` に 160 要素を渡します。
+
+ヘッダーに `Head=DenseConcat,` がある HalfKaHmMerged モデルには、FT 幅と Threat 幅に合う固定 edition を使います。
+すべての構成に `nnue-progress-diff` が含まれます。
+
+| Threat | 1536-16-64 の xtask preset | 2304-16-64 の xtask preset |
+|---|---|---|
+| なし | `layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none` | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-none` |
+| 全幅 | `layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat` | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat` |
+| 256 | `layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat256` | — |
+| 512 | `layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat512` | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat512` |
+| 768 | `layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat768` | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat768` |
+
+```sh
+cargo run --release -p xtask -- build --edition layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none --profile production
+```
+
+Cargo の edition feature は preset 名に `edition-` を付けた名前です。
+構成部品を直接指定する場合は、モデルの FT 幅に合う `layerstacks-dense-concat-1536x16x64` または
+`layerstacks-dense-concat-2304x16x64` の一方と、`layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
+
+ヘッダーに `PSQT=` があるモデルは、FT 幅と Threat 幅に合う edition に
+`nnue-psqt` を足して build します (例: `cargo build --release -p rshogi-usi --no-default-features
+--features edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none,rshogi-core/nnue-psqt`)。
+EffectBucket と `prepacked-nnue` との組み合わせは build 時に拒否します。
+
 ## xtask の WebAssembly target
 
 `--target wasm32-wasip1` または `--target wasm32-unknown-unknown` を指定できます。

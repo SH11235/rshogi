@@ -159,6 +159,7 @@ impl<
     }
 
     #[cfg(all(
+        any(test, not(ls_dense_concat)),
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
@@ -169,23 +170,12 @@ impl<
         let Some(weights) = self.fused_weights.as_ref() else {
             return self.propagate(&sqr_clipped_relu_new(us, them).0);
         };
-        #[cfg(target_feature = "avx512vnni")]
-        let l1_out = if L1 == 3072 || (L1 == 2304 && cfg!(feature = "layerstacks-2304-sparse-l1")) {
-            super::ls_l1_kernel::avx512::sparse_index_only(
-                us,
-                them,
-                &self.l1.weights[..],
-                &self.l1.biases,
-            )
-        } else {
-            super::ls_l1_kernel::avx512::fused(us, them, weights, &self.l1.biases)
-        };
-        #[cfg(not(target_feature = "avx512vnni"))]
-        let l1_out = super::ls_l1_kernel::avx512::fused(us, them, weights, &self.l1.biases);
+        let l1_out = super::ls_l1_kernel::avx512::propagate_l1(us, them, &self.l1, weights);
         self.propagate_from_l1(&l1_out)
     }
 
     #[cfg(all(
+        not(ls_dense_concat),
         feature = "nnue-threat",
         target_arch = "x86_64",
         target_feature = "avx512f",
@@ -261,11 +251,13 @@ impl<
     }
 
     #[cfg(all(
+        any(test, not(ls_dense_concat)),
         target_arch = "x86_64",
         target_feature = "avx512f",
         target_feature = "avx512bw",
         any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
     ))]
+    #[inline]
     fn propagate_from_l1(&self, l1_out: &[i32; LS_L1_OUT]) -> i32 {
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
         let mut l2_out = [0i32; LS_L2_OUT];
@@ -438,21 +430,8 @@ impl<
     /// `num_buckets` は net file header の `num_buckets` field (legacy `.bin` の
     /// 場合は `DEFAULT_NUM_BUCKETS = 9`)。
     pub fn read<R: Read>(reader: &mut R, num_buckets: usize) -> io::Result<Self> {
-        debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
-        let mut buckets = Vec::with_capacity(num_buckets);
-
-        // fc_hash をスキップして bucket ごとに読み込み
-        let mut buf4 = [0u8; 4];
-        for _ in 0..num_buckets {
-            // fc_hash を読み飛ばす
-            reader.read_exact(&mut buf4)?;
-            let _fc_hash = u32::from_le_bytes(buf4);
-            // バケットを読み込み（常に非圧縮形式）
-            buckets.push(LayerStackBucket::read(reader)?);
-        }
-
         Ok(Self {
-            buckets: buckets.into_boxed_slice(),
+            buckets: read_layer_stack_buckets(reader, num_buckets, LayerStackBucket::read)?,
         })
     }
 
@@ -507,6 +486,21 @@ impl<
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub(super) fn read_layer_stack_buckets<R: Read, B>(
+    reader: &mut R,
+    num_buckets: usize,
+    read_bucket: impl Fn(&mut R) -> io::Result<B>,
+) -> io::Result<Box<[B]>> {
+    debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
+    let mut buckets = Vec::with_capacity(num_buckets);
+    let mut fc_hash = [0; 4];
+    for _ in 0..num_buckets {
+        reader.read_exact(&mut fc_hash)?;
+        buckets.push(read_bucket(reader)?);
+    }
+    Ok(buckets.into_boxed_slice())
 }
 
 // =============================================================================

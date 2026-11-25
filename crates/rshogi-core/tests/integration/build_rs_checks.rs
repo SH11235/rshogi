@@ -5,6 +5,142 @@
 
 include!("../../build/checks.rs");
 
+#[test]
+fn dense_concat_requires_a_single_static_halfka_hm_merged_slot() {
+    for (dense_concat, slot) in [
+        ("layerstacks-dense-concat-1536x16x64", "layerstacks-1536x15x64"),
+        ("layerstacks-dense-concat-2304x16x64", "layerstacks-2304x15x64"),
+    ] {
+        assert_dense_concat_feature_combination(dense_concat, slot);
+    }
+}
+
+fn assert_dense_concat_feature_combination(dense_concat: &str, slot: &str) {
+    let base = [
+        "mode-specific",
+        "layerstack-arch",
+        slot,
+        dense_concat,
+        "ft-halfka_hm_merged",
+        "nnue-progress-diff",
+    ];
+    assert!(validate_feature_combination(&lookup(&base)).is_ok());
+    let without_layerstack = base.map(|feature| {
+        if feature == "layerstack-arch" {
+            ""
+        } else {
+            feature
+        }
+    });
+    let error = validate_feature_combination(&lookup(&without_layerstack)).unwrap_err();
+    assert!(error.contains("DenseConcat"), "{error}");
+    for width in ["threat-width-256", "threat-width-512", "threat-width-768"] {
+        let threat = [base.as_slice(), &["nnue-threat", width]].concat();
+        let result = validate_feature_combination(&lookup(&threat));
+        if width == "threat-width-256" && slot == "layerstacks-2304x15x64" {
+            assert!(result.unwrap_err().contains("threat-width-256"));
+        } else {
+            assert!(result.is_ok(), "{slot}, {width}: {result:?}");
+        }
+    }
+
+    let wrong_slot = base.map(|feature| {
+        if feature == slot {
+            "layerstacks-1536x15x32"
+        } else {
+            feature
+        }
+    });
+    let error = validate_feature_combination(&lookup(&wrong_slot)).unwrap_err();
+    assert!(error.contains(slot), "{error}");
+
+    for incompatible in [
+        "nnue-runtime-dimensions",
+        "layerstacks-1536x15x32",
+        "ft-halfkp",
+        "nnue-effect-bucket",
+        "prepacked-nnue",
+        "mode-universal",
+        "mode-family",
+    ] {
+        let features = [base.as_slice(), &[incompatible]].concat();
+        let error = validate_feature_combination(&lookup(&features)).unwrap_err();
+        assert!(error.contains("DenseConcat"), "{incompatible}: {error}");
+    }
+}
+
+#[test]
+fn dense_concat_slots_are_mutually_exclusive() {
+    let features = [
+        "mode-specific",
+        "layerstack-arch",
+        "ft-halfka_hm_merged",
+        "layerstacks-dense-concat-1536x16x64",
+        "layerstacks-1536x15x64",
+        "layerstacks-dense-concat-2304x16x64",
+        "layerstacks-2304x15x64",
+    ];
+    let error = validate_feature_combination(&lookup(&features)).unwrap_err();
+    assert!(error.contains("DenseConcat features are mutually exclusive"), "{error}");
+}
+
+#[test]
+fn dense_concat_rejects_split_skip_editions_of_the_same_slot() {
+    for (dense_concat, split_skip) in [
+        (
+            "edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none",
+            "edition-layerstacks-halfka_hm_merged-1536x15x64-none",
+        ),
+        (
+            "edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat512",
+            "edition-layerstacks-halfka_hm_merged-2304x15x64-threat512",
+        ),
+    ] {
+        let slot = if dense_concat.contains("1536") {
+            "1536x"
+        } else {
+            "2304x"
+        };
+        let features = [
+            "mode-specific",
+            "layerstack-arch",
+            "ft-halfka_hm_merged",
+            if slot == "1536x" {
+                "layerstacks-dense-concat-1536x16x64"
+            } else {
+                "layerstacks-dense-concat-2304x16x64"
+            },
+            if slot == "1536x" {
+                "layerstacks-1536x15x64"
+            } else {
+                "layerstacks-2304x15x64"
+            },
+            dense_concat,
+            split_skip,
+        ];
+        let error = validate_feature_combination(&lookup(&features)).unwrap_err();
+        assert!(error.contains(split_skip), "{error}");
+    }
+}
+
+#[test]
+fn split_skip_editions_sharing_dense_concat_slots_match_the_manifest() {
+    let manifest = include_str!("../../Cargo.toml");
+    let declared: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.split_once(" = ").map(|(name, _)| name.trim()))
+        .filter(|name| {
+            name.starts_with("edition-layerstacks-halfka_hm_merged-1536x15x64-")
+                || name.starts_with("edition-layerstacks-halfka_hm_merged-2304x15x64-")
+        })
+        .collect();
+    let mut expected = SPLIT_SKIP_EDITIONS_SHARING_DENSE_CONCAT_SLOTS.to_vec();
+    let mut actual = declared;
+    expected.sort_unstable();
+    actual.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
 /// 与えられた feature 名集合を `has_feature` lookup に変換するヘルパー。
 fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {
     let owned: Vec<String> = features.iter().map(|s| (*s).to_string()).collect();

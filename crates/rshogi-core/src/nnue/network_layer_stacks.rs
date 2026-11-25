@@ -47,11 +47,13 @@ use super::constants::{LAYER_STACK_8X32_L1_OUT, LAYER_STACK_8X32_L2_IN};
 use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
 #[cfg(feature = "layerstacks-1536x31x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
+#[cfg(ls_dense_concat)]
+use super::dense_concat::{DENSE_CONCAT_FT, DenseConcatLayerStacks};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{
-    LayerStacks, LsSaturationCounts, sqr_clipped_relu_new, sqr_clipped_relu_transform,
-};
-#[cfg(feature = "layerstack-arch")]
+#[cfg(not(ls_dense_concat))]
+use super::layer_stacks::LayerStacks;
+use super::layer_stacks::{LsSaturationCounts, sqr_clipped_relu_new, sqr_clipped_relu_transform};
+#[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
 use super::layers::AffineTransform;
 #[cfg(feature = "ft-halfka_hm_merged")]
 use super::ls_feature_spec::HalfKaHmMergedSpec;
@@ -64,7 +66,7 @@ use super::ls_feature_spec::HalfKaSplitSpec;
 #[cfg(feature = "ft-halfkp")]
 use super::ls_feature_spec::HalfKpSpec;
 use super::ls_feature_spec::LsFeatureSpec;
-#[cfg(feature = "layerstack-arch")]
+#[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
 use super::net_delta::{
     NetCoefficientId, NetTensorKind, NetTensorShape, add_i16_delta, add_i32_delta,
 };
@@ -222,7 +224,11 @@ pub struct NetworkLayerStacks<
     /// Feature Transformer (FT::DIMENSIONS → L1)
     pub feature_transformer: FeatureTransformerLayerStacks<L1, FT>,
     /// LayerStacks (`num_buckets` 個の bucket)
+    #[cfg(not(ls_dense_concat))]
     pub layer_stacks: LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>,
+    /// DenseConcat の bucket 集合。
+    #[cfg(ls_dense_concat)]
+    pub layer_stacks: DenseConcatLayerStacks<L1, LS_L1_OUT, LS_L2_OUT>,
     /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
     pub fv_scale: i32,
     /// bucket 数 (= net file の `num_buckets` field、legacy `.bin` は 9)
@@ -326,6 +332,16 @@ impl<
 
         // アーキテクチャ文字列を解析
         let arch_str = String::from_utf8_lossy(&arch);
+        validate_static_layer_stacks_head(&arch_str)?;
+        #[cfg(all(feature = "prepacked-nnue", ls_dense_concat))]
+        if packed.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Prepacked NNUE does not support Head=DenseConcat",
+            ));
+        }
+        #[cfg(ls_dense_concat)]
+        validate_dense_concat_dimensions(&arch_str, (L1, LS_L1_OUT, LS_L2_OUT))?;
 
         // num_buckets-header layout: u32 を arch_str 直後・ft_hash 直前に読む。
         // legacy: field 無し → DEFAULT_NUM_BUCKETS (9) として進める。
@@ -535,15 +551,16 @@ impl<
             ));
         }
 
-        // LayerStacks を読み込み（FC 層は常に非圧縮、num_buckets 個分）
-        #[cfg(feature = "prepacked-nnue")]
+        #[cfg(all(feature = "prepacked-nnue", not(ls_dense_concat)))]
         let layer_stacks = if let Some(packed) = packed {
             LayerStacks::read_packed(reader, num_buckets, packed)?
         } else {
             LayerStacks::read(reader, num_buckets)?
         };
-        #[cfg(not(feature = "prepacked-nnue"))]
+        #[cfg(all(not(feature = "prepacked-nnue"), not(ls_dense_concat)))]
         let layer_stacks = LayerStacks::read(reader, num_buckets)?;
+        #[cfg(ls_dense_concat)]
+        let layer_stacks = DenseConcatLayerStacks::read(reader, num_buckets)?;
 
         // EOF検証: 余りデータがないことを確認
         // factorizedモデル（非coalesced）を誤って読んだ場合、
@@ -577,7 +594,7 @@ impl<
         // 診断ログを出力
         #[cfg(feature = "diagnostics")]
         {
-            Self::log_load_diagnostics(&feature_transformer, &layer_stacks);
+            Self::log_load_diagnostics(&feature_transformer, &layer_stacks.buckets[0].l1().biases);
         }
 
         // 重みをプロセス間共有メモリへ移行（多プロセス時のメモリ常駐・L3 競合を削減）。
@@ -598,7 +615,7 @@ impl<
     #[cfg(feature = "diagnostics")]
     fn log_load_diagnostics(
         ft: &FeatureTransformerLayerStacks<L1, FT>,
-        ls: &LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>,
+        l1_biases: &[i32; LS_L1_OUT],
     ) {
         // FT統計
         let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
@@ -616,7 +633,6 @@ impl<
         );
 
         // LayerStacks bucket0 の l1_biases
-        let l1_biases = &ls.buckets[0].l1().biases;
         info!("[NNUE Load] LayerStacks bucket0 l1_biases: {l1_biases:?}");
     }
 
@@ -626,7 +642,7 @@ impl<
         Self::read(&mut cursor)
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn net_tensor_shape(&self, kind: NetTensorKind) -> NetTensorShape {
         match kind {
             NetTensorKind::OutputWeight => NetTensorShape {
@@ -648,7 +664,7 @@ impl<
         }
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn net_coefficient(&self, id: &NetCoefficientId) -> i32 {
         match id.kind {
             NetTensorKind::OutputWeight => i32::from(
@@ -668,7 +684,7 @@ impl<
         }
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn apply_net_delta(&mut self, id: &NetCoefficientId, delta: i32) -> bool {
         match id.kind {
             NetTensorKind::OutputWeight => self.layer_stacks.buckets
@@ -768,12 +784,35 @@ impl<
     }
 
     /// 評価値を計算（事前計算済み bucket index を使用）
+    #[inline]
     pub fn evaluate_with_bucket(
         &self,
         pos: &Position,
         acc: &AccumulatorLayerStacks<L1>,
         bucket_index: usize,
     ) -> Value {
+        self.evaluate_bucket(pos, acc, bucket_index).0
+    }
+
+    /// 評価値と、PSQT 加算・スケーリング前の生スコアを返す。
+    #[cfg(ls_dense_concat)]
+    #[inline]
+    pub fn evaluate_with_bucket_and_raw(
+        &self,
+        pos: &Position,
+        acc: &AccumulatorLayerStacks<L1>,
+        bucket_index: usize,
+    ) -> (Value, i32) {
+        self.evaluate_bucket(pos, acc, bucket_index)
+    }
+
+    #[inline]
+    fn evaluate_bucket(
+        &self,
+        pos: &Position,
+        acc: &AccumulatorLayerStacks<L1>,
+        bucket_index: usize,
+    ) -> (Value, i32) {
         let side_to_move = pos.side_to_move();
 
         #[cfg(all(
@@ -848,7 +887,7 @@ impl<
         let psqt_value = 0;
 
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
-        Value::new(raw_score.saturating_add(psqt_value) / fv_scale)
+        (Value::new(raw_score.saturating_add(psqt_value) / fv_scale), raw_score)
     }
 
     /// 評価値を計算（詳細診断ログ付き）
@@ -1384,17 +1423,17 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         ls_match_size!(self, net => &net.bucket_routing)
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn net_tensor_shape(&self, kind: NetTensorKind) -> NetTensorShape {
         ls_match_size!(self, net => net.net_tensor_shape(kind))
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn net_coefficient(&self, id: &NetCoefficientId) -> i32 {
         ls_match_size!(self, net => net.net_coefficient(id))
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn apply_net_delta(&mut self, id: &NetCoefficientId, delta: i32) -> bool {
         ls_match_size!(self, net => net.apply_net_delta(id, delta))
     }
@@ -2771,17 +2810,17 @@ impl LayerStacksNetwork {
         ls_match_ft!(self, by_ft => by_ft.bucket_routing())
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn net_tensor_shape(&self, kind: NetTensorKind) -> NetTensorShape {
         ls_match_ft!(self, by_ft => by_ft.net_tensor_shape(kind))
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn net_coefficient(&self, id: &NetCoefficientId) -> i32 {
         ls_match_ft!(self, by_ft => by_ft.net_coefficient(id))
     }
 
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
     pub(crate) fn apply_net_delta(&mut self, id: &NetCoefficientId, delta: i32) -> bool {
         ls_match_ft!(self, by_ft => by_ft.apply_net_delta(id, delta))
     }
@@ -3097,8 +3136,106 @@ fn peek_layer_stacks_feature_set<R: Read + Seek>(
     reader: &mut R,
 ) -> io::Result<super::spec::FeatureSet> {
     let (_, arch_str) = peek_layer_stacks_header(reader)?;
+    validate_static_layer_stacks_head(&arch_str)?;
     detect_layer_stacks_feature_set(&arch_str)
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))
+}
+
+fn validate_static_layer_stacks_head(arch: &str) -> io::Result<()> {
+    #[cfg(not(ls_dense_concat))]
+    return super::spec::require_split_skip_layer_stacks_head(arch, "SplitSkip LayerStacks build");
+
+    #[cfg(ls_dense_concat)]
+    {
+        use super::spec::{LayerStacksHead, parse_layer_stacks_head};
+
+        match parse_layer_stacks_head(arch)
+            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?
+        {
+            LayerStacksHead::DenseConcat => Ok(()),
+            LayerStacksHead::SplitSkip => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "DenseConcat build requires Head=DenseConcat (model head is SplitSkip)",
+            )),
+        }
+    }
+}
+
+#[cfg(ls_dense_concat)]
+fn validate_dense_concat_dimensions(arch: &str, expected: (usize, usize, usize)) -> io::Result<()> {
+    fn invalid() -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, "Invalid DenseConcat network architecture")
+    }
+
+    let mut tokens = arch.split(',').peekable();
+    let features = tokens.next().ok_or_else(invalid)?;
+    let psqt = tokens.next_if(|part| part.starts_with("PSQT="));
+    let threat = tokens.next_if(|part| part.starts_with("Threat="));
+    let profile = tokens.next_if(|part| part.starts_with("ThreatProfile="));
+    let effect = tokens.next_if(|part| part.starts_with("EffectBucket="));
+    if tokens.next() != Some("Head=DenseConcat") {
+        return Err(invalid());
+    }
+    let network = tokens.next().ok_or_else(invalid)?;
+    let fv_scale = tokens.next_if(|part| part.starts_with("fv_scale="));
+    let threat_width = tokens.next_if(|part| part.starts_with("ThreatWidth="));
+    let bucket = tokens.next_if(|part| part.starts_with("ls_bucket="));
+    if tokens.next().is_some()
+        || (threat.is_none() && (profile.is_some() || threat_width.is_some()))
+        || [psqt, threat, profile, threat_width].into_iter().flatten().any(|token| {
+            let (_, value) = token.split_once('=').expect("known token prefix");
+            value.parse::<usize>().map_or(true, |n| n.to_string() != value)
+        })
+        || fv_scale.is_some_and(|token| {
+            let value = &token["fv_scale=".len()..];
+            value.parse::<i32>().map_or(true, |n| n.to_string() != value)
+        })
+        || bucket.is_some_and(|token| token["ls_bucket=".len()..].is_empty())
+        || arch.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(invalid());
+    }
+
+    let input_dims = if let Some(effect) = effect {
+        if !matches!(
+            effect,
+            "EffectBucket=2x2fixed"
+                | "EffectBucket=2x2bucketed"
+                | "EffectBucket=3x3fixed"
+                | "EffectBucket=3x3bucketed"
+        ) {
+            return Err(invalid());
+        }
+        super::spec::parse_effect_bucket_config(effect)
+            .ok_or_else(invalid)?
+            .dimensions()
+    } else {
+        super::constants::HALFKA_HM_DIMENSIONS
+    };
+    let (ft, l1, l2) = expected;
+    let actual = super::spec::parse_arch_dimensions(arch);
+    if actual != expected || !matches!(ft, 1536 | 2304) || (l1, l2) != (16, 64) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "DenseConcat dimensions (FT, L1, L2) mismatch: model={actual:?}, build={expected:?}"
+            ),
+        ));
+    }
+
+    let ft2 = 2 * ft;
+    let c0 = 2 * l1;
+    let c = c0 + 2 * l2;
+    if features != format!("Features=HalfKaHmMerged(Friend)[{input_dims}->{ft}x2]") {
+        return Err(invalid());
+    }
+    let expected_network = format!(
+        "Network=AffineTransform[1<-{c}](DenseConcat[{c}](AffineTransform[{l2}<-{c0}](SqrClippedReLU[{c0}](AffineTransform[{l1}<-{ft2}](InputSlice[{ft2}(0:{ft2})])))))"
+    );
+    if network != expected_network {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 /// header の arch 文字列から LayerStacks の (L1, L2, L3) を決める。
@@ -3112,6 +3249,9 @@ fn peek_layer_stacks_dimensions<R: Read + Seek>(
     reader: &mut R,
 ) -> io::Result<(usize, usize, usize)> {
     let (_, arch_str) = peek_layer_stacks_header(reader)?;
+    validate_static_layer_stacks_head(&arch_str)?;
+    #[cfg(ls_dense_concat)]
+    validate_dense_concat_dimensions(&arch_str, (DENSE_CONCAT_FT, 16, 64))?;
     let (l1_from_arch, l2_from_arch, l3_from_arch) = super::spec::parse_arch_dimensions(&arch_str);
     let l1 = if l1_from_arch == 0 {
         1536
@@ -3141,6 +3281,10 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> Result<super::spec::Featur
 
 #[cfg(test)]
 mod tests {
+    #[cfg(ls_dense_concat)]
+    use super::DenseConcatLayerStacks as TestLayerStacks;
+    #[cfg(not(ls_dense_concat))]
+    use super::LayerStacks as TestLayerStacks;
     #[cfg(feature = "layerstack-arch")]
     use super::*;
     #[cfg(all(
@@ -3154,7 +3298,7 @@ mod tests {
     #[test]
     fn fixed_network_sizes() {
         use super::NetworkLayerStacks;
-        use crate::nnue::ls_feature_spec::{HalfKaHmMergedSpec, HalfKaHmSplitSpec};
+        use crate::nnue::ls_feature_spec::HalfKaHmMergedSpec;
 
         // x86_64 Linux の net が占めるキャッシュライン数を、3 軸対応で増やさない。
         let overhead = match (cfg!(feature = "nnue-psqt"), cfg!(feature = "nnue-threat")) {
@@ -3171,18 +3315,23 @@ mod tests {
                 )
             };
         }
-        check_size!(512, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(768, 8, 14, 32, 32, HalfKaHmMergedSpec);
-        check_size!(768, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(1024, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(1536, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(1536, 16, 30, 32, 32, HalfKaHmSplitSpec);
-        check_size!(1536, 32, 62, 64, 32, HalfKaHmMergedSpec);
-        check_size!(1536, 16, 30, 32, 64, HalfKaHmMergedSpec);
-        check_size!(1024, 16, 30, 32, 64, HalfKaHmMergedSpec);
         check_size!(2304, 16, 30, 32, 64, HalfKaHmMergedSpec);
-        check_size!(3072, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(3072, 16, 30, 32, 64, HalfKaHmMergedSpec);
+        #[cfg(not(ls_dense_concat))]
+        {
+            use crate::nnue::ls_feature_spec::HalfKaHmSplitSpec;
+
+            check_size!(512, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(768, 8, 14, 32, 32, HalfKaHmMergedSpec);
+            check_size!(768, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(1024, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(1536, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(1536, 16, 30, 32, 32, HalfKaHmSplitSpec);
+            check_size!(1536, 32, 62, 64, 32, HalfKaHmMergedSpec);
+            check_size!(1536, 16, 30, 32, 64, HalfKaHmMergedSpec);
+            check_size!(1024, 16, 30, 32, 64, HalfKaHmMergedSpec);
+            check_size!(3072, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(3072, 16, 30, 32, 64, HalfKaHmMergedSpec);
+        }
     }
 
     #[cfg(feature = "layerstack-arch")]
@@ -3377,13 +3526,18 @@ mod tests {
             32
         };
         for width in [256, 512, 768, N] {
+            #[cfg(not(ls_dense_concat))]
             let mut arch = format!(
-                "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720,ls_bucket=ownking:2"
+                "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720"
             );
+            #[cfg(ls_dense_concat)]
+            let mut arch = super::super::dense_concat_tests::dense_concat_arch(N, 16, L3)
+                .replace(",Head=", ",Threat=216720,Head=");
             if width != N {
                 use std::fmt::Write;
                 write!(arch, ",ThreatWidth={width}").unwrap();
             }
+            arch.push_str(",ls_bucket=ownking:2");
             let mut bytes = Vec::new();
             bytes.extend_from_slice(
                 &super::super::constants::NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes(),
@@ -3433,13 +3587,14 @@ mod tests {
         }
     }
 
+    #[cfg(not(ls_dense_concat))]
     #[test]
     fn saturation_uses_forward_accumulators() {
         use super::super::ls_feature_spec::HalfKpSpec;
         use super::*;
         let mut network = NetworkLayerStacks::<64, 16, 30, 32, HalfKpSpec> {
             feature_transformer: FeatureTransformerLayerStacks::for_accumulator_tests(),
-            layer_stacks: LayerStacks::with_num_buckets(1),
+            layer_stacks: TestLayerStacks::with_num_buckets(1),
             fv_scale: 1,
             num_buckets: 1,
             bucket_routing: BucketRouting::NONE,
@@ -3559,6 +3714,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(ls_dense_concat))]
     #[test]
     fn initialized_layerstack_forward_matches_explicit_buffer() {
         use super::super::ls_feature_spec::HalfKpSpec;
@@ -3566,7 +3722,7 @@ mod tests {
         let mut network = NetworkLayerStacks::<64, 16, 30, 32, HalfKpSpec> {
             feature_transformer: FeatureTransformerLayerStacks::read(&mut std::io::repeat(0))
                 .unwrap(),
-            layer_stacks: LayerStacks::with_num_buckets(1),
+            layer_stacks: TestLayerStacks::with_num_buckets(1),
             fv_scale: 16,
             num_buckets: 1,
             bucket_routing: BucketRouting::NONE,
@@ -3606,7 +3762,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "nnue-effect-bucket"))]
+    #[cfg(not(any(feature = "nnue-effect-bucket", ls_dense_concat)))]
     fn check_packed8_accumulators<const N: usize>() {
         use super::super::ls_feature_spec::HalfKaHmMergedSpec;
         use super::super::piece_weights;
@@ -3655,7 +3811,7 @@ mod tests {
             ft.threat_weights = weights.into();
         }
 
-        let mut layer_stacks = LayerStacks::with_num_buckets(1);
+        let mut layer_stacks = TestLayerStacks::with_num_buckets(1);
         let bucket = &mut layer_stacks.buckets[0];
         bucket.edit_l1(|l1| l1.weights.make_mut().fill(1));
         bucket.l2.weights.make_mut().fill(1);
@@ -3759,7 +3915,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "nnue-effect-bucket"))]
+    #[cfg(not(any(feature = "nnue-effect-bucket", ls_dense_concat)))]
     #[cfg_attr(
         not(all(
             target_arch = "x86_64",
@@ -3784,18 +3940,24 @@ mod tests {
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1536_0016_0009);
         let mut bytes = Vec::new();
+        const FC0_OUT: usize = 16;
+        let output_input = if cfg!(ls_dense_concat) {
+            2 * FC0_OUT + 2 * L2
+        } else {
+            L2
+        };
         for _ in 0..DEFAULT_NUM_BUCKETS {
             bytes.extend_from_slice(&0u32.to_le_bytes());
-            for (input, output) in [(N, 16), (32, L2), (L2, 1)] {
+            for (input, output) in [(N, FC0_OUT), (32, L2), (output_input, 1)] {
                 for _ in 0..output {
                     bytes.extend_from_slice(&rng.random_range(-1024i32..1024).to_le_bytes());
                 }
                 bytes.extend((0..input * output).map(|_| rng.random_range(-8i8..8) as u8));
             }
         }
-        let network = NetworkLayerStacks::<N, 16, 30, 32, HalfKpSpec, L2> {
+        let network = NetworkLayerStacks::<N, FC0_OUT, 30, 32, HalfKpSpec, L2> {
             feature_transformer: FeatureTransformerLayerStacks::for_output_transform_tests(),
-            layer_stacks: LayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
+            layer_stacks: TestLayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
             fv_scale: 16,
             num_buckets: DEFAULT_NUM_BUCKETS,
             bucket_routing: BucketRouting::NONE,
@@ -3878,25 +4040,33 @@ mod tests {
 
     #[test]
     fn synthetic_fused_shapes_evaluate_with_bucket_match_legacy() {
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(false);
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(false);
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(false);
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(false);
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<3072, 64>(false);
+        #[cfg(ls_dense_concat)]
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<{ super::DENSE_CONCAT_FT }, 64>(
+            false,
+        );
+        #[cfg(not(ls_dense_concat))]
+        {
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(false);
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(false);
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(false);
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(false);
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<3072, 64>(false);
+        }
     }
 
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn synthetic_threat_evaluation_matches_scalar_for_both_sides() {
-        if cfg!(feature = "layerstacks-1024x15x64") {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(true);
+        const SHAPE: (usize, usize) = if cfg!(feature = "layerstacks-1024x15x64") {
+            (1024, 64)
         } else if cfg!(feature = "layerstacks-1536x15x64") {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(true);
+            (1536, 64)
         } else if cfg!(feature = "layerstacks-2304x15x64") {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(true);
+            (2304, 64)
         } else {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(true);
-        }
+            (1536, 32)
+        };
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<{ SHAPE.0 }, { SHAPE.1 }>(true);
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト

@@ -232,6 +232,7 @@ impl DynamicLayerStacksNetwork {
         reader.read_exact(&mut arch)?;
         let arch =
             std::str::from_utf8(&arch).map_err(|_| invalid("architecture string is not UTF-8"))?;
+        super::spec::require_split_skip_layer_stacks_head(arch, "Dynamic LayerStacks reader")?;
         let num_buckets = if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS {
             reader.read_exact(&mut buf4)?;
             u32::from_le_bytes(buf4) as usize

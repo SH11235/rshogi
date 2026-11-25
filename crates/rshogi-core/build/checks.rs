@@ -23,6 +23,25 @@ const FT_FEATURES: &[&str] = &[
     "ft-halfka_hm_merged",
 ];
 
+const DENSE_CONCAT_SLOTS: &[(&str, &str)] = &[
+    ("layerstacks-dense-concat-1536x16x64", "layerstacks-1536x15x64"),
+    ("layerstacks-dense-concat-2304x16x64", "layerstacks-2304x15x64"),
+];
+
+/// DenseConcat と同じ寸法の枠を使う SplitSkip の edition。枠を共有するので枠の数では
+/// 併用を検出できず、名前で拒否する。
+const SPLIT_SKIP_EDITIONS_SHARING_DENSE_CONCAT_SLOTS: &[&str] = &[
+    "edition-layerstacks-halfka_hm_merged-1536x15x64-none",
+    "edition-layerstacks-halfka_hm_merged-1536x15x64-threat",
+    "edition-layerstacks-halfka_hm_merged-1536x15x64-threat256",
+    "edition-layerstacks-halfka_hm_merged-1536x15x64-threat512",
+    "edition-layerstacks-halfka_hm_merged-1536x15x64-threat768",
+    "edition-layerstacks-halfka_hm_merged-2304x15x64-none",
+    "edition-layerstacks-halfka_hm_merged-2304x15x64-threat",
+    "edition-layerstacks-halfka_hm_merged-2304x15x64-threat512",
+    "edition-layerstacks-halfka_hm_merged-2304x15x64-threat768",
+];
+
 fn use_avx512bw_fused_1536(has_feature: &dyn Fn(&str) -> bool) -> bool {
     let excluded = [
         "mode-family",
@@ -63,6 +82,34 @@ fn validate_feature_combination(
 
     let ft_count = FT_FEATURES.iter().filter(|f| has_feature(f)).count();
 
+    let mut dense_concat_slots =
+        DENSE_CONCAT_SLOTS.iter().filter(|(feature, _)| has_feature(feature));
+    if let Some(&(_, slot)) = dense_concat_slots.next() {
+        if dense_concat_slots.next().is_some() {
+            return Err("DenseConcat features are mutually exclusive".to_owned());
+        }
+        if let Some(edition) =
+            SPLIT_SKIP_EDITIONS_SHARING_DENSE_CONCAT_SLOTS.iter().find(|f| has_feature(f))
+        {
+            return Err(format!("DenseConcat cannot be combined with the SplitSkip edition {edition}"));
+        }
+        if !(layerstack_arch
+            && has_feature(slot)
+            && layerstacks_count == 1
+            && has_feature("ft-halfka_hm_merged")
+            && ft_count == 1
+            && !runtime_dimensions
+            && !mode_family
+            && !mode_universal
+            && !has_feature("nnue-effect-bucket")
+            && !has_feature("prepacked-nnue"))
+        {
+            return Err(format!(
+                "DenseConcat requires a single static HalfKaHmMerged LayerStacks slot ({slot}) without EffectBucket or prepacked-nnue"
+            ));
+        }
+    }
+
     let threat_width_256 = has_feature("threat-width-256");
     let threat_width_512 = has_feature("threat-width-512");
     let threat_width_768 = has_feature("threat-width-768");
@@ -79,7 +126,9 @@ fn validate_feature_combination(
     }
     let static_layerstack = mode_specific && layerstack_arch && !runtime_dimensions;
     if threat_width_256 && !(static_layerstack && has_feature("layerstacks-1536x15x64")) {
-        return Err("threat-width-256 requires a static 1536x15x64 edition".to_owned());
+        return Err(
+            "threat-width-256 requires a static layerstacks-1536x15x64 slot".to_owned(),
+        );
     }
     let partial_width_l2_64 = has_feature("layerstacks-1024x15x64")
         || has_feature("layerstacks-1536x15x64")

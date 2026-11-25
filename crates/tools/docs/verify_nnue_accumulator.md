@@ -16,4 +16,7 @@ LayerStacks net を静的構造のまま読み込めます（CLI は変わりま
 L2=64 モデルの検証には、ビルド時に `--features layerstacks-1024x15x64`、`--features layerstacks-1536x15x64`、
 `--features layerstacks-2304x15x64` または `--features layerstacks-3072x15x64` をモデルに合わせて追加する。
 
+LayerStacks-DenseConcat 1536-16-64 と 2304-16-64 では、`--no-default-features` と
+FT 幅・Threat 幅に合う [DenseConcat 専用 edition](eval_sfens.md#layerstacks-denseconcat) を指定する。
+
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。

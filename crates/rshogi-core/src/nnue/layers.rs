@@ -531,12 +531,12 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         OUTPUT_DIM * Self::PADDED_INPUT
     }
 
-    #[cfg(any(test, feature = "layerstack-arch"))]
+    #[cfg(any(test, all(feature = "layerstack-arch", not(ls_dense_concat))))]
     pub(crate) fn file_weight(&self, index: usize) -> i8 {
         self.weights[Self::file_weight_index(index)]
     }
 
-    #[cfg(any(test, feature = "layerstack-arch"))]
+    #[cfg(any(test, all(feature = "layerstack-arch", not(ls_dense_concat))))]
     pub(crate) fn apply_file_weight_delta(&mut self, index: usize, delta: i32) -> bool {
         let memory_index = Self::file_weight_index(index);
         let (value, clamped) = super::net_delta::add_i8_delta(self.weights[memory_index], delta);

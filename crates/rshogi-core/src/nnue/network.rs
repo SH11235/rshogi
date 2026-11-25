@@ -522,6 +522,19 @@ fn layer_stacks_uses_static_slot<R: Read + Seek>(
     result
 }
 
+pub(super) fn validate_read_head(arch: &str, layerstack_arch: bool) -> io::Result<bool> {
+    let dense_concat = super::spec::parse_layer_stacks_head(arch)
+        .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?
+        == super::spec::LayerStacksHead::DenseConcat;
+    if dense_concat && !layerstack_arch {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Head=DenseConcat requires a static DenseConcat edition",
+        ));
+    }
+    Ok(dense_concat)
+}
+
 impl NNUENetwork {
     /// 重みを含めて丸ごと複製する。重みの確保に失敗したら abort せずに `OutOfMemory` を返す。
     ///
@@ -545,13 +558,16 @@ impl NNUENetwork {
     }
 
     /// 読み込まれた net から対象テンソルの実行時形状を返す。
-    #[cfg(any(feature = "nnue-runtime-dimensions", feature = "layerstack-arch"))]
+    #[cfg(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "layerstack-arch", not(ls_dense_concat))
+    ))]
     pub fn net_tensor_shape(&self, kind: NetTensorKind) -> Result<NetTensorShape, NetDeltaError> {
         #[cfg(feature = "nnue-runtime-dimensions")]
         if let Self::DynamicLayerStacks(net) = self {
             return Ok(net.net_tensor_shape(kind));
         }
-        #[cfg(feature = "layerstack-arch")]
+        #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
         if let Self::LayerStacks(net) = self {
             return Ok(net.net_tensor_shape(kind));
         }
@@ -561,7 +577,10 @@ impl NNUENetwork {
     }
 
     /// 読み込まれた net から対象テンソルの実行時形状を返す。
-    #[cfg(not(any(feature = "nnue-runtime-dimensions", feature = "layerstack-arch")))]
+    #[cfg(not(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "layerstack-arch", not(ls_dense_concat))
+    )))]
     pub fn net_tensor_shape(&self, kind: NetTensorKind) -> Result<NetTensorShape, NetDeltaError> {
         match kind {
             NetTensorKind::OutputWeight
@@ -574,14 +593,17 @@ impl NNUENetwork {
     }
 
     /// ファイル格納順 ID で指定した係数の現在値を返す。
-    #[cfg(any(feature = "nnue-runtime-dimensions", feature = "layerstack-arch"))]
+    #[cfg(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "layerstack-arch", not(ls_dense_concat))
+    ))]
     pub fn net_coefficient(&self, id: &NetCoefficientId) -> Result<i32, NetDeltaError> {
         self.net_tensor_shape(id.kind)?.validate(id)?;
         #[cfg(feature = "nnue-runtime-dimensions")]
         if let Self::DynamicLayerStacks(net) = self {
             return Ok(net.net_coefficient(id));
         }
-        #[cfg(feature = "layerstack-arch")]
+        #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
         if let Self::LayerStacks(net) = self {
             return Ok(net.net_coefficient(id));
         }
@@ -589,7 +611,10 @@ impl NNUENetwork {
     }
 
     /// ファイル格納順 ID で指定した係数の現在値を返す。
-    #[cfg(not(any(feature = "nnue-runtime-dimensions", feature = "layerstack-arch")))]
+    #[cfg(not(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "layerstack-arch", not(ls_dense_concat))
+    )))]
     pub fn net_coefficient(&self, id: &NetCoefficientId) -> Result<i32, NetDeltaError> {
         match id.kind {
             NetTensorKind::OutputWeight
@@ -605,7 +630,10 @@ impl NNUENetwork {
     ///
     /// すべての ID を先に検証するため、エラー時は net を変更しない。
     /// 探索などが重みを共有中の場合は `NetDeltaError::SharedNetwork` を返す。
-    #[cfg(any(feature = "nnue-runtime-dimensions", feature = "layerstack-arch"))]
+    #[cfg(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "layerstack-arch", not(ls_dense_concat))
+    ))]
     pub fn apply_net_deltas(
         &mut self,
         deltas: &[NetDelta],
@@ -627,7 +655,7 @@ impl NNUENetwork {
                 Self::DynamicLayerStacks(net) => Arc::get_mut(net)
                     .ok_or(NetDeltaError::SharedNetwork)?
                     .apply_net_delta(&delta.id, delta.delta),
-                #[cfg(feature = "layerstack-arch")]
+                #[cfg(all(feature = "layerstack-arch", not(ls_dense_concat)))]
                 Self::LayerStacks(net) => Arc::get_mut(net)
                     .ok_or(NetDeltaError::SharedNetwork)?
                     .apply_net_delta(&delta.id, delta.delta),
@@ -639,7 +667,10 @@ impl NNUENetwork {
     }
 
     /// LayerStacks net の係数へ整数 delta を 1 回適用する。
-    #[cfg(not(any(feature = "nnue-runtime-dimensions", feature = "layerstack-arch")))]
+    #[cfg(not(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "layerstack-arch", not(ls_dense_concat))
+    )))]
     pub fn apply_net_deltas(
         &mut self,
         deltas: &[NetDelta],
@@ -728,6 +759,8 @@ impl NNUENetwork {
     ) -> io::Result<LayerStacksNetwork> {
         reader.seek(SeekFrom::Start(0))?;
         let (version, arch_str) = peek_layer_stacks_header(reader)?;
+        super::spec::parse_layer_stacks_head(&arch_str)
+            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
 
         if !matches!(
             version,
@@ -857,6 +890,8 @@ impl NNUENetwork {
                 let mut arch = vec![0u8; arch_len];
                 reader.read_exact(&mut arch)?;
                 let arch_str = String::from_utf8_lossy(&arch);
+                let dense_concat =
+                    validate_read_head(&arch_str, cfg!(feature = "layerstack-arch"))?;
 
                 // 活性化関数を検出
                 let activation_str = detect_activation_from_arch(&arch_str);
@@ -873,7 +908,7 @@ impl NNUENetwork {
                 // 等が 4 byte ずれる) するか、悪ければ別 arch として誤読する。誤読を
                 // 確実に防ぐため、当該 version + 非-LayerStack override の組合せをここで明示
                 // reject する。
-                if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
+                if (version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS || dense_concat)
                     && !matches!(
                         arch_override,
                         NNUEArchitectureOverride::Auto
@@ -884,8 +919,7 @@ impl NNUENetwork {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!(
-                            "NNUE (version {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x}, LayerStack \
-                             with num_buckets header) は LayerStack 専用 layout。\
+                            "NNUE (version {version:#x}) は LayerStack 専用 layout。\
                              NNUE_ARCHITECTURE override の値 (LayerStack 以外) では読めない。\
                              override を `Auto` / `LayerStacks` / `LayerStacksPSQT` のいずれかに \
                              変更するか、対応する legacy net を使用すること。"
@@ -1222,9 +1256,22 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.architecture_name(),
             Self::HalfKaHmSplit(net) => net.architecture_name(),
             Self::HalfKP(net) => net.architecture_name(),
-            #[cfg(all(feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
-            Self::LayerStacks(net) => net.architecture_spec().name(),
-            #[cfg(all(feature = "layerstack-arch", not(feature = "nnue-runtime-dimensions")))]
+            #[cfg(all(
+                feature = "layerstack-arch",
+                any(feature = "nnue-runtime-dimensions", ls_dense_concat)
+            ))]
+            Self::LayerStacks(net) => {
+                let spec = net.architecture_spec();
+                if cfg!(ls_dense_concat) {
+                    format!("LayerStacks-DenseConcat {}-{}-{}", spec.l1, spec.l2, spec.l3)
+                } else {
+                    spec.name()
+                }
+            }
+            #[cfg(all(
+                feature = "layerstack-arch",
+                not(any(feature = "nnue-runtime-dimensions", ls_dense_concat))
+            ))]
             Self::LayerStacks(_) => "LayerStacks".to_string(),
         }
     }
@@ -1882,6 +1929,21 @@ pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo>
             // ヘッダーから FeatureSet を取得（検出のヒントに使用）
             let parsed = super::spec::parse_architecture(&arch_str)
                 .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
+
+            if super::spec::parse_layer_stacks_head(&arch_str)
+                .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?
+                == super::spec::LayerStacksHead::DenseConcat
+            {
+                return Ok(NnueFormatInfo {
+                    architecture: "LayerStacks-DenseConcat".to_owned(),
+                    l1_dimension: parsed.l1 as u32,
+                    l2_dimension: parsed.l2 as u32,
+                    l3_dimension: parsed.l3 as u32,
+                    activation,
+                    version,
+                    arch_string: arch_str,
+                });
+            }
 
             // ファイルサイズからアーキテクチャを検出（L1/L2/L3 の正確な値を取得）
             let (l1, l2, l3, feature_set, used_file_size_detection) = if let Some(detection) =
@@ -3620,7 +3682,7 @@ mod tests {
     /// FT/PSQT/LayerStack block を含まないヘッダだけの buffer を返す。
     /// load 側は header 検証で reject する想定なので、それ以降の block は不要。
     #[cfg(any(feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
-    fn build_num_buckets_header_with_arch_suffix(num_buckets: u32, suffix: &str) -> Vec<u8> {
+    fn build_num_buckets_header_with_psqt(num_buckets: u32, psqt: bool) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
@@ -3640,6 +3702,7 @@ mod tests {
         .into_iter()
         .find_map(|(enabled, dims)| enabled.then_some(dims))
         .unwrap_or((1536, 16, 32));
+        #[cfg(not(ls_dense_concat))]
         let (ft, input) = [
             (cfg!(feature = "ft-halfka_hm_merged"), ("HalfKaHmMerged", 73305)),
             (cfg!(feature = "ft-halfka_hm_split"), ("HalfKaHmSplit", 76950)),
@@ -3650,9 +3713,25 @@ mod tests {
         .into_iter()
         .find_map(|(enabled, ft)| enabled.then_some(ft))
         .unwrap_or(("HalfKaHmMerged", 73305));
-        let arch = format!(
-            "Features={ft}(Friend)[{input}->{l1}x2],LayerStacks,l2={l2},l3={l3},FV_SCALE=28{suffix}"
-        );
+        #[cfg(not(ls_dense_concat))]
+        let arch = {
+            let psqt_token = if psqt {
+                format!(",PSQT={num_buckets}")
+            } else {
+                String::new()
+            };
+            format!(
+                "Features={ft}(Friend)[{input}->{l1}x2],LayerStacks,l2={l2},l3={l3},FV_SCALE=28{psqt_token}"
+            )
+        };
+        #[cfg(ls_dense_concat)]
+        let arch = {
+            let mut arch = super::super::dense_concat_tests::dense_concat_arch(l1, l2, l3);
+            if psqt {
+                arch = arch.replace(",Head=", &format!(",PSQT={num_buckets},Head="));
+            }
+            arch
+        };
         bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
         bytes.extend_from_slice(arch.as_bytes());
         bytes.extend_from_slice(&num_buckets.to_le_bytes());
@@ -3661,7 +3740,7 @@ mod tests {
 
     #[cfg(any(feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
     fn build_num_buckets_header(num_buckets: u32) -> Vec<u8> {
-        build_num_buckets_header_with_arch_suffix(num_buckets, "")
+        build_num_buckets_header_with_psqt(num_buckets, false)
     }
 
     #[cfg(any(
@@ -3671,7 +3750,7 @@ mod tests {
     #[test]
     fn layer_stacks_rejects_psqt_above_32_buckets() {
         for n in [33, 64] {
-            let bytes = build_num_buckets_header_with_arch_suffix(n, &format!(",PSQT={n}"));
+            let bytes = build_num_buckets_header_with_psqt(n, true);
             let message = "LayerStacks nets with PSQT support at most 32 buckets";
             let Err(err) = NNUENetwork::read_with_architecture_override(
                 &mut Cursor::new(&bytes),
@@ -3681,6 +3760,7 @@ mod tests {
             };
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert_eq!(err.to_string(), message);
+            #[cfg(not(ls_dense_concat))]
             assert_eq!(
                 super::super::net_bin_layout::LayerStacksBinLayout::from_bytes(&bytes)
                     .unwrap_err()
@@ -3749,14 +3829,15 @@ mod tests {
     #[test]
     fn test_layer_stack_num_buckets_header_with_non_layerstack_override_rejected() {
         let bytes = build_num_buckets_header(9);
-        let previous_override = get_nnue_architecture_override();
         for override_mode in [
             NNUEArchitectureOverride::HalfKP,
             NNUEArchitectureOverride::HalfKaHmMerged,
             NNUEArchitectureOverride::HalfKaSplit,
         ] {
-            set_nnue_architecture_override(override_mode);
-            let err = match NNUENetwork::from_bytes(&bytes) {
+            let err = match NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes),
+                override_mode,
+            ) {
                 Ok(_) => panic!(
                     "num_buckets-header net を {override_mode:?} override で読んだら reject されるべき"
                 ),
@@ -3769,7 +3850,6 @@ mod tests {
                 "{override_mode:?} のエラーメッセージに LayerStack が含まれていない: {msg}"
             );
         }
-        set_nnue_architecture_override(previous_override);
     }
 
     /// HalfKP 256x32x32 (suisho5 系) のヘッダだけを持つ buffer を返す。

@@ -527,6 +527,10 @@ fn check_models() {
     check_loader_matrix();
     search_models::for_each_model(true, |name, mut bytes| {
         if name == "LayerStacks" {
+            #[cfg(ls_dense_concat)]
+            {
+                bytes = with_dense_concat_head(bytes);
+            }
             bytes = with_auxiliary_weights(
                 bytes,
                 nnue::HALFKA_HM_DIMENSIONS,
@@ -645,7 +649,7 @@ fn check_models() {
         material::set_material_level(MaterialLevel::Lv9);
         assert_eq!(eager.evaluate(&pos), original_value);
         material::disable_material();
-        if name == "LayerStacks" {
+        if name == "LayerStacks" && !cfg!(ls_dense_concat) {
             use nnue::net_delta::{NetCoefficientId, NetDelta, NetTensorKind};
             let mut standalone = NNUENetwork::from_bytes(&bytes).unwrap();
             let owner = SearchEvaluator::from_network(&standalone);
@@ -682,8 +686,13 @@ fn check_models() {
         } else {
             let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
             let bias = 12 + arch_len + 4;
-            let old = i16::from_le_bytes(bytes[bias..bias + 2].try_into().unwrap());
-            bytes[bias..bias + 2].copy_from_slice(&(old + 17).to_le_bytes());
+            if name == "LayerStacks" {
+                let bias = bias + 8 + nnue::leb128::LEB128_MAGIC.len();
+                bytes[bias] += 17;
+            } else {
+                let old = i16::from_le_bytes(bytes[bias..bias + 2].try_into().unwrap());
+                bytes[bias..bias + 2].copy_from_slice(&(old + 17).to_le_bytes());
+            }
             nnue::init_nnue_from_bytes(&bytes).unwrap();
         }
         let mut replaced = prepared();
@@ -866,6 +875,7 @@ fn check_loader_matrix() {
                 cfg!(feature = "nnue-runtime-dimensions")
                     || (cfg!(feature = "layerstack-arch")
                         && !cfg!(feature = "nnue-effect-bucket")
+                        && !cfg!(ls_dense_concat)
                         && enabled
                         && shape_enabled),
             );
@@ -908,6 +918,27 @@ fn check_loader_matrix() {
     }
 }
 
+#[cfg(ls_dense_concat)]
+fn with_dense_concat_head(mut bytes: Vec<u8>) -> Vec<u8> {
+    let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let (ft, l1, l2) =
+        nnue::spec::parse_arch_dimensions(std::str::from_utf8(&bytes[12..12 + arch_len]).unwrap());
+    let split_skip_bucket_bytes = 4 + (4 + ft) * l1 + (4 + 32) * l2 + 4 + l2;
+    let buckets = u32::from_le_bytes(bytes[12 + arch_len..16 + arch_len].try_into().unwrap());
+    // SplitSkip の fc_1 は 30 入力を 32 に padding 済み。fc_2 に fc_0 と fc_1 の二乗分を足す。
+    let mut bucket_end = bytes.len();
+    for _ in 0..buckets {
+        bytes.splice(bucket_end..bucket_end, std::iter::repeat_n(0, 2 * l1 + l2));
+        bucket_end -= split_skip_bucket_bytes;
+    }
+    let arch = super::super::dense_concat_tests::dense_concat_arch(ft, l1, l2);
+    bytes.splice(
+        8..12 + arch_len,
+        (arch.len() as u32).to_le_bytes().into_iter().chain(arch.bytes()),
+    );
+    bytes
+}
+
 fn with_auxiliary_weights(
     bytes: Vec<u8>,
     dimensions: usize,
@@ -920,8 +951,10 @@ fn with_auxiliary_weights(
     }
     let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let mut arch = String::from_utf8(bytes[12..12 + arch_len].to_vec()).unwrap();
+    let mut extensions = String::new();
+    use std::fmt::Write;
     if has_psqt {
-        arch.push_str(&format!(",PSQT={buckets}"));
+        write!(extensions, "PSQT={buckets},").unwrap();
     }
     #[cfg(feature = "nnue-threat")]
     let threat_profile = nnue::threat_exclusion::THREAT_PROFILE_ID;
@@ -930,9 +963,9 @@ fn with_auxiliary_weights(
         let (l1, _, _) = nnue::spec::parse_arch_dimensions(&arch);
         let width = nnue::expected_threat_width(l1);
         if has_threat {
-            arch.push_str(&format!(",Threat={}", nnue::threat_features::THREAT_DIMENSIONS));
+            write!(extensions, "Threat={},", nnue::threat_features::THREAT_DIMENSIONS).unwrap();
             if threat_profile != 0 {
-                arch.push_str(&format!(",ThreatProfile={threat_profile}"));
+                write!(extensions, "ThreatProfile={threat_profile},").unwrap();
             }
             if width != l1 {
                 arch.push_str(&format!(",ThreatWidth={width}"));
@@ -940,6 +973,12 @@ fn with_auxiliary_weights(
         }
         width
     };
+    if let Some(head) = arch.find("Head=DenseConcat,") {
+        arch.insert_str(head, &extensions);
+    } else {
+        arch.push(',');
+        arch.push_str(extensions.trim_end_matches(','));
+    }
     let block_size_offset = 12 + arch_len + 8 + nnue::leb128::LEB128_MAGIC.len();
     let block_size =
         u32::from_le_bytes(bytes[block_size_offset..block_size_offset + 4].try_into().unwrap())
