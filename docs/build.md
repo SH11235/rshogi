@@ -325,13 +325,13 @@ edition-universal
 
 ### `cargo xtask list-binaries`
 
-`engines/` 下の binary を manifest と合わせて整形表示する。
+`engines/` 下の binary を manifest と合わせて整形表示する。以下の commit ID は例示用。
 
 ```bash
 $ cargo xtask list-binaries
 BINARY                                            EDITION                                        PROFILE     COMMIT    AGE  SIZE    STATUS
-rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt    edition-layerstacks-halfka_hm_merged-1536x15x32-psqt    production  5616ea7c  2h   2.9 MB  current
-rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-threat  edition-layerstacks-halfka_hm_merged-1536x15x32-threat  production  4a34e06b  5d   2.8 MB  stale
+rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-psqt    edition-layerstacks-halfka_hm_merged-1536x15x32-psqt    production  0123abcd  2h   2.9 MB  current
+rshogi-usi-layerstacks-halfka_hm_merged-1536x15x32-threat  edition-layerstacks-halfka_hm_merged-1536x15x32-threat  production  4567cdef  5d   2.8 MB  stale
 ```
 
 STATUS 列:
@@ -349,12 +349,12 @@ STATUS 列:
 xtask 経由 build では `engines/<binary>.meta.toml` を同階層に書き出す。後から
 「この binary はどの commit / profile か」を追跡するための manifest。
 
-例:
+例 (commit ID は例示用):
 ```toml
 schema_version = 1
 edition = "edition-layerstacks-halfka_hm_merged-1536x15x32-psqt"
 profile = "production"
-commit = "5616ea7c056ff21b6705c0ef00ca7266b7b2849f"
+commit = "0123abcd4567efab89abcdef0123456789abcdef"
 commit_dirty = false
 built_at = "2026-05-24T22:30:00+09:00"
 rustc = "rustc 1.85.0 (abc 2026-01-01)"

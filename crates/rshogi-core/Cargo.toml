@@ -249,7 +249,7 @@ edition-layerstacks-halfka_hm_merged-1536x15x32-threat_symdedup = [
   "nnue-progress-diff",
 ]
 
-# LayerStack specific (1536x31x32、none 1 構成のみ最初に整備)。L0=1536 系。
+# LayerStack specific (1536x31x32、拡張なし)。
 edition-layerstacks-halfka_hm_merged-1536x31x32-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1536x31x32",
   "nnue-progress-diff",

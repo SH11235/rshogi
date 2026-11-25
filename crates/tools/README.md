@@ -68,7 +68,8 @@ cargo run --release -p tools --bin shuffle_psv -- --help
 既定の `nnue-arch` は汎用実装と 1536x15x32・1536x15x64・2304x15x64、5 種の FT の静的実装を含み、
 対応する拡張なしの LayerStacks を静的に読みます。PSQT・Threat・effect bucket・
 `ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使います。
-別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読めます。
+別の寸法は `--features layerstacks-<サイズ>` の追加でも静的に読めます。`<サイズ>` の中央の数は
+shortcut を除いた数です。実寸法との対応は [NNUE 対応表](../../docs/nnue-supported-architectures.md#layerstacks) を参照してください。
 gensfen と rescore_psv の NativeBackend は読み込みログに
 `NNUE LayerStack implementation=static|dynamic` を出力します。
 1 つの NNUE 構成だけを入れた速い build (`rescore_psv`・`gensfen` など、rshogi-core の NNUE の評価・探索を直接呼ぶツール) は

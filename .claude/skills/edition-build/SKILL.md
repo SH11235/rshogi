@@ -163,9 +163,11 @@ feature は 5 カテゴリの組み合わせ:
    / `layerstacks-1024x15x32` / `layerstacks-3072x15x32` / `layerstacks-2304x15x64`
    / `layerstacks-3072x15x64` / `layerstacks-1536x15x64` / `layerstacks-1024x15x64` (rshogi-core `Cargo.toml` の
    「LayerStack network L1 サイズ slot」が正典)。複数同時指定は cycles +5.5% 退行
-4. **拡張 / 最適化**: `nnue-psqt` / `nnue-threat` / `nnue-progress-diff` (build.rs が
-   `mode-specific` + L0=1536 系 / 3072 系 / 2304x15x64 以外を拒否する。L0=768/512 では
-   cache pressure 増加で cycles +2-6% 退行するため指定しない)
+4. **拡張 / 最適化**: PSQT や Threat を使うモデルに合わせて `nnue-psqt` / `nnue-threat` を指定する。
+   部分幅の Threat には `threat-width-*` ごとのサイズ制限がある。
+   `mode-*` を指定する build では、`nnue-progress-diff` には `mode-specific` と
+   `1536x15x32` / `1536x31x32` / `3072x15x32` / `2304x15x64` / `3072x15x64` /
+   `1536x15x64` のいずれかが必要 (`crates/rshogi-core/build/checks.rs`)。
 5. **Threat profile** (Threat 使用時に任意で 1 つ): `threat-profile-same-class` (id1) /
    `threat-profile-same-class-major-pawn` (id2) / `threat-profile-step-attacker` (id3) /
    `threat-profile-full-symdedup` (id4、dims は full と同一) / `threat-profile-cross-side` (id10)。
@@ -219,8 +221,7 @@ cp target/production/rshogi-usi engines/rshogi-usi-custom-768x15x32-<purpose>
 
 - rshogi-usi / rshogi-core の default feature は `edition-universal` (header 駆動の runtime
   次元)。固定構成を build するときは必ず `--no-default-features` で外し、edition feature か
-  atomic feature (`mode-specific` + arch + ft + dim + 拡張) を明示する。`nnue-progress-diff` は
-  `mode-specific` が無いと build.rs の検査で失敗する
+  atomic feature (`mode-specific` + arch + ft + サイズ + 拡張) を明示する
 - 探索経路の有限パス権 (pass_rights の評価 / PASS NMP) は既定で無効。使う build だけ
   `search-pass-rules` を明示する。旧 `search-no-pass-rules` は何もしない互換用で、指定は不要
 - 過去の `layerstacks-1536` (L1/L2 区別なし) feature は廃止済
@@ -232,8 +233,8 @@ cp target/production/rshogi-usi engines/rshogi-usi-custom-768x15x32-<purpose>
 
 ## 5b. 新しい大きさ・edition を足したとき (評価の前に必須)
 
-LayerStack の新しい固定サイズ や edition を足したら、対局評価に入る前に、既存の近い大きさ
-(例: 1536x15x64) にある最適化が新しい方にも乗っているかを確かめる。
+LayerStack の新しい固定サイズや edition を足したら、対局評価に入る前に、既存の近い固定サイズ
+(`1536x15x64` など) にある最適化が新しい構成でも有効かを確かめる。
 
 - 洗い出す: L1 の融合カーネル (`ls_l1_kernel.rs` の対応条件)、build の組み合わせ検査で大きさごとに
   許している feature (`build/checks.rs`、`nnue-progress-diff` 等)、prepacked・融合用の重みの生成、

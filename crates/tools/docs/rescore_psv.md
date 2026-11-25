@@ -159,7 +159,8 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 既定の `nnue-arch` は汎用実装と 1536x15x32・1536x15x64・2304x15x64、5 種の FT の静的実装を含み、
 対応する拡張なしの LayerStacks を静的に読む。PSQT・Threat・effect bucket・
 `ls_bucket=` 指定、別の寸法、prepacked、architecture override は汎用実装を使う。
-別の寸法は `--features layerstacks-<寸法>` の追加でも静的に読める。
+別の寸法は `--features layerstacks-<サイズ>` の追加でも静的に読める。`<サイズ>` の中央の数は
+shortcut を除いた数で、実寸法との対応は [NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks) を参照。
 NativeBackend の読み込みログに `NNUE LayerStack implementation=static|dynamic` を出す。
 
 1 つの構成の NNUE だけでリスコアするなら、その構成の静的な実装だけを入れた build がさらに速い。
@@ -177,8 +178,9 @@ rshogi-core の NNUE の評価・探索を直接呼ぶほかのツール (`gensf
 | LayerStacks | `rshogi-core/layerstack-arch,layerstacks-<サイズ>,ft-<FT>`、拡張があれば `nnue-psqt` / `nnue-threat` を足す |
 
 `<FT>` は `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged`、
-`<サイズ>` は `1536x15x32` などの build 名のサイズを指定します。[NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks)
-でモデルの実寸法に対応するサイズを確認できます。`layerstack-arch` はサイズと FT の slot が無いと build エラーになる。
+`<サイズ>` には `1536x15x32` などの build 名のサイズを指定する。中央の数は shortcut を除いた活性化出力数を表す。
+モデルの実寸法との対応は [NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks) を参照。
+`layerstack-arch` はサイズと FT の slot が無いと build エラーになる。
 build に含まれない構成の NNUE は読み込み時にエラーになる。
 
 ```bash
@@ -206,8 +208,9 @@ bucket の境界付近の局面で評価値が変わる。既定の build と同
 
 静的 LayerStacks を直接読む診断ツール (`bench_nnue_eval` 等) も同じ構成で build するときは、
 LayerStacks の行の `rshogi-core/layerstack-arch` を tools の `layerstack-arch` に替える。
-preset に足すときは、tools の `layerstack-arch` と、preset と同じ寸法・FT の slot を tools の feature
-(`layerstacks-<寸法>` / `ft-<FT>`、`rshogi-core/` を付けない) で指定する。
+preset に足すときは、tools の `layerstack-arch` と、preset と同じサイズ・FT の slot を tools の feature
+(`layerstacks-<サイズ>` / `ft-<FT>`、`rshogi-core/` を付けない) で指定する。
+サイズは shortcut を除いた数え方に従う。実寸法との対応は [NNUE 対応表](../../../docs/nnue-supported-architectures.md#layerstacks) を参照。
 ## オプションリファレンス
 
 ### 共通
