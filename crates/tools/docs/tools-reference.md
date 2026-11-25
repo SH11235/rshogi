@@ -46,7 +46,7 @@
 | [`hcpe_to_psv`](hcpe_to_psv.md) | 38 byte hcpe を 40 byte PSV に変換 |
 | [`pack_to_psv`](pack_to_psv.md) | GenSfen pack を有界バッチで PSV に変換 |
 | [`hcpe3_to_psv`](hcpe3_to_psv.md) | dlshogi hcpe3 の棋譜を局面ごとの PSV に展開 |
-| [`hcpe3_to_dl_rows`](hcpe3_to_dl_rows.md) | HCPE3 の棋譜を訪問数付きの DL 学習行に展開。非合法手などを含む対局の除外を指定可能 |
+| [`hcpe3_to_dl_rows`](hcpe3_to_dl_rows.md) | HCPE3 の棋譜を訪問数付きの DL 学習行に展開。非合法対局の除外と、勝敗・局面評価の混合を指定可能 |
 | [`migrate_psv_move16`](migrate_psv_move16.md) | 旧リポジトリ形式の move16 を YaneuraOu 形式に移行 |
 | [`psv_dedup`](psv_dedup.md) | 64 bit hash 集合で重複除去。メモリは件数比例、hash 衝突の可能性あり |
 | [`psv_dedup_bloom`](psv_dedup_bloom.md) | 固定サイズ Bloom filter による近似重複除去・差分抽出 |

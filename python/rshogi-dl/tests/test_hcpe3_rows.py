@@ -45,6 +45,26 @@ class Hcpe3RowsTest(unittest.TestCase):
         for got, want in zip(columns["policy_targets"][-3:], (1 / 3, 0.0, 2 / 3), strict=True):
             self.assertAlmostEqual(float(got), want)
 
+    def test_visit_temperature_preserves_tie_order_and_normalizes(self):
+        row = policy_frame(bytes(empty_board_tokens()), (3, 1, 5), (5, 6, 3, 6, 1, 3))
+        for temperature, expected in ((0.0, [0, 0, 1]), (1.0, [0.4, 0.2, 0.4]), (0.5, [4/9, 1/9, 4/9])):
+            with self.subTest(temperature=temperature):
+                (columns, _), = assemble_shards(iter([row]), 8, policy_temperature=temperature)
+                for got, want in zip(columns["policy_targets"], expected, strict=True):
+                    self.assertAlmostEqual(float(got), want)
+
+    def test_mixed_value_stream_receipt(self):
+        old = source_stream()
+        value_offset = len(old) - 9
+        mixed = b"RSDLHC02" + old[8:value_offset] + struct.pack("<f", 0.73) + old[value_offset + 1:]
+        row = list(iter_packed_frames(io.BytesIO(mixed), mixed_values=True))[-1]
+        self.assertAlmostEqual(row.value, 0.73)
+        with self.assertRaisesRegex(Hcpe3RowsError, "requested target"):
+            list(iter_packed_frames(io.BytesIO(old), mixed_values=True))
+        invalid = mixed[:value_offset] + struct.pack("<f", float("nan")) + mixed[value_offset + 4:]
+        with self.assertRaisesRegex(Hcpe3RowsError, "invalid HCPE3 policy row"):
+            list(iter_packed_frames(io.BytesIO(invalid), mixed_values=True))
+
     def test_shard_assembly_rejects_invalid_tokens_and_labels(self):
         tokens = bytes(empty_board_tokens())
         for row, message in (

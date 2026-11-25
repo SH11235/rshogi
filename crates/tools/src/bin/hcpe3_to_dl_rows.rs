@@ -13,6 +13,8 @@ use tools::hcpe3::{
 use tools::packed_sfen::{hcpe_result_to_stm, move_to_hcpe_move16};
 
 const HEADER: &[u8; 8] = b"RSDLHC01";
+const VALUE_TARGET_HEADER: &[u8; 8] = b"RSDLHC02";
+const DEFAULT_EVAL_SCALE: f64 = 0.0013226;
 const MAX_LEGAL_MOVES: usize = 593;
 
 #[derive(Parser)]
@@ -24,6 +26,26 @@ struct Args {
     /// 非合法な実着手・候補手、または重複候補を含む対局を除外する。
     #[arg(long)]
     skip_invalid_games: bool,
+    /// 勝敗と混ぜる局面評価の重み（0.0〜1.0）。
+    #[arg(long, default_value_t = 0.0)]
+    value_eval_weight: f64,
+    /// 評価値を勝率に換算する sigmoid の係数。
+    #[arg(long, default_value_t = DEFAULT_EVAL_SCALE)]
+    value_eval_scale: f64,
+}
+
+#[derive(Clone, Copy)]
+struct ValueMix {
+    weight: f64,
+    scale: f64,
+}
+
+impl ValueMix {
+    fn target(self, result: i8, eval: i16) -> f32 {
+        let outcome = f64::from(result + 1) * 0.5;
+        let estimate = 1.0 / (1.0 + (-f64::from(eval) * self.scale).exp());
+        ((1.0 - self.weight) * outcome + self.weight * estimate) as f32
+    }
 }
 
 #[derive(Debug)]
@@ -39,6 +61,7 @@ impl std::error::Error for InvalidGame {}
 
 struct Ply {
     selected: u16,
+    eval: i16,
     visits: Vec<(u16, u16)>,
 }
 
@@ -71,6 +94,7 @@ fn read_game(reader: &mut impl Read) -> Result<Option<Game>> {
         }
         plies.push(Ply {
             selected: record.move16,
+            eval: record.eval,
             visits,
         });
     }
@@ -81,7 +105,7 @@ fn read_game(reader: &mut impl Read) -> Result<Option<Game>> {
     }))
 }
 
-fn write_game(output: &mut impl Write, game: &Game) -> Result<u64> {
+fn write_game(output: &mut impl Write, game: &Game, value_mix: Option<ValueMix>) -> Result<u64> {
     let mut position = start_position(&game.header.hcp)?;
     position.try_reserve_move_history(game.plies.len())?;
     let rows = u16::try_from(game.plies.iter().filter(|ply| !ply.visits.is_empty()).count())?;
@@ -130,7 +154,11 @@ fn write_game(output: &mut impl Write, game: &Game) -> Result<u64> {
             output.write_all(&u16::try_from(make_move_label(selected, side))?.to_le_bytes())?;
             output.write_all(&u16::try_from(labels.len())?.to_le_bytes())?;
             output.write_all(&u16::try_from(candidates.len())?.to_le_bytes())?;
-            output.write_all(&[u8::try_from(score + 1)?])?;
+            if let Some(mix) = value_mix {
+                output.write_all(&mix.target(score, ply.eval).to_le_bytes())?;
+            } else {
+                output.write_all(&[u8::try_from(score + 1)?])?;
+            }
             for &(_, label) in &labels {
                 output.write_all(&label.to_le_bytes())?;
             }
@@ -145,7 +173,12 @@ fn write_game(output: &mut impl Write, game: &Game) -> Result<u64> {
     Ok(u64::from(rows))
 }
 
-fn convert(mut input: impl Read, output: &mut impl Write, name: &str) -> Result<(u64, u64)> {
+fn convert(
+    mut input: impl Read,
+    output: &mut impl Write,
+    name: &str,
+    value_mix: Option<ValueMix>,
+) -> Result<(u64, u64)> {
     let mut games = 0u64;
     let mut rows = 0u64;
     loop {
@@ -153,7 +186,7 @@ fn convert(mut input: impl Read, output: &mut impl Write, name: &str) -> Result<
         let Some(game) = read_game(&mut input).with_context(context)? else {
             return Ok((games, rows));
         };
-        rows += write_game(output, &game).with_context(context)?;
+        rows += write_game(output, &game, value_mix).with_context(context)?;
         games += 1;
     }
 }
@@ -162,6 +195,7 @@ fn convert_skipping(
     mut input: impl Read,
     output: &mut impl Write,
     name: &str,
+    value_mix: Option<ValueMix>,
 ) -> Result<(u64, u64)> {
     let mut frame = Vec::new();
     let mut number = 1u64;
@@ -173,7 +207,7 @@ fn convert_skipping(
             break;
         };
         frame.clear();
-        match write_game(&mut frame, &game) {
+        match write_game(&mut frame, &game, value_mix) {
             Ok(count) => {
                 output.write_all(&frame)?;
                 rows += count;
@@ -195,11 +229,12 @@ fn convert_input(
     output: &mut impl Write,
     name: &str,
     skip: bool,
+    value_mix: Option<ValueMix>,
 ) -> Result<(u64, u64)> {
     if skip {
-        convert_skipping(input, output, name)
+        convert_skipping(input, output, name, value_mix)
     } else {
-        convert(input, output, name)
+        convert(input, output, name, value_mix)
     }
 }
 
@@ -209,15 +244,40 @@ fn main() -> Result<()> {
         args.inputs.iter().filter(|path| path.as_os_str() == "-").count() <= 1,
         "標準入力は一度だけ指定できます"
     );
+    ensure!((0.0..=1.0).contains(&args.value_eval_weight), "局面評価の重みは 0.0〜1.0");
+    ensure!(
+        args.value_eval_scale.is_finite() && args.value_eval_scale > 0.0,
+        "勝率換算係数は正の有限値"
+    );
+    let value_mix = (args.value_eval_weight > 0.0).then_some(ValueMix {
+        weight: args.value_eval_weight,
+        scale: args.value_eval_scale,
+    });
     let mut output = BufWriter::new(io::stdout().lock());
-    output.write_all(HEADER)?;
+    output.write_all(if value_mix.is_some() {
+        VALUE_TARGET_HEADER
+    } else {
+        HEADER
+    })?;
     for input in &args.inputs {
         let name = input.to_string_lossy();
         let (games, rows) = if input.as_os_str() == "-" {
-            convert_input(io::stdin().lock(), &mut output, &name, args.skip_invalid_games)?
+            convert_input(
+                io::stdin().lock(),
+                &mut output,
+                &name,
+                args.skip_invalid_games,
+                value_mix,
+            )?
         } else {
             let file = File::open(input).with_context(|| format!("{name} を開けません"))?;
-            convert_input(BufReader::new(file), &mut output, &name, args.skip_invalid_games)?
+            convert_input(
+                BufReader::new(file),
+                &mut output,
+                &name,
+                args.skip_invalid_games,
+                value_mix,
+            )?
         };
         eprintln!("{name} {games} games, {rows} policy rows");
     }
@@ -263,7 +323,7 @@ mod tests {
             ("3c3d", &[("8c8d", 30), ("3c3d", 0)]),
         ]);
         let mut output = Vec::new();
-        assert_eq!(convert(Cursor::new(&raw), &mut output, "input").unwrap(), (1, 1));
+        assert_eq!(convert(Cursor::new(&raw), &mut output, "input", None).unwrap(), (1, 1));
 
         let mut hash = Sha256::new();
         hash.update(&raw[..32]);
@@ -292,13 +352,30 @@ mod tests {
     }
 
     #[test]
+    fn mixes_outcome_and_signed_evaluation() {
+        let mut raw = game(&[("7g7f", &[("7g7f", 4)])]);
+        raw[38..40].copy_from_slice(&512i16.to_le_bytes());
+        let mut output = Vec::new();
+        let mix = ValueMix {
+            weight: 0.333,
+            scale: DEFAULT_EVAL_SCALE,
+        };
+        convert(Cursor::new(raw), &mut output, "input", Some(mix)).unwrap();
+        let encoded = f32::from_le_bytes(output[140..144].try_into().unwrap());
+        let estimate = (1.0 / (1.0 + (-512.0 * DEFAULT_EVAL_SCALE).exp())) as f32;
+        assert!((encoded - 0.333 * estimate).abs() < 1e-6);
+        assert_eq!(ValueMix { weight: 0.0, ..mix }.target(1, -512), 1.0);
+        assert!((ValueMix { weight: 1.0, ..mix }.target(-1, -512) - (1.0 - estimate)).abs() < 1e-6);
+    }
+
+    #[test]
     fn rejects_truncation_and_invalid_positive_candidates() {
         let mut truncated = game(&[("7g7f", &[("7g7f", 4)])]);
         truncated.pop();
         let illegal = game(&[("7g7f", &[("7g7e", 4)])]);
         let duplicated = game(&[("7g7f", &[("7g7f", 4), ("7g7f", 2)])]);
         for input in [truncated, illegal, duplicated] {
-            let error = convert(Cursor::new(input), &mut Vec::new(), "input").unwrap_err();
+            let error = convert(Cursor::new(input), &mut Vec::new(), "input", None).unwrap_err();
             assert!(error.to_string().contains("対局 1"), "{error:#}");
         }
     }
@@ -308,13 +385,16 @@ mod tests {
         let good = game(&[("7g7f", &[("7g7f", 4)])]);
         let bad = game(&[("7g7f", &[("7g7f", 4)]), ("7g7e", &[])]);
         let mut expected = Vec::new();
-        convert(Cursor::new(&good), &mut expected, "input").unwrap();
+        convert(Cursor::new(&good), &mut expected, "input", None).unwrap();
         let mut actual = Vec::new();
         let combined = [bad, good.clone()].concat();
-        assert_eq!(convert_skipping(Cursor::new(combined), &mut actual, "input").unwrap(), (1, 1));
+        assert_eq!(
+            convert_skipping(Cursor::new(combined), &mut actual, "input", None).unwrap(),
+            (1, 1)
+        );
         assert_eq!(actual, expected);
         assert!(
-            convert_skipping(Cursor::new(&good[..good.len() - 1]), &mut Vec::new(), "input")
+            convert_skipping(Cursor::new(&good[..good.len() - 1]), &mut Vec::new(), "input", None)
                 .is_err()
         );
     }
