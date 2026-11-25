@@ -505,6 +505,11 @@ Cargo の edition feature は preset 名に `edition-` を付けた名前です�
 構成部品を直接指定する場合は `layerstacks-dense-concat-2304x16x64`、
 `layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
 
+4 構成とも PSQT を含みません。ヘッダーに `PSQT=` があるモデルは、Threat 幅に合う edition に
+`nnue-psqt` を足して build します (例: `cargo build --release -p rshogi-usi --no-default-features
+--features edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-none,rshogi-core/nnue-psqt`)。
+EffectBucket と `prepacked-nnue` との組み合わせは build 時に拒否します。
+
 ## xtask の WebAssembly target
 
 `--target wasm32-wasip1` または `--target wasm32-unknown-unknown` を指定できます。

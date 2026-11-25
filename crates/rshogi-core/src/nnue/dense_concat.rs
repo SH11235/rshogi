@@ -18,8 +18,8 @@ const FC2_IN: usize = 160;
 #[derive(Clone)]
 pub struct DenseConcatBucket<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize> {
     l1: AffineTransform<L1, FC0_OUT>,
-    pub(super) l2: AffineTransform<FC1_IN, FC1_OUT>,
-    pub(super) output: AffineTransform<FC2_IN, 1>,
+    l2: AffineTransform<FC1_IN, FC1_OUT>,
+    output: AffineTransform<FC2_IN, 1>,
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx512f",
@@ -33,6 +33,11 @@ impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
     DenseConcatBucket<L1, FC0_OUT, FC1_OUT>
 {
     fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
+        // 連結 buffer の幅は 2304-16-64 の固定値なので、型の寸法と食い違えば build で止める。
+        const {
+            assert!(L1 == 2304 && FC0_OUT == 16 && FC1_OUT == 64);
+            assert!(FC1_IN == 2 * FC0_OUT && FC2_IN == FC1_IN + 2 * FC1_OUT);
+        }
         let l1 = AffineTransform::read(reader)?;
         Ok(Self {
             #[cfg(all(
@@ -51,24 +56,6 @@ impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
     /// fc_0 層を返す。
     pub fn l1(&self) -> &AffineTransform<L1, FC0_OUT> {
         &self.l1
-    }
-
-    #[cfg(test)]
-    pub(super) fn edit_l1(&mut self, edit: impl FnOnce(&mut AffineTransform<L1, FC0_OUT>)) {
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw",
-            any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
-        ))]
-        avx512::edit_l1::<L1, FC0_OUT, FC1_OUT>(&mut self.l1, &mut self.fused_weights, edit);
-        #[cfg(not(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw",
-            any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
-        )))]
-        edit(&mut self.l1);
     }
 
     /// 変換済みの FT 出力からスケーリング前の生スコアを計算する。
@@ -140,7 +127,6 @@ impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
 
         let mut fc1 = [0; FC1_OUT];
         self.l2.propagate_7bit(c0, &mut fc1);
-        let c1 = &mut c1[..2 * FC1_OUT];
         pair_activations(&fc1, c1);
         if let Some(counts) = counts {
             counts.l1_act_sat += c0.iter().filter(|&&v| v == 127).count() as u64;
@@ -181,11 +167,6 @@ impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
         Ok(Self {
             buckets: read_layer_stack_buckets(reader, num_buckets, DenseConcatBucket::read)?,
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_num_buckets(num_buckets: usize) -> Self {
-        Self::read(&mut io::repeat(0), num_buckets).unwrap()
     }
 
     /// 指定 bucket のスケーリング前の生スコアを返す。

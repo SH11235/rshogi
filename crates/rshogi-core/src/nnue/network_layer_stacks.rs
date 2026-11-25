@@ -3340,7 +3340,7 @@ mod tests {
     #[test]
     fn fixed_network_sizes() {
         use super::NetworkLayerStacks;
-        use crate::nnue::ls_feature_spec::{HalfKaHmMergedSpec, HalfKaHmSplitSpec};
+        use crate::nnue::ls_feature_spec::HalfKaHmMergedSpec;
 
         // x86_64 Linux の net が占めるキャッシュライン数を、3 軸対応で増やさない。
         let overhead = match (cfg!(feature = "nnue-psqt"), cfg!(feature = "nnue-threat")) {
@@ -3357,18 +3357,23 @@ mod tests {
                 )
             };
         }
-        check_size!(512, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(768, 8, 14, 32, 32, HalfKaHmMergedSpec);
-        check_size!(768, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(1024, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(1536, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(1536, 16, 30, 32, 32, HalfKaHmSplitSpec);
-        check_size!(1536, 32, 62, 64, 32, HalfKaHmMergedSpec);
-        check_size!(1536, 16, 30, 32, 64, HalfKaHmMergedSpec);
-        check_size!(1024, 16, 30, 32, 64, HalfKaHmMergedSpec);
         check_size!(2304, 16, 30, 32, 64, HalfKaHmMergedSpec);
-        check_size!(3072, 16, 30, 32, 32, HalfKaHmMergedSpec);
-        check_size!(3072, 16, 30, 32, 64, HalfKaHmMergedSpec);
+        #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+        {
+            use crate::nnue::ls_feature_spec::HalfKaHmSplitSpec;
+
+            check_size!(512, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(768, 8, 14, 32, 32, HalfKaHmMergedSpec);
+            check_size!(768, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(1024, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(1536, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(1536, 16, 30, 32, 32, HalfKaHmSplitSpec);
+            check_size!(1536, 32, 62, 64, 32, HalfKaHmMergedSpec);
+            check_size!(1536, 16, 30, 32, 64, HalfKaHmMergedSpec);
+            check_size!(1024, 16, 30, 32, 64, HalfKaHmMergedSpec);
+            check_size!(3072, 16, 30, 32, 32, HalfKaHmMergedSpec);
+            check_size!(3072, 16, 30, 32, 64, HalfKaHmMergedSpec);
+        }
     }
 
     #[cfg(feature = "layerstack-arch")]
@@ -3624,6 +3629,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
     #[test]
     fn saturation_uses_forward_accumulators() {
         use super::super::ls_feature_spec::HalfKpSpec;
@@ -3711,12 +3717,7 @@ mod tests {
                 );
                 if use_threat {
                     assert_eq!(expected_ft, 127);
-                    let expected = if cfg!(feature = "layerstacks-dense-concat-2304x16x64") {
-                        (32, 64)
-                    } else {
-                        (30, 32)
-                    };
-                    assert_eq!((counts.l1_act_sat, counts.l2_act_sat), expected);
+                    assert_eq!((counts.l1_act_sat, counts.l2_act_sat), (30, 32));
                 } else {
                     assert_eq!((counts.l1_act_sat, counts.l2_act_sat), (0, 0));
                 }
@@ -3755,6 +3756,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
     #[test]
     fn initialized_layerstack_forward_matches_explicit_buffer() {
         use super::super::ls_feature_spec::HalfKpSpec;
@@ -3802,7 +3804,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "nnue-effect-bucket"))]
+    #[cfg(not(any(
+        feature = "nnue-effect-bucket",
+        feature = "layerstacks-dense-concat-2304x16x64"
+    )))]
     fn check_packed8_accumulators<const N: usize>() {
         use super::super::ls_feature_spec::HalfKaHmMergedSpec;
         use super::super::piece_weights;
@@ -3955,7 +3960,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "nnue-effect-bucket"))]
+    #[cfg(not(any(
+        feature = "nnue-effect-bucket",
+        feature = "layerstacks-dense-concat-2304x16x64"
+    )))]
     #[cfg_attr(
         not(all(
             target_arch = "x86_64",
@@ -3980,21 +3988,22 @@ mod tests {
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1536_0016_0009);
         let mut bytes = Vec::new();
+        const FC0_OUT: usize = 16;
         let output_input = if cfg!(feature = "layerstacks-dense-concat-2304x16x64") {
-            160
+            2 * FC0_OUT + 2 * L2
         } else {
             L2
         };
         for _ in 0..DEFAULT_NUM_BUCKETS {
             bytes.extend_from_slice(&0u32.to_le_bytes());
-            for (input, output) in [(N, 16), (32, L2), (output_input, 1)] {
+            for (input, output) in [(N, FC0_OUT), (32, L2), (output_input, 1)] {
                 for _ in 0..output {
                     bytes.extend_from_slice(&rng.random_range(-1024i32..1024).to_le_bytes());
                 }
                 bytes.extend((0..input * output).map(|_| rng.random_range(-8i8..8) as u8));
             }
         }
-        let network = NetworkLayerStacks::<N, 16, 30, 32, HalfKpSpec, L2> {
+        let network = NetworkLayerStacks::<N, FC0_OUT, 30, 32, HalfKpSpec, L2> {
             feature_transformer: FeatureTransformerLayerStacks::for_output_transform_tests(),
             layer_stacks: TestLayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
             fv_scale: 16,
@@ -4079,25 +4088,29 @@ mod tests {
 
     #[test]
     fn synthetic_fused_shapes_evaluate_with_bucket_match_legacy() {
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(false);
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(false);
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(false);
         synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(false);
-        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<3072, 64>(false);
+        #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+        {
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(false);
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(false);
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(false);
+            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<3072, 64>(false);
+        }
     }
 
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn synthetic_threat_evaluation_matches_scalar_for_both_sides() {
-        if cfg!(feature = "layerstacks-1024x15x64") {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1024, 64>(true);
+        const SHAPE: (usize, usize) = if cfg!(feature = "layerstacks-1024x15x64") {
+            (1024, 64)
         } else if cfg!(feature = "layerstacks-1536x15x64") {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 64>(true);
+            (1536, 64)
         } else if cfg!(feature = "layerstacks-2304x15x64") {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<2304, 64>(true);
+            (2304, 64)
         } else {
-            synthetic_evaluate_with_bucket_matches_legacy_both_sides::<1536, 32>(true);
-        }
+            (1536, 32)
+        };
+        synthetic_evaluate_with_bucket_matches_legacy_both_sides::<{ SHAPE.0 }, { SHAPE.1 }>(true);
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト

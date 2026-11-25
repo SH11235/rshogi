@@ -72,10 +72,11 @@ fn validate_feature_combination(
             && !runtime_dimensions
             && !mode_family
             && !mode_universal
-            && !has_feature("nnue-effect-bucket"))
+            && !has_feature("nnue-effect-bucket")
+            && !has_feature("prepacked-nnue"))
     {
         return Err(
-            "DenseConcat requires a single static HalfKaHmMerged LayerStacks slot (layerstacks-2304x15x64) without EffectBucket"
+            "DenseConcat requires a single static HalfKaHmMerged LayerStacks slot (layerstacks-2304x15x64) without EffectBucket or prepacked-nnue"
                 .to_owned(),
         );
     }

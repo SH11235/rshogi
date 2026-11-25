@@ -199,32 +199,45 @@ fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
             .chain(xs.iter().map(|&x| (x / 64).clamp(0, 127) as u8))
     }
 
-    const FT: usize = 64;
+    const FT: usize = 2304;
     const BUCKETS: usize = 2;
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x4443_4e43);
     let arch = format!("{},ls_bucket=ownking:5", dense_concat_arch(FT, 16, 64));
     let mut bytes = header(&arch);
     bytes.extend_from_slice(&(BUCKETS as u32).to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    let mut ft = Vec::new();
+    let mut ft_biases = Vec::new();
     for _ in 0..FT {
-        encode_signed_leb128(rng.random_range(60..140), &mut ft);
+        encode_signed_leb128(rng.random_range(60..140), &mut ft_biases);
     }
-    for _ in 0..FT * HALFKA_HM_DIMENSIONS {
-        encode_signed_leb128(rng.random_range(-4..5), &mut ft);
+    // 1 バイトの LEB128 で表せる重み行を繰り返し、全 FT 分の乱数生成を避ける。
+    let mut weight_pattern = Vec::new();
+    for _ in 0..FT * 32 {
+        encode_signed_leb128(rng.random_range(-4..5), &mut weight_pattern);
     }
-    bytes.extend_from_slice(LEB128_MAGIC);
-    bytes.extend_from_slice(&(ft.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&ft);
 
+    let mut bucket_bytes = Vec::new();
     let params: [[Affine; 3]; BUCKETS] = std::array::from_fn(|_| {
         let layers = [(FT, 16), (32, 64), (160, 1)].map(|(i, o)| Affine::random(&mut rng, i, o));
-        bytes.extend_from_slice(&0x4443_4e43_u32.to_le_bytes());
+        bucket_bytes.extend_from_slice(&0x4443_4e43_u32.to_le_bytes());
         for layer in &layers {
-            layer.write(&mut bytes);
+            layer.write(&mut bucket_bytes);
         }
         layers
     });
+    let weights_len = FT * HALFKA_HM_DIMENSIONS;
+    let ft_len = ft_biases.len() + weights_len;
+    bytes.reserve_exact(LEB128_MAGIC.len() + 4 + ft_len + bucket_bytes.len());
+    bytes.extend_from_slice(LEB128_MAGIC);
+    bytes.extend_from_slice(&(ft_len as u32).to_le_bytes());
+    bytes.extend_from_slice(&ft_biases);
+    let weight_offset = bytes.len();
+    bytes.resize(weight_offset + weights_len, 0);
+    for chunk in bytes[weight_offset..].chunks_mut(weight_pattern.len()) {
+        chunk.copy_from_slice(&weight_pattern[..chunk.len()]);
+    }
+    bytes.extend_from_slice(&bucket_bytes);
+
     let mut truncated = &bytes[..bytes.len() - 1];
     type Net = NetworkLayerStacks<FT, 16, 30, 32, HalfKaHmMergedSpec, 64>;
     assert!(Net::read(&mut Cursor::new(&mut truncated)).is_err());

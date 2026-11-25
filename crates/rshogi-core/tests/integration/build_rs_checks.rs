@@ -33,6 +33,7 @@ fn dense_concat_requires_a_single_static_halfka_hm_merged_slot() {
         "layerstacks-1536x15x32",
         "ft-halfkp",
         "nnue-effect-bucket",
+        "prepacked-nnue",
         "mode-universal",
         "mode-family",
     ] {
