@@ -747,7 +747,14 @@ impl<T: Zeroable> WeightBox<T> {
     ///
     /// 重みを書き換えるのは net delta (`SPSA_NET_*`) だけなので、それを持つ構成に
     /// 限ってコンパイルする。
-    #[cfg(any(test, feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
+    #[cfg(any(
+        test,
+        feature = "nnue-runtime-dimensions",
+        all(
+            feature = "layerstack-arch",
+            not(feature = "layerstacks-dense-concat-2304x16x64")
+        )
+    ))]
     pub(crate) fn make_mut(&mut self) -> &mut [T] {
         if !matches!(self.0.backing, AlignedBoxBacking::Heap(_)) {
             self.0 = self.0.clone();

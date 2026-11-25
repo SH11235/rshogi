@@ -58,6 +58,8 @@ struct Cli {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BucketMode {
+    #[value(name = "kingrank9")]
+    KingRank9,
     #[value(name = "progresskpabs")]
     ProgressKpabs,
     #[value(name = "progresskpabsq16")]
@@ -67,6 +69,7 @@ enum BucketMode {
 impl BucketMode {
     fn mode(self) -> LayerStackBucketMode {
         match self {
+            Self::KingRank9 => LayerStackBucketMode::KingRank9,
             Self::ProgressKpabs => LayerStackBucketMode::ProgressKPAbs,
             Self::ProgressKpabsQ16 => LayerStackBucketMode::ProgressKPAbsQ16,
         }
@@ -261,7 +264,6 @@ fn dump_debug_first<
 
     let bucket = &network.layer_stacks.buckets[bucket_index];
 
-    let main_dim = LS_L1_OUT - 1;
     let mut l1_simd = [0i32; LS_L1_OUT];
     let mut l1_scalar = [0i32; LS_L1_OUT];
     bucket.l1().propagate(&transformed, &mut l1_simd);
@@ -269,40 +271,44 @@ fn dump_debug_first<
     compare_i32_slices("LayerStack L1(simd vs scalar)", &l1_simd, &l1_scalar);
     eprintln!("[debug] l1_out={l1_simd:?}");
 
-    let l1_skip = l1_simd[main_dim];
-    let mut l2_input = [0u8; LS_L2_PADDED_INPUT];
-    for i in 0..main_dim {
-        let v = i64::from(l1_simd[i]);
-        let sqr = ((v * v) >> 19).clamp(0, 127) as u8;
-        let crelu = (l1_simd[i] >> 6).clamp(0, 127) as u8;
-        l2_input[i] = sqr;
-        l2_input[main_dim + i] = crelu;
+    #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+    {
+        let main_dim = LS_L1_OUT - 1;
+        let l1_skip = l1_simd[main_dim];
+        let mut l2_input = [0u8; LS_L2_PADDED_INPUT];
+        for i in 0..main_dim {
+            let v = i64::from(l1_simd[i]);
+            let sqr = ((v * v) >> 19).clamp(0, 127) as u8;
+            let crelu = (l1_simd[i] >> 6).clamp(0, 127) as u8;
+            l2_input[i] = sqr;
+            l2_input[main_dim + i] = crelu;
+        }
+        eprintln!("[debug] l2_input[0..{LS_L2_IN}]={:?}", &l2_input[..LS_L2_IN]);
+
+        let mut l2_simd = [0i32; LS_L2_OUT];
+        let mut l2_scalar = [0i32; LS_L2_OUT];
+        bucket.l2.propagate(&l2_input, &mut l2_simd);
+        affine_scalar(&bucket.l2, &l2_input, &mut l2_scalar);
+        compare_i32_slices("LayerStack L2(simd vs scalar)", &l2_simd, &l2_scalar);
+        eprintln!("[debug] l2_out first16={:?}", &l2_simd[..16]);
+
+        let mut l2_relu = [0u8; LS_L2_OUT];
+        for (dst, &v) in l2_relu.iter_mut().zip(l2_simd.iter()) {
+            *dst = (v >> 6).clamp(0, 127) as u8;
+        }
+
+        let mut out_simd = [0i32; 1];
+        let mut out_scalar = [0i32; 1];
+        bucket.output.propagate(&l2_relu, &mut out_simd);
+        affine_scalar(&bucket.output, &l2_relu, &mut out_scalar);
+        compare_i32_slices("LayerStack Output(simd vs scalar)", &out_simd, &out_scalar);
+
+        let raw_reconstructed = out_simd[0] + l1_skip;
+        eprintln!(
+            "[debug] raw_reconstructed={} (output={} + skip={})",
+            raw_reconstructed, out_simd[0], l1_skip
+        );
     }
-    eprintln!("[debug] l2_input[0..{LS_L2_IN}]={:?}", &l2_input[..LS_L2_IN]);
-
-    let mut l2_simd = [0i32; LS_L2_OUT];
-    let mut l2_scalar = [0i32; LS_L2_OUT];
-    bucket.l2.propagate(&l2_input, &mut l2_simd);
-    affine_scalar(&bucket.l2, &l2_input, &mut l2_scalar);
-    compare_i32_slices("LayerStack L2(simd vs scalar)", &l2_simd, &l2_scalar);
-    eprintln!("[debug] l2_out first16={:?}", &l2_simd[..16]);
-
-    let mut l2_relu = [0u8; LS_L2_OUT];
-    for (dst, &v) in l2_relu.iter_mut().zip(l2_simd.iter()) {
-        *dst = (v >> 6).clamp(0, 127) as u8;
-    }
-
-    let mut out_simd = [0i32; 1];
-    let mut out_scalar = [0i32; 1];
-    bucket.output.propagate(&l2_relu, &mut out_simd);
-    affine_scalar(&bucket.output, &l2_relu, &mut out_scalar);
-    compare_i32_slices("LayerStack Output(simd vs scalar)", &out_simd, &out_scalar);
-
-    let raw_reconstructed = out_simd[0] + l1_skip;
-    eprintln!(
-        "[debug] raw_reconstructed={} (output={} + skip={})",
-        raw_reconstructed, out_simd[0], l1_skip
-    );
     eprintln!("[debug] raw_from_network={raw}");
     eprintln!("[debug] ==================================================");
 }
@@ -320,15 +326,15 @@ fn run_eval_for_network<
 ) -> Result<()> {
     eprintln!("fv_scale: {}", network.fv_scale);
     let spec = network.bucket_spec();
-    let bucketer = if let Some(buckets) = cli.progress_buckets {
+    let bucketer = if let Some(spec) = spec {
+        eprintln!("bucket_mode: spec");
+        LayerStackBucketer::Spec(spec)
+    } else {
         eprintln!(
             "bucket_mode: {}",
             cli.bucket_mode.unwrap_or(BucketMode::ProgressKpabs).mode().as_str()
         );
-        Some(LayerStackBucketer::from_configured(network.num_buckets, buckets)?)
-    } else {
-        eprintln!("bucket_mode: spec");
-        None
+        LayerStackBucketer::from_configured(network.num_buckets, cli.progress_buckets.unwrap_or(1))?
     };
 
     let file = std::fs::File::open(&cli.sfens)
@@ -354,23 +360,17 @@ fn run_eval_for_network<
         pos.set_sfen(&sfen).with_context(|| format!("Invalid SFEN: {sfen}"))?;
         network.refresh_accumulator(&pos, &mut acc);
 
-        let bucket_index = match spec {
-            Some(spec) => spec.bucket(&pos),
-            None => bucketer.as_ref().expect("validated routing").bucket(&pos),
+        let bucket_index = bucketer.bucket(&pos);
+        #[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+        let (value, raw) = network.evaluate_with_bucket_and_raw(&pos, &acc, bucket_index);
+        #[cfg(not(feature = "layerstacks-dense-concat-2304x16x64"))]
+        let (value, raw) = {
+            let value = network.evaluate_with_bucket(&pos, &acc, bucket_index);
+            let us = pos.side_to_move() as usize;
+            let mut transformed = [0u8; L1];
+            sqr_clipped_relu_transform(acc.get(us), acc.get(us ^ 1), &mut transformed);
+            (value, network.layer_stacks.evaluate_raw(bucket_index, &transformed))
         };
-        let value = network.evaluate_with_bucket(&pos, &acc, bucket_index);
-
-        let side_to_move = pos.side_to_move();
-        let (us_acc, them_acc) = if side_to_move == Color::Black {
-            (acc.get(Color::Black as usize), acc.get(Color::White as usize))
-        } else {
-            (acc.get(Color::White as usize), acc.get(Color::Black as usize))
-        };
-
-        let mut transformed = [0u8; L1];
-        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
-
-        let raw = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
 
         if cli.dump_debug_first && !dumped_debug {
             dump_debug_first(network, &pos, &acc, &sfen, bucket_index, raw, value.raw());
@@ -394,6 +394,9 @@ pub fn run() -> Result<()> {
         if matches!(cli.bucket_mode, Some(BucketMode::ProgressKpabsQ16)) {
             anyhow::bail!("NNUE ls_bucket routing conflicts with --bucket-mode progresskpabsq16");
         }
+        if matches!(cli.bucket_mode, Some(BucketMode::KingRank9)) {
+            anyhow::bail!("NNUE ls_bucket routing conflicts with --bucket-mode kingrank9");
+        }
         if cli.progress_buckets.is_some() {
             anyhow::bail!("NNUE ls_bucket routing conflicts with --progress-buckets");
         }
@@ -401,13 +404,14 @@ pub fn run() -> Result<()> {
             anyhow::bail!("NNUE ls_bucket routing conflicts with --progress-coeff");
         }
     } else {
-        let buckets = cli
-            .progress_buckets
-            .context("--progress-buckets is required for a net without ls_bucket")?;
+        let mode = cli.bucket_mode.unwrap_or(BucketMode::ProgressKpabs).mode();
+        if mode != LayerStackBucketMode::KingRank9 && cli.progress_buckets.is_none() {
+            anyhow::bail!("--progress-buckets is required for progress routing without ls_bucket");
+        }
         let plan = NativeRouting::prepare(
             Some(ls_net.num_buckets()),
-            Some(cli.bucket_mode.unwrap_or(BucketMode::ProgressKpabs).mode()),
-            Some(buckets),
+            Some(mode),
+            cli.progress_buckets,
             cli.progress_coeff.is_some(),
         )
         .context("native routing: --progress-buckets / --progress-coeff")?

@@ -63,6 +63,23 @@ fn validate_feature_combination(
 
     let ft_count = FT_FEATURES.iter().filter(|f| has_feature(f)).count();
 
+    if has_feature("layerstacks-dense-concat-2304x16x64")
+        && !(layerstack_arch
+            && has_feature("layerstacks-2304x15x64")
+            && layerstacks_count == 1
+            && has_feature("ft-halfka_hm_merged")
+            && ft_count == 1
+            && !runtime_dimensions
+            && !mode_family
+            && !mode_universal
+            && !has_feature("nnue-effect-bucket"))
+    {
+        return Err(
+            "DenseConcat requires a single static HalfKaHmMerged LayerStacks slot (layerstacks-2304x15x64) without EffectBucket"
+                .to_owned(),
+        );
+    }
+
     let threat_width_256 = has_feature("threat-width-256");
     let threat_width_512 = has_feature("threat-width-512");
     let threat_width_768 = has_feature("threat-width-768");

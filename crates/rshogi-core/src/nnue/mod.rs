@@ -22,6 +22,10 @@ mod bona_piece_halfka_merged;
 mod bona_piece_halfka_split;
 mod bucket_spec;
 mod constants;
+#[cfg(feature = "layerstacks-dense-concat-2304x16x64")]
+mod dense_concat;
+#[cfg(test)]
+mod dense_concat_tests;
 mod diff;
 #[cfg(feature = "nnue-runtime-dimensions")]
 mod dynamic_halfkx;

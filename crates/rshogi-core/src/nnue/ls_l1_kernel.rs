@@ -52,6 +52,25 @@ pub(super) mod avx512 {
         Some(FusedWeights(weights))
     }
 
+    #[inline]
+    pub(crate) fn propagate_l1<const INPUT: usize, const OUTPUT: usize>(
+        us: &[i16; INPUT],
+        them: &[i16; INPUT],
+        l1: &AffineTransform<INPUT, OUTPUT>,
+        weights: &FusedWeights<INPUT>,
+    ) -> [i32; OUTPUT] {
+        #[cfg(target_feature = "avx512vnni")]
+        let output =
+            if INPUT == 3072 || (INPUT == 2304 && cfg!(feature = "layerstacks-2304-sparse-l1")) {
+                sparse_index_only(us, them, &l1.weights[..], &l1.biases)
+            } else {
+                fused(us, them, weights, &l1.biases)
+            };
+        #[cfg(not(target_feature = "avx512vnni"))]
+        let output = fused(us, them, weights, &l1.biases);
+        output
+    }
+
     /// 正常終了と unwind のどちらでも、編集した L1 から融合用重みを再構築する。
     pub(crate) fn edit_l1<const INPUT: usize, const OUTPUT: usize, const L2: usize>(
         l1: &mut AffineTransform<INPUT, OUTPUT>,

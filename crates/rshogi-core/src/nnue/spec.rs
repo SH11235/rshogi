@@ -346,6 +346,9 @@ pub(crate) fn validate_layer_stacks_dimensions(
 
 /// アーキテクチャ文字列から FeatureSet を判定
 pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String> {
+    if parse_layer_stacks_head(arch_str)? == LayerStacksHead::DenseConcat {
+        return Ok(FeatureSet::LayerStacks);
+    }
     // 明示的な "LayerStacks" キーワードがあれば確定
     if arch_str.contains("LayerStacks") {
         return Ok(FeatureSet::LayerStacks);
@@ -392,6 +395,38 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
     }
 
     Err("Unknown feature set in arch string.".to_string())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LayerStacksHead {
+    SplitSkip,
+    DenseConcat,
+}
+
+pub(super) fn parse_layer_stacks_head(arch: &str) -> Result<LayerStacksHead, String> {
+    let mut heads = arch.split(',').filter_map(|part| part.strip_prefix("Head="));
+    match (heads.next(), heads.next()) {
+        (None, _) if arch.contains("Head=") => Err("Malformed LayerStacks Head= token".to_owned()),
+        (None, _) => Ok(LayerStacksHead::SplitSkip),
+        (_, Some(_)) => Err("Duplicate LayerStacks Head= tokens".to_owned()),
+        (Some("DenseConcat"), None) => Ok(LayerStacksHead::DenseConcat),
+        (Some(head), None) => Err(format!("Unknown LayerStacks Head={head}")),
+    }
+}
+
+pub(super) fn require_split_skip_layer_stacks_head(
+    arch: &str,
+    consumer: &str,
+) -> std::io::Result<()> {
+    match parse_layer_stacks_head(arch)
+        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidData, msg))?
+    {
+        LayerStacksHead::SplitSkip => Ok(()),
+        LayerStacksHead::DenseConcat => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("{consumer} does not support Head=DenseConcat"),
+        )),
+    }
 }
 
 /// アーキテクチャ文字列から L1, L2, L3 を抽出

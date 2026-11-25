@@ -5,6 +5,43 @@
 
 include!("../../build/checks.rs");
 
+#[test]
+fn dense_concat_requires_a_single_static_halfka_hm_merged_slot() {
+    let base = [
+        "mode-specific",
+        "layerstack-arch",
+        "layerstacks-2304x15x64",
+        "layerstacks-dense-concat-2304x16x64",
+        "ft-halfka_hm_merged",
+        "nnue-progress-diff",
+    ];
+    assert!(validate_feature_combination(&lookup(&base)).is_ok());
+    let without_layerstack = base.map(|feature| {
+        if feature == "layerstack-arch" {
+            ""
+        } else {
+            feature
+        }
+    });
+    let error = validate_feature_combination(&lookup(&without_layerstack)).unwrap_err();
+    assert!(error.contains("DenseConcat"), "{error}");
+    let threat = [base.as_slice(), &["nnue-threat", "threat-width-768"]].concat();
+    assert!(validate_feature_combination(&lookup(&threat)).is_ok());
+
+    for incompatible in [
+        "nnue-runtime-dimensions",
+        "layerstacks-1536x15x32",
+        "ft-halfkp",
+        "nnue-effect-bucket",
+        "mode-universal",
+        "mode-family",
+    ] {
+        let features = [base.as_slice(), &[incompatible]].concat();
+        let error = validate_feature_combination(&lookup(&features)).unwrap_err();
+        assert!(error.contains("DenseConcat"), "{incompatible}: {error}");
+    }
+}
+
 /// 与えられた feature 名集合を `has_feature` lookup に変換するヘルパー。
 fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {
     let owned: Vec<String> = features.iter().map(|s| (*s).to_string()).collect();

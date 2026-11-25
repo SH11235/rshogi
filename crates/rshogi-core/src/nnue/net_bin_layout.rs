@@ -430,6 +430,10 @@ impl LayerStacksBinLayout {
         let architecture = std::str::from_utf8(&architecture_bytes)
             .map_err(|_| invalid("architecture string is not UTF-8"))?
             .to_owned();
+        super::spec::require_split_skip_layer_stacks_head(
+            &architecture,
+            "LayerStacks binary layout",
+        )?;
         if !is_layer_stacks_architecture(&architecture) {
             return Err(invalid(format!("architecture is not LayerStacks: {architecture}")));
         }

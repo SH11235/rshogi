@@ -18,12 +18,13 @@ cargo run --release -p tools --bin eval_sfens -- \
 ```
 
 `--bucket-mode` は省略できる。`progresskpabs` を明示した場合もヘッダの spec を使う。
-`--bucket-mode progresskpabsq16`、`--progress-buckets`、`--progress-coeff` は競合エラーになる。
+`--bucket-mode progresskpabsq16`、`--bucket-mode kingrank9`、`--progress-buckets`、`--progress-coeff` は競合エラーになる。
 
 ### ヘッダに spec がないネット
 
-ネットに spec がない場合は `--progress-buckets` が必須で、`--bucket-mode` は
-`progresskpabs`（既定）または `progresskpabsq16` を選ぶ。
+進行度方式では `--bucket-mode progresskpabs`（既定）か `--bucket-mode progresskpabsq16` を選び、
+`--progress-buckets` を指定する。玉段の 9 bucket モデルには `--bucket-mode kingrank9` を指定し、
+進行度の引数は省略する。
 
 ```sh
 cargo run --release -p tools --bin eval_sfens -- \
@@ -61,11 +62,25 @@ cargo build --release -p tools --bin eval_sfens --no-default-features \
   --features layerstack-arch,layerstacks-1536x15x64,ft-halfka_hm_merged,nnue-threat,rshogi-core/threat-width-512,rshogi-core/mode-specific
 ```
 
-Threat 付きモデルでは、`score` (と `score_cp`) はエンジンと同じく Threat を含むが、TSV の `raw` 列と
+LayerStacks（SplitSkip）の Threat 付きモデルでは、`score` (と `score_cp`) はエンジンと同じく Threat を含むが、TSV の `raw` 列と
 `--dump-debug-first` の中間値は駒特徴だけから計算する。tatara の `eval_sfen` と照合するときは `bucket` と `score` を比べ、
 `raw` は Threat・PSQT なしのモデルでだけ比べる。
 
 起動時の bucket 数・係数の組合せと入力エラー時の扱いは、[native routing の設定条件](nnue-routing.md#起動時の設定条件)を参照してください。
+
+### LayerStacks-DenseConcat 2304-16-64
+
+```sh
+cargo run --release -p tools --bin eval_sfens --no-default-features \
+  --features edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-none -- \
+  --nnue "$SHOGI_DATA/nnue/<dense-concat>.bin" --sfens sfens.txt --count 10
+```
+
+上の例はヘッダーに `ls_bucket=` があるモデル用。ヘッダーに指定がなければ学習時の routing 引数を加える。
+Threat 付きなら feature の末尾を `threat`、`threat512`、`threat768` のいずれかに合わせる。
+DenseConcat の `raw` は Threat を含む `fc_2 + skip` で、PSQT の加算とスケーリングの前の整数値。
+tatara の `--debug` が出す `bucket` と `raw`、内部スケールの `score` を照合する。
+`--dump-debug-first` の駒 FT と第 1 affine 層の診断値は駒特徴だけから計算する。
 
 ### tatara との手動照合
 

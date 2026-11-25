@@ -482,6 +482,29 @@ AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融�
 活性化と出力層の内積を融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
 それ以外の AVX2 環境では32要素ずつ処理し、最後に一度だけ水平加算する。評価ごとのヒープ確保は行わない。
 
+## LayerStacks-DenseConcat 2304-16-64
+
+LayerStacks 2304-15-64（build 名 `2304x15x64`）では、`fc_0` の 16 出力のうち 15 出力を活性化し、1 出力を skip に使います。
+LayerStacks-DenseConcat 2304-16-64（build 名 `dense-concat-2304x16x64`）では、`fc_0` の 16 出力すべてを活性化します。
+
+ヘッダーに `Head=DenseConcat,` がある HalfKaHmMerged モデルには次の固定 edition を使います。
+4 構成とも `nnue-progress-diff` を含みます。
+
+| Threat | xtask preset |
+|---|---|
+| なし | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-none` |
+| 全幅 | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat` |
+| 512 | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat512` |
+| 768 | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat768` |
+
+```sh
+cargo run --release -p xtask -- build --edition layerstacks-dense-concat-halfka_hm_merged-2304x16x64-none --profile production
+```
+
+Cargo の edition feature は preset 名に `edition-` を付けた名前です。
+構成部品を直接指定する場合は `layerstacks-dense-concat-2304x16x64`、
+`layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
+
 ## xtask の WebAssembly target
 
 `--target wasm32-wasip1` または `--target wasm32-unknown-unknown` を指定できます。
