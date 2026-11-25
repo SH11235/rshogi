@@ -287,6 +287,18 @@ class TrainerTest(unittest.TestCase):
         self.assert_nested_equal(resumed["model_state"], expected["model_state"])
         self.assert_nested_equal(resumed["optimizer_state"], expected["optimizer_state"])
 
+    def test_policy_entropy_regularization_resumes_without_changing_loss_reporting(self) -> None:
+        config = replace(self.config, policy_entropy_weight=0.1, log_every=1)
+        self.run_training("entropy-full", config)
+        self.run_training("entropy-part", replace(config, max_steps=2))
+        self.run_training("entropy-resumed", config, resume=self.root / "entropy-part" / "resume-final.pt")
+        expected = load_resume(self.root / "entropy-full" / "resume-final.pt")
+        actual = load_resume(self.root / "entropy-resumed" / "resume-final.pt")
+        self.assert_nested_equal(expected["model_state"], actual["model_state"])
+        self.assert_nested_equal(expected["optimizer_state"], actual["optimizer_state"])
+        rows = [json.loads(line) for line in (self.root / "entropy-full" / "metrics.jsonl").read_text().splitlines()]
+        self.assertTrue(any(row["loss"] < row["policy_loss"] + row["value_loss"] - 1e-5 for row in rows))
+
     def test_zero_policy_weight_does_not_update_policy_head(self) -> None:
         config = replace(self.config, policy_loss_weight=0.0, weight_decay=0.1)
         report = self.run_training("value-only-objective", config)

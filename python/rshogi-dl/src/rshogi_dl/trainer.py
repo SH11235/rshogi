@@ -44,6 +44,7 @@ from .trainer_checkpoint import (
 
 _OPTIONAL_SETTINGS = {
     "policy_loss_weight": 1.0,
+    "policy_entropy_weight": 0.0,
     "value_loss_weight": 1.0,
     "adamw_betas": (0.9, 0.999),
     "adamw_epsilon": 1e-8,
@@ -111,6 +112,7 @@ class TrainerConfig:
     lookup_ffn_gelu_derivative: bool = False
     learning_rate_steps: tuple[tuple[int, float], ...] = ()
     policy_loss_weight: float = 1.0
+    policy_entropy_weight: float = 0.0
     value_loss_weight: float = 1.0
     adamw_betas: tuple[float, float] = (0.9, 0.999)
     adamw_epsilon: float = 1e-8
@@ -158,7 +160,7 @@ class TrainerConfig:
                 raise ValueError(f"{name} must be one of {choices}")
         for name in (
             "learning_rate", "weight_decay", "policy_loss_weight", "value_loss_weight",
-            "adamw_epsilon", "clip_grad_norm",
+            "adamw_epsilon", "clip_grad_norm", "policy_entropy_weight",
         ):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value):
@@ -836,15 +838,18 @@ def run_training(
         finite = torch.ones((), dtype=torch.bool, device=device)
 
         weighted_loss = (config.policy_loss_weight, config.value_loss_weight) != (1.0, 1.0)
+        entropy_weight = config.policy_loss_weight * config.policy_entropy_weight
         parameters = tuple(model.parameters())
 
         def update(batch: Batch, has_policy: bool) -> None:
             optimizer.zero_grad(set_to_none=True)
             with _autocast(config):
                 policy, value = execution(batch.tokens)
-                loss = policy_value_loss(policy, value, batch)
+                loss = policy_value_loss(policy, value, batch, compute_policy_entropy=bool(entropy_weight))
                 total = (config.policy_loss_weight * loss.policy + config.value_loss_weight * loss.value
                          if weighted_loss else loss.total)
+                if loss.policy_entropy is not None:
+                    total = total - entropy_weight * loss.policy_entropy
             finite.logical_and_(torch.isfinite(total.detach()))
             scaler.scale(total).backward()
             clear_unused_policy_head_gradients(model, has_policy and config.policy_loss_weight > 0)
@@ -1053,6 +1058,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sgd-nesterov", action="store_true")
     parser.add_argument("--clip-grad-norm", type=float, default=0.0)
     parser.add_argument("--policy-loss-weight", type=float, default=1.0)
+    parser.add_argument("--policy-entropy-weight", type=float, default=0.0)
     parser.add_argument("--value-loss-weight", type=float, default=1.0)
     parser.add_argument("--weight-average", choices=("swa", "ema"))
     parser.add_argument("--weight-average-start-step", type=int, default=1)
