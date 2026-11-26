@@ -19,9 +19,21 @@
 //! - attach 時は shm 上の blob を local 展開済み blob と memcmp し、一致時のみ採用する
 //!   （hash 衝突や別内容セグメントでも評価値の正当性を保証）。
 //! - shm 確保・mmap・検証のいずれの失敗でも local heap をそのまま使う（既存挙動維持）。
+//! - セグメントの名前は、使う側が居なくなったら消す。使っている間は fd を開いたまま
+//!   先頭 1 バイトに fcntl の OFD 読み取り lock を持つ（flock とは独立）。手放すときと、
+//!   各プロセスで最初に共有を試すときの掃除で、flock を排他で取り、OFD 書き込み lock が
+//!   取れた（= 他に使う側が居ない）名前を unlink する。プロセスが落ちても lock は OS が
+//!   外すので、残った名前は次に起動したプロセスが消す。名前を消しても既存のマッピングは
+//!   有効なままなので、消し過ぎても失うのは共有だけ（評価値は変わらない）。
 //! - Linux 専用。それ以外のターゲットでは `try_share` は no-op。
 
 use super::accumulator::AlignedBox;
+
+/// 共有したマッピングを `munmap` した後に呼ぶ。最後の利用者ならセグメント名を消す。
+#[cfg(target_os = "linux")]
+pub(crate) fn release(map_base: *mut libc::c_void) {
+    linux::release(map_base);
+}
 
 /// キルスイッチ環境変数。`0` / `off` / `false` で共有を無効化する。
 /// 参照は Linux 実装のみのため、他ターゲットでは dead_code になる（cfg で除外）。
@@ -152,18 +164,115 @@ mod linux {
         log::info!("nnue shared weights [{label}]: {mode} ({detail}) {name}");
     }
 
+    /// 共有メモリの名前が並ぶ dir（glibc の `shm_open` の置き場）
+    const SHM_DIR: &str = "/dev/shm";
+    /// 重みのセグメント名の接頭辞（`segment_name` の先頭の `/` を除いたもの）
+    const SEGMENT_PREFIX: &str = "rshogi-nnue-v1-";
+
+    /// 使っている印の OFD lock を取る。`kind` は `F_RDLCK`（使っている）か `F_WRLCK`
+    /// （他に使う側が居ないことの確認）。待たずに結果を返す。
+    fn ofd_lock(fd: libc::c_int, kind: libc::c_int) -> bool {
+        // SAFETY: flock 構造体は全フィールド 0 が有効な値。
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = kind as libc::c_short;
+        lock.l_whence = libc::SEEK_SET as libc::c_short;
+        lock.l_start = 0;
+        lock.l_len = 1;
+        // SAFETY: fd は呼び出し元が開いた有効な fd、lock は有効な flock 構造体。
+        unsafe { libc::fcntl(fd, libc::F_OFD_SETLK, &lock) == 0 }
+    }
+
+    /// `fd` のセグメントに名前が残っていて、他に使う側が居なければ名前を消す。
+    ///
+    /// 名前を消すのは flock を排他で持つ間だけ（作る側・繋ぐ側・掃除の全部がそうする）。
+    /// なので flock を取った後に `st_nlink > 0` なら、名前はまだ `fd` の inode を指している。
+    /// 作りかけ（長さ 0）は消さない（作る側が `shm_open` から flock を取るまでの間がある）。
+    fn unlink_if_unused(fd: libc::c_int, cname: &CString) {
+        // SAFETY: fd は有効。他が flock を持つ間（作っている・繋いでいる）は待つ。
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return;
+        }
+        // SAFETY: st は zeroed な libc::stat。fd 有効。
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let linked = unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_nlink > 0;
+        if linked && st.st_size > 0 && ofd_lock(fd, libc::F_WRLCK) {
+            // SAFETY: cname は有効な C 文字列。上の理由で名前は fd の inode を指す。
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+        // SAFETY: fd 有効。
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    }
+
+    /// `prefix` で始まる名前のうち、誰も使っていないものを消す（落ちたプロセスの残り）。
+    fn sweep_unused(prefix: &str) {
+        let Ok(entries) = std::fs::read_dir(SHM_DIR) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(prefix) {
+                continue;
+            }
+            let Ok(cname) = CString::new(format!("/{name}")) else {
+                continue;
+            };
+            // SAFETY: cname は有効な C 文字列。他の UID の名前は開けずに飛ばす。
+            let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_RDWR, 0o600) };
+            if fd < 0 {
+                continue;
+            }
+            // 掃除は起動を待たせないよう、作っている・繋いでいる最中の名前は飛ばす。
+            // SAFETY: fd は有効。
+            if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                unlink_if_unused(fd, &cname);
+            }
+            // SAFETY: fd は有効。close で flock と OFD lock も外れる。
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    /// 共有したマッピングの先頭番地と、そのセグメントを使っている印（OFD 読み取り lock を
+    /// 持つ fd）と名前。`AlignedBox` の大きさを変えないよう、box の外に置く。重みの読み込み・
+    /// 手放しの時にしか触らない。
+    static IN_USE: std::sync::Mutex<Vec<(usize, libc::c_int, CString)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// `base` のマッピングを `munmap` した後に呼ぶ。最後の利用者なら名前を消し、fd を閉じる。
+    pub(crate) fn release(base: *mut libc::c_void) {
+        let entry = {
+            let mut in_use = IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            in_use
+                .iter()
+                .position(|(at, _, _)| *at == base as usize)
+                .map(|index| in_use.swap_remove(index))
+        };
+        if let Some((_, fd, name)) = entry {
+            unlink_if_unused(fd, &name);
+            // SAFETY: fd は IN_USE から取り出した、この値だけが持つ有効な fd。
+            unsafe { libc::close(fd) };
+        }
+    }
+
     /// create-or-attach の成功結果。
     struct ObtainOk {
         /// mmap が返したマッピング先頭
         base: *mut libc::c_void,
+        /// 使っている印の OFD 読み取り lock を持つ fd
+        fd: libc::c_int,
         /// 診断用ロール文字列
         role: &'static str,
     }
 
     /// attach 試行の結果。
     enum AttachResult {
-        /// attach 成功（memcmp 一致済み）
-        Ok(*mut libc::c_void),
+        /// attach 成功（memcmp 一致済み）。`fd` は使っている印の lock を持つ。
+        Ok {
+            base: *mut libc::c_void,
+            fd: libc::c_int,
+        },
         /// 共有を諦め local heap を使う
         Fallback,
         /// stale を unlink した／誰かが unlink したので外側 retry する
@@ -232,6 +341,10 @@ mod linux {
             }
         };
 
+        // 前に落ちたプロセスが残した名前を、プロセスごとに 1 度だけ消す。
+        static SWEEP: std::sync::Once = std::sync::Once::new();
+        SWEEP.call_once(|| sweep_unused(SEGMENT_PREFIX));
+
         let spec = BlobSpec {
             total,
             elem_size: elem_size as u32,
@@ -256,6 +369,11 @@ mod linux {
                 //   書き込まない（creator の `mprotect(PROT_READ)` は事故検出用の追加防御で、
                 //   その成否に read-only 性は依存しない）。
                 let data_ptr = unsafe { (ok.base as *mut u8).add(HEADER_SIZE) as *mut T };
+                IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((
+                    ok.base as usize,
+                    ok.fd,
+                    cname,
+                ));
                 let shared = unsafe { AlignedBox::from_shared(data_ptr, len, ok.base, total) };
                 *b = shared;
                 report(label, &name, true, ok.role);
@@ -282,9 +400,10 @@ mod linux {
             }
             // 既存セグメントへ attach。
             match attach_segment(cname, spec) {
-                AttachResult::Ok(base) => {
+                AttachResult::Ok { base, fd } => {
                     return Some(ObtainOk {
                         base,
+                        fd,
                         role: "attached",
                     });
                 }
@@ -404,13 +523,21 @@ mod linux {
             return None;
         }
 
-        // SAFETY: fd は有効。
+        // 使っている印は flock を放す前に取る（放した直後の掃除に消されないように）。
+        // 取れない kernel でも共有は続ける（名前が早く消えて共有が減るだけ）。
+        if !ofd_lock(fd, libc::F_RDLCK) {
+            log::debug!(
+                "nnue shared weights: use lock failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        // SAFETY: fd は有効。fd は印として開いたまま返す。
         unsafe {
             libc::flock(fd, libc::LOCK_UN);
-            libc::close(fd);
         }
         Some(ObtainOk {
             base,
+            fd,
             role: "created",
         })
     }
@@ -577,13 +704,18 @@ mod linux {
             return AttachResult::Fallback;
         }
 
-        // 採用。
-        // SAFETY: fd 有効。
+        // 採用。使っている印は flock を放す前に取る。
+        if !ofd_lock(fd, libc::F_RDLCK) {
+            log::debug!(
+                "nnue shared weights: use lock failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        // SAFETY: fd 有効。fd は印として開いたまま返す。
         unsafe {
             libc::flock(fd, libc::LOCK_UN);
-            libc::close(fd);
         }
-        AttachResult::Ok(base)
+        AttachResult::Ok { base, fd }
     }
 
     #[cfg(test)]
@@ -646,6 +778,88 @@ mod linux {
             }
             assert_eq!(reopened, -1);
             assert_eq!(error, Some(libc::ENOENT));
+        }
+
+        fn segment_exists(name: &CString) -> bool {
+            // SAFETY: name は有効な C 文字列。開けたら閉じる。
+            let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+            if fd >= 0 {
+                // SAFETY: fd は上で開いた有効な fd。
+                unsafe { libc::close(fd) };
+            }
+            fd >= 0
+        }
+
+        /// 長さ `len` のセグメントを作って fd を返す（掃除の試験用）。
+        fn make_test_segment(name: &CString, len: libc::off_t) -> libc::c_int {
+            // SAFETY: name は有効な C 文字列。前回の取りこぼしを消してから作る。
+            let fd = unsafe {
+                libc::shm_unlink(name.as_ptr());
+                libc::shm_open(name.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600)
+            };
+            assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+            // SAFETY: fd は上で作った書込可能な shm。
+            assert_eq!(unsafe { libc::ftruncate(fd, len) }, 0);
+            fd
+        }
+
+        #[test]
+        fn last_user_release_unlinks_segment() {
+            let n = 2048usize;
+            let pattern: Vec<i32> = (0..n as i32).map(|i| i.wrapping_mul(7919) ^ 0x3c3c).collect();
+            let make_box = || {
+                let mut b: AlignedBox<i32> = AlignedBox::new_zeroed(n);
+                b.copy_from_slice(&pattern);
+                b
+            };
+            // SAFETY: pattern は n 個の i32。i32 を u8 列として読むのは健全。
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(pattern.as_ptr() as *const u8, n * size_of::<i32>())
+            };
+            let cseg = CString::new(segment_name(fnv1a_128(bytes), n)).unwrap();
+            // SAFETY: cseg は有効な C 文字列。ENOENT は無視される。
+            unsafe { libc::shm_unlink(cseg.as_ptr()) };
+
+            let mut a = make_box();
+            try_share(&mut a, "test-release-a");
+            let mut b = make_box();
+            try_share(&mut b, "test-release-b");
+            if !segment_exists(&cseg) {
+                return; // /dev/shm が使えない環境では local fallback になる
+            }
+            drop(a);
+            assert!(segment_exists(&cseg), "他に使う側が居る間は名前を残す");
+            assert_eq!(&b[..], pattern.as_slice());
+            drop(b);
+            assert!(!segment_exists(&cseg), "最後の利用者が手放したら名前を消す");
+        }
+
+        #[test]
+        fn sweep_removes_only_unused_segments() {
+            let prefix = format!("rshogi-nnue-test-sweep-{}-", std::process::id());
+            let unused = CString::new(format!("/{prefix}unused")).unwrap();
+            let used = CString::new(format!("/{prefix}used")).unwrap();
+            let empty = CString::new(format!("/{prefix}empty")).unwrap();
+            let unused_fd = make_test_segment(&unused, 4096);
+            // SAFETY: unused_fd は有効。持ち主が落ちた後と同じく、印を持たずに閉じる。
+            unsafe { libc::close(unused_fd) };
+            let used_fd = make_test_segment(&used, 4096);
+            assert!(ofd_lock(used_fd, libc::F_RDLCK));
+            let empty_fd = make_test_segment(&empty, 0);
+            // SAFETY: empty_fd は有効。
+            unsafe { libc::close(empty_fd) };
+
+            sweep_unused(&prefix);
+
+            assert!(!segment_exists(&unused), "誰も使っていない名前は消す");
+            assert!(segment_exists(&used), "使っている印のある名前は残す");
+            assert!(segment_exists(&empty), "作りかけ（長さ 0）は残す");
+            // SAFETY: used_fd は有効。各 name は有効な C 文字列。
+            unsafe {
+                libc::close(used_fd);
+                libc::shm_unlink(used.as_ptr());
+                libc::shm_unlink(empty.as_ptr());
+            }
         }
 
         /// creator → attacher の往復で重み内容がバイト単位で保存されることを確認する。
