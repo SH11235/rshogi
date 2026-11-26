@@ -29,10 +29,15 @@
 
 use super::accumulator::AlignedBox;
 
-/// 共有したマッピングを `munmap` した後に呼ぶ。最後の利用者ならセグメント名を消す。
+/// 共有したマッピングを外す（`munmap`）。最後の利用者ならセグメント名を消す。
+///
+/// # Safety
+/// `map_base` / `map_len` は `try_share` が共有に使った mmap 領域そのもので、呼んだ後に
+/// この領域へアクセスしないこと（1 マッピングにつき 1 度だけ呼ぶ）。
 #[cfg(target_os = "linux")]
-pub(crate) fn release(map_base: *mut libc::c_void) {
-    linux::release(map_base);
+pub(crate) unsafe fn release(map_base: *mut libc::c_void, map_len: usize) {
+    // SAFETY: 呼び出し元が上の契約を守る。
+    unsafe { linux::release(map_base, map_len) };
 }
 
 /// キルスイッチ環境変数。`0` / `off` / `false` で共有を無効化する。
@@ -182,16 +187,20 @@ mod linux {
         unsafe { libc::fcntl(fd, libc::F_OFD_SETLK, &lock) == 0 }
     }
 
-    /// `fd` のセグメントに名前が残っていて、他に使う側が居なければ名前を消す。
+    /// 手放す側が flock を待つ回数と 1 回の間隔（他プロセスが作る・繋ぐ間だけ待つ。
+    /// それより長く止まっているプロセスがあれば待たずに手放し、名前は次の掃除に任せる）。
+    const RELEASE_LOCK_ATTEMPTS: u32 = 50;
+    const RELEASE_LOCK_SLEEP: Duration = Duration::from_millis(20);
+
+    /// flock を排他で持つ間に、`fd` のセグメントに名前が残っていて、他に使う側が居なければ
+    /// 名前を消す。`fd` が持つ使っている印は、判定の前にここで外す（同時に手放す 2 者が、
+    /// 互いの印に阻まれて両方とも名前を残さないように）。
     ///
-    /// 名前を消すのは flock を排他で持つ間だけ（作る側・繋ぐ側・掃除の全部がそうする）。
-    /// なので flock を取った後に `st_nlink > 0` なら、名前はまだ `fd` の inode を指している。
+    /// 名前を消すのは flock を排他で持つ間だけ（作る側・繋ぐ側・手放す側・掃除の全部が
+    /// そうする）。なので flock を持って `st_nlink > 0` なら、名前はまだ `fd` の inode を指す。
     /// 作りかけ（長さ 0）は消さない（作る側が `shm_open` から flock を取るまでの間がある）。
-    fn unlink_if_unused(fd: libc::c_int, cname: &CString) {
-        // SAFETY: fd は有効。他が flock を持つ間（作っている・繋いでいる）は待つ。
-        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
-            return;
-        }
+    fn unlink_if_unused_locked(fd: libc::c_int, cname: &CString) {
+        ofd_lock(fd, libc::F_UNLCK);
         // SAFETY: st は zeroed な libc::stat。fd 有効。
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         let linked = unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_nlink > 0;
@@ -199,8 +208,12 @@ mod linux {
             // SAFETY: cname は有効な C 文字列。上の理由で名前は fd の inode を指す。
             unsafe { libc::shm_unlink(cname.as_ptr()) };
         }
-        // SAFETY: fd 有効。
-        unsafe { libc::flock(fd, libc::LOCK_UN) };
+    }
+
+    /// 待たずに flock を排他で取る。
+    fn try_flock_exclusive(fd: libc::c_int) -> bool {
+        // SAFETY: fd は呼び出し元が開いた有効な fd。
+        unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) == 0 }
     }
 
     /// `prefix` で始まる名前のうち、誰も使っていないものを消す（落ちたプロセスの残り）。
@@ -225,9 +238,8 @@ mod linux {
                 continue;
             }
             // 掃除は起動を待たせないよう、作っている・繋いでいる最中の名前は飛ばす。
-            // SAFETY: fd は有効。
-            if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                unlink_if_unused(fd, &cname);
+            if try_flock_exclusive(fd) {
+                unlink_if_unused_locked(fd, &cname);
             }
             // SAFETY: fd は有効。close で flock と OFD lock も外れる。
             unsafe { libc::close(fd) };
@@ -240,8 +252,12 @@ mod linux {
     static IN_USE: std::sync::Mutex<Vec<(usize, libc::c_int, CString)>> =
         std::sync::Mutex::new(Vec::new());
 
-    /// `base` のマッピングを `munmap` した後に呼ぶ。最後の利用者なら名前を消し、fd を閉じる。
-    pub(crate) fn release(base: *mut libc::c_void) {
+    /// `base` / `len` の共有マッピングを外す。表から外してから `munmap` する（外した番地が
+    /// 別のマッピングに使い回されても、取り違えない）。最後の利用者なら名前を消し、fd を閉じる。
+    ///
+    /// # Safety
+    /// `base` / `len` は共有に使った mmap 領域そのもので、呼んだ後にこの領域へアクセスしない。
+    pub(super) unsafe fn release(base: *mut libc::c_void, len: usize) {
         let entry = {
             let mut in_use = IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             in_use
@@ -249,11 +265,25 @@ mod linux {
                 .position(|(at, _, _)| *at == base as usize)
                 .map(|index| in_use.swap_remove(index))
         };
-        if let Some((_, fd, name)) = entry {
-            unlink_if_unused(fd, &name);
-            // SAFETY: fd は IN_USE から取り出した、この値だけが持つ有効な fd。
-            unsafe { libc::close(fd) };
+        // SAFETY: 呼び出し元の契約で、base / len は mmap で得たマッピングそのもので、以後
+        // この領域へアクセスしない。munmap 失敗は無視（プロセス終了時に OS が回収するため
+        // 実害なし）。
+        unsafe { libc::munmap(base, len) };
+        let Some((_, fd, name)) = entry else {
+            return;
+        };
+        for attempt in 0..RELEASE_LOCK_ATTEMPTS {
+            if try_flock_exclusive(fd) {
+                unlink_if_unused_locked(fd, &name);
+                break;
+            }
+            if attempt + 1 < RELEASE_LOCK_ATTEMPTS {
+                std::thread::sleep(RELEASE_LOCK_SLEEP);
+            }
         }
+        // SAFETY: fd は IN_USE から取り出した、この値だけが持つ有効な fd。close で flock と
+        // 使っている印も外れる。
+        unsafe { libc::close(fd) };
     }
 
     /// create-or-attach の成功結果。
@@ -524,7 +554,9 @@ mod linux {
         }
 
         // 使っている印は flock を放す前に取る（放した直後の掃除に消されないように）。
-        // 取れない kernel でも共有は続ける（名前が早く消えて共有が減るだけ）。
+        // 取れなくても共有は続ける。OFD lock の無い kernel では書き込み lock も取れないので
+        // 名前は消えず（溜まる従来の動き）、読み取り lock だけ失敗したときは名前が早く消えて
+        // 共有が減るだけ。
         if !ofd_lock(fd, libc::F_RDLCK) {
             log::debug!(
                 "nnue shared weights: use lock failed: {}",
@@ -704,7 +736,7 @@ mod linux {
             return AttachResult::Fallback;
         }
 
-        // 採用。使っている印は flock を放す前に取る。
+        // 採用。使っている印は flock を放す前に取る（取れないときは作る側と同じ扱い）。
         if !ofd_lock(fd, libc::F_RDLCK) {
             log::debug!(
                 "nnue shared weights: use lock failed: {}",
@@ -806,7 +838,9 @@ mod linux {
         #[test]
         fn last_user_release_unlinks_segment() {
             let n = 2048usize;
-            let pattern: Vec<i32> = (0..n as i32).map(|i| i.wrapping_mul(7919) ^ 0x3c3c).collect();
+            // 同じ機械で同時に走る同じテストと名前がぶつからないよう、プロセス番号を混ぜる。
+            let salt = std::process::id() as i32;
+            let pattern: Vec<i32> = (0..n as i32).map(|i| i.wrapping_mul(7919) ^ salt).collect();
             let make_box = || {
                 let mut b: AlignedBox<i32> = AlignedBox::new_zeroed(n);
                 b.copy_from_slice(&pattern);
@@ -832,6 +866,32 @@ mod linux {
             assert_eq!(&b[..], pattern.as_slice());
             drop(b);
             assert!(!segment_exists(&cseg), "最後の利用者が手放したら名前を消す");
+        }
+
+        #[test]
+        fn simultaneous_releases_leave_no_name() {
+            let name =
+                CString::new(format!("/rshogi-nnue-test-release-{}", std::process::id())).unwrap();
+            let first = make_test_segment(&name, 4096);
+            // SAFETY: name は有効な C 文字列。
+            let second = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR, 0o600) };
+            assert!(second >= 0);
+            assert!(ofd_lock(first, libc::F_RDLCK) && ofd_lock(second, libc::F_RDLCK));
+
+            // 1 者目は 2 者目の印があるので名前を残し、fd を閉じる前に 2 者目が判定する。
+            assert!(try_flock_exclusive(first));
+            unlink_if_unused_locked(first, &name);
+            // SAFETY: first は有効。
+            unsafe { libc::flock(first, libc::LOCK_UN) };
+            assert!(segment_exists(&name), "他に使う側が居る間は名前を残す");
+            assert!(try_flock_exclusive(second));
+            unlink_if_unused_locked(second, &name);
+            assert!(!segment_exists(&name), "1 者目が印を外したので 2 者目が名前を消す");
+            // SAFETY: first・second は有効。
+            unsafe {
+                libc::close(first);
+                libc::close(second);
+            }
         }
 
         #[test]
