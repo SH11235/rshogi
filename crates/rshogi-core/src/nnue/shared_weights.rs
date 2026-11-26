@@ -42,8 +42,14 @@ pub(crate) unsafe fn release(map_base: *mut libc::c_void, map_len: usize) {
 
 /// プロセスを終える前に呼ぶ。共有している重みの印を全部手放し、他に使うプロセスが
 /// 居ない共有メモリの名前を消す。重みは static に置かれて終了時に Drop されないため、
-/// 呼ばないと名前は次に起動したプロセスの掃除まで残る。呼んだ後も読み込み済みの重みは
-/// 読める。Linux 以外では何もしない。
+/// 呼ばないと名前は次に起動したプロセスの掃除まで残る。
+///
+/// - 対象は呼んだ時点で共有している重みだけ。重みを新しく読み込む処理が終わった後
+///   （終了の直前）に呼ぶ。
+/// - 名前を消すのは最善の努力で、他プロセスが作る・繋ぐ最中で lock が取れないときは残す
+///   （次に起動したプロセスの掃除が消す）。
+/// - マッピングは外さないので、呼んだ後も読み込み済みの重みは読める。
+/// - Linux 以外では何もしない。
 pub fn release_shared_weights_at_exit() {
     #[cfg(target_os = "linux")]
     linux::release_all_at_exit();
@@ -295,19 +301,31 @@ mod linux {
     }
 
     /// 使っている印を手放す。最後の利用者なら名前を消し、fd を閉じる。
+    ///
+    /// lock は close の前に明示して外す。マッピングが残っている間は、mmap が同じ open file
+    /// description を持ち続けるので、close だけでは flock も OFD lock も外れない
+    /// （終わりの手放しはマッピングを外さない）。
     fn give_up_use(fd: libc::c_int, name: &CString) {
+        let mut locked = false;
         for attempt in 0..RELEASE_LOCK_ATTEMPTS {
             if try_flock_exclusive(fd) {
-                unlink_if_unused_locked(fd, name);
+                locked = true;
                 break;
             }
             if attempt + 1 < RELEASE_LOCK_ATTEMPTS {
                 std::thread::sleep(RELEASE_LOCK_SLEEP);
             }
         }
-        // SAFETY: fd は IN_USE から取り出した、この値だけが持つ有効な fd。close で flock と
-        // 使っている印も外れる。
-        unsafe { libc::close(fd) };
+        if locked {
+            unlink_if_unused_locked(fd, name);
+        }
+        ofd_lock(fd, libc::F_UNLCK);
+        // SAFETY: fd は IN_USE から取り出した、この値だけが持つ有効な fd。flock は未取得でも
+        // LOCK_UN は無害。
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+            libc::close(fd);
+        }
     }
 
     /// create-or-attach の成功結果。

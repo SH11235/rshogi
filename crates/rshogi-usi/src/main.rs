@@ -2629,19 +2629,22 @@ fn main() -> Result<()> {
     let mut engine = UsiEngine::new_with_spsa_net_spec(spec_names);
     let stdin = io::stdin();
 
-    for line in stdin.lock().lines() {
-        let line = line?;
-        let line = line.trim();
+    let result = (|| -> Result<()> {
+        for line in stdin.lock().lines() {
+            let line = line?;
+            let line = line.trim();
 
-        if !engine.process_command(line)? {
-            break;
+            if !engine.process_command(line)? {
+                break;
+            }
         }
-    }
+        Ok(())
+    })();
 
-    // quit と入力の終わりの両方で、共有メモリに置いた重みの名前を手放す
+    // quit・入力の終わり・エラーのどれで抜けても、共有メモリに置いた重みの名前を手放す
     // (重みは static に置かれて終了時に Drop されない)。
     rshogi_core::nnue::release_shared_weights_at_exit();
-    Ok(())
+    result
 }
 
 #[cfg(test)]
