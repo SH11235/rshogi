@@ -61,6 +61,8 @@ struct ExcludedLine {
 
 #[derive(Deserialize)]
 struct ReadingLine {
+    #[serde(default)]
+    forced_move: Option<String>,
     key: String,
     nodes: Option<u64>,
     sec: f64,
@@ -398,6 +400,9 @@ fn write_readings(dir: &Path, index: u32, out: &mut impl Write) -> Result<usize>
         for (line_index, line) in BufReader::new(file).lines().enumerate() {
             let row: ReadingLine = serde_json::from_str(&line?)
                 .with_context(|| format!("{}:{}", path.display(), line_index + 1))?;
+            if row.forced_move.is_some() {
+                continue;
+            }
             readings += 1;
             if let Some(nodes) = row.nodes {
                 out.write_all(&reading_id(&row.key, nodes, row.sec))?;
@@ -518,6 +523,24 @@ mod tests {
         std::fs::write(dir.join("d1.jsonl"), format!("{}\n", reading("other", 1001, "1.5")))
             .unwrap();
         dir
+    }
+
+    #[test]
+    fn single_legal_structure_is_not_counted_as_a_reading() {
+        use crate::book_tree::tests::{SINGLE_LEGAL, settings, single_legal_tree};
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = single_legal_tree(dir.path(), 0, 0);
+        let next = crate::book_tree::model::child(SINGLE_LEGAL, "1a1b").unwrap();
+        let cache = BTreeMap::from([(
+            next.clone(),
+            crate::book_tree::tests::reading(&next, &[("3c3b", 456)], &settings()),
+        )]);
+        tree.advance(&cache).unwrap();
+        assert!(tree.write_outputs().unwrap());
+        let mut bytes = Vec::new();
+        assert_eq!(write_readings(&tree.def.out, 0, &mut bytes).unwrap(), 1);
+        assert_eq!(bytes.len(), 20);
+        assert!(content_hash(&tree.def.out).is_ok());
     }
 
     fn args(tmp: &Path, roots: &[&Path]) -> InventoryArgs {

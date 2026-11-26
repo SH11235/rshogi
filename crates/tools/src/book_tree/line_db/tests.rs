@@ -311,3 +311,21 @@ fn white_root_summary_and_schema_validation() {
     assert!(run_to(a, &mut Vec::new()).unwrap_err().to_string().contains("unknown source"));
     assert_eq!(before, std::fs::read(dir.path().join("line.db")).unwrap());
 }
+
+#[test]
+fn single_legal_root_is_discovered_and_its_edge_is_loaded() {
+    use crate::book_tree::tests::{SINGLE_LEGAL, reading, settings, single_legal_tree};
+    let dir = tempfile::tempdir().unwrap();
+    let mut tree = single_legal_tree(dir.path(), 0, 0);
+    let next = crate::book_tree::model::child(SINGLE_LEGAL, "1a1b").unwrap();
+    let cache = BTreeMap::from([(next.clone(), reading(&next, &[("3c3b", 456)], &settings()))]);
+    tree.advance(&cache).unwrap();
+    assert!(tree.write_outputs().unwrap());
+    let trees = discover(&[dir.path().to_owned()], &mut vec![]).unwrap();
+    assert_eq!(trees[SINGLE_LEGAL].len(), 1);
+    let mut positions = Positions::new();
+    read_tree(&trees[SINGLE_LEGAL][0], &mut positions, &mut VecDeque::new(), &Prefix::new())
+        .unwrap();
+    assert_eq!(positions[SINGLE_LEGAL].moves["1a1b"].mv.value, -456);
+    assert!(positions.contains_key(&next));
+}

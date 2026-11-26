@@ -235,6 +235,7 @@ fn reading(key: &str, rows: &[(&str, i32)], s: &Settings) -> Reading {
         })
         .collect();
     Reading {
+        forced_move: None,
         tag: "t".into(),
         ply: 1,
         key: key.into(),

@@ -188,6 +188,9 @@ pub(super) struct Pv {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct Reading {
+    /// エンジンの読みを持たない、木の唯一の合法手への接続。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_move: Option<String>,
     pub tag: String,
     pub ply: u32,
     pub key: String,
@@ -211,6 +214,9 @@ impl Reading {
     }
 
     pub fn validate(&self, settings: &Settings) -> Result<()> {
+        if self.forced_move.is_some() {
+            bail!("唯一手の接続は台帳の読みではありません: {}", self.key);
+        }
         if self.nodes_limit != settings.nodes
             || self.threads != settings.threads()?
             || self.hash != settings.hash
@@ -1521,6 +1527,7 @@ mod tests {
             engine_version: None,
         };
         let reading = Reading {
+            forced_move: None,
             tag: "fixture".into(),
             ply: 1,
             key: format!("4k4/9/9/9/9/9/9/9/{row} b -"),

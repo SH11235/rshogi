@@ -337,8 +337,15 @@ impl PrefetchStats {
     }
     fn mark(&mut self, tree: &Tree, prefetched: &BTreeSet<String>) -> bool {
         let previous = self.used.len();
-        self.used
-            .extend(prefetched.iter().filter(|key| tree.level.contains_key(*key)).cloned());
+        self.used.extend(
+            prefetched
+                .iter()
+                .filter(|key| {
+                    tree.level.contains_key(*key)
+                        && tree.nodes.get(*key).is_none_or(|node| node.forced_move.is_none())
+                })
+                .cloned(),
+        );
         self.used.len() != previous
     }
 }
@@ -665,6 +672,7 @@ fn spawn_worker(
                             .to_owned();
                         let (multipv, nodes) = collector.finish();
                         let reading = Reading {
+                            forced_move: None,
                             tag: "serve".into(),
                             ply: job.ply,
                             key: job.key.clone(),
@@ -791,6 +799,9 @@ fn configure_tree(tree: &mut Tree, settings: &Settings) -> Result<()> {
 }
 
 fn tree_has_reading(tree: &Tree, cache: &impl Readings, key: &str) -> bool {
+    if tree.nodes.get(key).is_some_and(|node| node.forced_move.is_some()) {
+        return true;
+    }
     if tree.def.require_condition {
         tree.def
             .preferred_fingerprint
@@ -2151,8 +2162,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 .collect();
             let busy = |key: &String| busy_keys.contains(key);
             // 終わった木は列にも読みにも関わらないので、局面を数え直さない。
-            let counts =
-                |live: &Live| live.ended.unwrap_or((live.tree.nodes.len(), live.tree.level.len()));
+            let counts = |live: &Live| live.ended.unwrap_or_else(|| live.tree.reading_counts());
             let active_tree =
                 |live: &Live| live.ended.is_none() && !live.tree.finished && !live.tree.failed;
             let counts_now = (journal.prefetched.len(), stats.used.len());
@@ -3117,6 +3127,7 @@ mod tests {
         cache.insert(
             root.into(),
             Reading {
+                forced_move: None,
                 tag: "fixed".into(),
                 key: root.into(),
                 ply: 21,

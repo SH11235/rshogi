@@ -642,6 +642,7 @@ mod tests {
             n => format!("{n}K{}", 8 - n),
         };
         Reading {
+            forced_move: None,
             tag: "fixture".into(),
             ply: 1,
             key: format!("4k4/9/9/9/9/9/9/9/{row} b -"),

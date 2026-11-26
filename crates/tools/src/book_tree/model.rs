@@ -174,6 +174,31 @@ pub(super) type GameLine = (String, u32, Vec<String>);
 pub(super) fn child(key: &str, mv: &str) -> Result<String> {
     Ok(strip_ply(&child_position_after_move(&format!("{key} 1"), mv)?.to_sfen()).to_owned())
 }
+pub(super) fn single_legal_move(key: &str) -> Result<Option<String>> {
+    use rshogi_core::movegen::{MoveList, generate_legal_all};
+    let pos = position_from_sfen(&format!("{key} 1"))?;
+    let mut legal = MoveList::new();
+    generate_legal_all(&pos, &mut legal);
+    if legal.len() != 1 {
+        return Ok(None);
+    }
+    // 宣言の規則はエンジンに委ね、合法手への接続で宣言勝ちを置き換えない。
+    use rshogi_core::types::{EnteringKingRule, Move};
+    if [
+        EnteringKingRule::Point24,
+        EnteringKingRule::Point24H,
+        EnteringKingRule::Point27,
+        EnteringKingRule::Point27H,
+        EnteringKingRule::TryRule,
+    ]
+    .iter()
+    .any(|rule| pos.declaration_win(*rule) != Move::NONE)
+    {
+        return Ok(None);
+    }
+    Ok(Some(legal.as_slice()[0].to_usi()))
+}
+
 pub(super) fn side(key: &str) -> &str {
     key.split_whitespace().nth(1).unwrap_or("")
 }
@@ -203,6 +228,7 @@ pub(super) struct Tree {
     pub ready: bool,
     pub failed: bool,
     expanded: BTreeMap<String, (usize, u32)>,
+    forced_nodes: usize,
     /// 前回の `advance` が返した不足 (読みの無い局面)。
     waiting: Vec<(String, usize)>,
 }
@@ -338,6 +364,7 @@ impl Tree {
             ready: false,
             failed: false,
             expanded: BTreeMap::new(),
+            forced_nodes: 0,
             waiting: Vec::new(),
         })
     }
@@ -347,6 +374,11 @@ impl Tree {
             return Ok(());
         }
         let node = &self.nodes[key];
+        if let Some(mv) = &node.forced_move {
+            self.candidates.insert(key.into(), vec![mv.clone()]);
+            self.compare.insert(key.into(), None);
+            return Ok(());
+        }
         let mut cands = Vec::new();
         let game = self.game.get(key).cloned().unwrap_or_default();
         if side(key) != self.def.own {
@@ -389,6 +421,9 @@ impl Tree {
     }
 
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+        if let Some(mv) = &self.nodes[key].forced_move {
+            return (BTreeSet::from([mv.clone()]), BTreeSet::new());
+        }
         let mp = self.nodes[key].lines();
         let level = self.level[key];
         if level >= self.def.depth || self.settle_rounds_used > 0 {
@@ -422,6 +457,10 @@ impl Tree {
         (pick, extra)
     }
 
+    pub fn reading_counts(&self) -> (usize, usize) {
+        (self.nodes.len() - self.forced_nodes, self.level.len() - self.forced_nodes)
+    }
+
     pub fn waiting(&self) -> &[(String, usize)] {
         &self.waiting
     }
@@ -452,15 +491,36 @@ impl Tree {
             while let Some(key) = work.pop_front() {
                 budget.tick()?;
                 if !self.nodes.contains_key(&key) {
-                    let Some(reading) = self.reading(cache, &key) else {
-                        continue;
-                    };
-                    self.reading_conditions.insert(
-                        cache
-                            .condition(&key, self.def.preferred_fingerprint.as_deref())
-                            .map(str::to_owned),
-                    );
-                    self.nodes.insert(key.clone(), reading.clone());
+                    if let Some(mv) = single_legal_move(&key)? {
+                        self.forced_nodes += 1;
+                        self.nodes.insert(
+                            key.clone(),
+                            Reading {
+                                forced_move: Some(mv.clone()),
+                                tag: String::new(),
+                                ply: self.ply[&key],
+                                key: key.clone(),
+                                nodes_limit: 0,
+                                nodes: None,
+                                sec: 0.0,
+                                threads: 0,
+                                hash: 0,
+                                draw: BTreeMap::new(),
+                                multipv: Vec::new(),
+                                bestmove: mv,
+                            },
+                        );
+                    } else {
+                        let Some(reading) = self.reading(cache, &key) else {
+                            continue;
+                        };
+                        self.reading_conditions.insert(
+                            cache
+                                .condition(&key, self.def.preferred_fingerprint.as_deref())
+                                .map(str::to_owned),
+                        );
+                        self.nodes.insert(key.clone(), reading.clone());
+                    }
                 }
                 if self.roots.contains_key(&key) {
                     self.root_candidates(&key)?;
@@ -471,7 +531,7 @@ impl Tree {
                     continue;
                 }
                 self.expanded.insert(key.clone(), (level, ply));
-                if level >= self.def.max_depth() {
+                if level >= self.def.max_depth() && self.nodes[&key].forced_move.is_none() {
                     continue;
                 }
                 let (pick, extra) = self.picks(&key);
@@ -572,6 +632,7 @@ impl Tree {
         self.game_lines.clear();
         self.normal_unresolved = None;
         self.nodes.clear();
+        self.forced_nodes = 0;
         self.level.clear();
         self.ply.clear();
         self.edge.clear();
@@ -1127,13 +1188,19 @@ impl Tree {
         let mut found: BTreeMap<String, (usize, u32)> = BTreeMap::new();
         let mut visited = 0;
         while let Some((level, key, ply)) = pending.pop_first() {
-            if level >= self.def.max_depth() || visited >= limit {
+            if visited >= limit {
                 break;
             }
             visited += 1;
+            let forced = single_legal_move(&key).ok().flatten();
+            if level >= self.def.max_depth() && forced.is_none() {
+                continue;
+            }
             let in_tree = self.level.contains_key(&key);
             let mut moves: Vec<&str> = Vec::new();
-            if !in_tree && let Some(reading) = self.reading(cache, &key) {
+            if let Some(mv) = &forced {
+                moves.push(mv);
+            } else if !in_tree && let Some(reading) = self.reading(cache, &key) {
                 let lines = reading.lines();
                 if lines.first().is_some_and(|pv| pv.cp.abs() < self.def.stop) {
                     let n = if level >= self.def.depth || side(&key) == self.def.own {
@@ -1179,7 +1246,10 @@ impl Tree {
         }
         found
             .into_iter()
-            .filter(|(key, _)| self.reading(cache, key).is_none())
+            .filter(|(key, _)| {
+                self.reading(cache, key).is_none()
+                    && single_legal_move(key).ok().flatten().is_none()
+            })
             .map(|(key, (level, ply))| PrefetchCandidate { key, level, ply })
             .collect()
     }
@@ -1327,6 +1397,7 @@ pub(super) mod prefetch_tests {
 
     fn reading(key: &str, rows: &[(&str, i32)]) -> Reading {
         Reading {
+            forced_move: None,
             tag: "test".into(),
             key: key.into(),
             ply: 1,
@@ -2305,8 +2376,27 @@ pub(super) mod prefetch_tests {
         assert!(error.is::<WorkLimit>());
         assert_eq!(budget.remaining, Some(0));
         let mut tree = Tree::build(params(), &[(ROOT.into(), 1, vec![])]).unwrap();
-        for n in 0..6000 {
-            tree.level.insert(format!("unread-{n}"), 1);
+        for rank in 2..9 {
+            for file in 0..9 {
+                let mut ranks = vec!["9".to_owned(); 9];
+                ranks[0] = "4k4".into();
+                ranks[rank] = format!(
+                    "{}K{}",
+                    if file == 0 {
+                        String::new()
+                    } else {
+                        file.to_string()
+                    },
+                    if file == 8 {
+                        String::new()
+                    } else {
+                        (8 - file).to_string()
+                    }
+                );
+                let key = format!("{} b -", ranks.join("/"));
+                tree.level.insert(key.clone(), 1);
+                tree.ply.insert(key, 1);
+            }
         }
         let mut budget = Work {
             remaining: Some(50),

@@ -52,6 +52,7 @@ pub(super) fn reading(key: &str, rows: &[(&str, i32)], settings: &Settings) -> R
         }
     }
     Reading {
+        forced_move: None,
         tag: "fixture".into(),
         ply: 1,
         key: key.into(),
@@ -742,7 +743,13 @@ fn short_multipv_and_terminal_readings_are_leaves() {
         def.own = "w".into();
         def.extra.clear();
         let mut tree = Tree::load(def, Some(&s)).unwrap();
-        tree.advance(&BTreeMap::from([(key.into(), r.clone())])).unwrap();
+        let mut cache = BTreeMap::from([(key.into(), r.clone())]);
+        if count == 1 {
+            let next = child(key, &moves[0]).unwrap();
+            assert_eq!(tree.advance(&cache).unwrap(), [(next.clone(), 1)]);
+            cache.insert(next.clone(), reading(&next, &[(&legal(&next)[0], 500)], &s));
+        }
+        assert!(tree.advance(&cache).unwrap().is_empty());
         assert!(tree.finished);
         assert!(tree.write_outputs().unwrap());
         if count == 0 {
@@ -2448,5 +2455,192 @@ fn settle_zero_preserves_outputs_and_toml_range() {
             Tree::build(definition.params(), &[(keys[0].clone(), 1, vec![])]).is_ok(),
             rounds <= 50
         );
+    }
+}
+
+pub(super) const SINGLE_LEGAL: &str = "8k/8R/6K2/9/9/9/9/9/7L1 w -";
+
+pub(super) fn single_legal_tree(dir: &Path, depth: usize, extend: usize) -> Tree {
+    let mut def = definition(dir, 0);
+    def.depth = depth;
+    def.extend = extend;
+    def.own = "w".into();
+    def.extra.clear();
+    Tree::build(def.params(), &[(SINGLE_LEGAL.into(), 1, Vec::new())]).unwrap()
+}
+
+#[test]
+fn single_legal_root_skips_reads_and_always_propagates_the_child() {
+    let s = settings();
+    assert_eq!(legal(SINGLE_LEGAL), ["1a1b"]);
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    for (depth, extend, stop, settle) in
+        [(0, 0, 300, 0), (0, 0, 0, 0), (0, 1, 300, 0), (4, 0, 0, 1)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = single_legal_tree(dir.path(), depth, extend);
+        tree.def.stop = stop;
+        tree.settle_rounds_used = settle;
+        let mut cache = BTreeMap::new();
+        assert_eq!(tree.advance(&cache).unwrap(), [(next.clone(), 1)]);
+        assert_eq!(tree.reading_counts(), (0, 1));
+        assert_eq!(tree.edge[SINGLE_LEGAL], BTreeSet::from(["1a1b".into()]));
+        let mv = legal(&next)[0].clone();
+        cache.insert(next.clone(), reading(&next, &[(&mv, 456)], &s));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(tree.finished);
+        assert_eq!(tree.negamax(&tree.reach(&tree.edge)).unwrap()[SINGLE_LEGAL]["1a1b"], -456);
+        assert!(tree.write_outputs().unwrap());
+        let own = std::fs::read_to_string(tree.def.out.join("own_nodes.tsv")).unwrap();
+        assert!(own.contains("1a1b\t-456"));
+        let text = std::fs::read_to_string(tree.def.out.join("node_moves.tsv")).unwrap();
+        let known = tree.nodes.keys().cloned().collect();
+        let parsed = super::register::parse_node_moves(&text, 0, Some(&known)).unwrap();
+        assert_eq!(parsed[SINGLE_LEGAL].nodes, 0);
+        assert_eq!(parsed[SINGLE_LEGAL].moves[0].value, -456);
+        assert!(parsed[SINGLE_LEGAL].moves[0].value_kind.starts_with("tree:"));
+        let db = crate::book_db::BookDb::read(&tree.def.out.join("tree.db")).unwrap();
+        assert_eq!(db.entries[SINGLE_LEGAL].moves[0].value, -456);
+        let structural: Reading = serde_json::from_str(
+            std::fs::read_to_string(tree.def.out.join("d0.jsonl")).unwrap().trim(),
+        )
+        .unwrap();
+        assert_eq!(structural.forced_move.as_deref(), Some("1a1b"));
+        assert!(structural.multipv.is_empty());
+        assert!(structural.validate(&s).is_err());
+    }
+}
+
+#[test]
+fn single_legal_replay_ignores_old_reading_without_changing_journal_or_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = settings();
+    let path = dir.path().join("journal.jsonl");
+    let mut journal = Journal::open(&path, &s.fingerprint).unwrap();
+    journal
+        .append(reading(SINGLE_LEGAL, &[("1a1b", 999)], &s), &s, "fixture".into())
+        .unwrap();
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    journal
+        .append(reading(&next, &[(&legal(&next)[0], 456)], &s), &s, "fixture".into())
+        .unwrap();
+    drop(journal);
+    let before = std::fs::read(&path).unwrap();
+    std::fs::write(dir.path().join("paths.tsv"), format!("{SINGLE_LEGAL}\t1\t\n")).unwrap();
+    let toml = dir.path().join("tree.toml");
+    std::fs::write(
+        &toml,
+        "paths='paths.tsv'\nout='out'\ndepth=0\nopp_n=1\nstop=300\nown='w'\nrounds=0\n",
+    )
+    .unwrap();
+    run(TreeArgs {
+        command: TreeCommand::Replay(ReplayArgs {
+            journal: path.clone(),
+            tree: toml,
+            fingerprint: None,
+        }),
+    })
+    .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    let status: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("out/registration_status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["fingerprint"], s.fingerprint);
+    let report = std::fs::read_to_string(dir.path().join("out/report.txt")).unwrap();
+    assert!(report.contains("唯一の合法手 (読みなし)"));
+    assert!(report.contains("読んだ局面 1 |"));
+}
+
+#[test]
+fn single_legal_at_normal_depth_extension_cap_stop_and_speculation() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = settings();
+    let root = "8k/7R1/6K2/9/9/9/9/9/7L1 b -";
+    assert_eq!(child(root, "2b1b").unwrap(), SINGLE_LEGAL);
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    for (depth, extend, stop) in [(3, 0, 300), (1, 0, 300), (0, 1, 300), (3, 0, 0)] {
+        let mut params = single_legal_tree(dir.path(), depth, extend).def;
+        params.stop = stop;
+        params.own = "w".into();
+        let mut tree = Tree::build(params, &[(root.into(), 1, Vec::new())]).unwrap();
+        let mut cache = BTreeMap::new();
+        assert_eq!(tree.advance(&cache).unwrap(), [(root.into(), 0)]);
+        let tops = BTreeMap::from([(root.into(), (vec!["2b1b".into()], 0, 3))]);
+        let speculative = tree.speculate(&tops, &cache, 100);
+        assert!(speculative.iter().all(|c| c.key != SINGLE_LEGAL));
+        assert!(speculative.iter().any(|c| c.key == next));
+        cache.insert(root.into(), reading(root, &[("2b1b", 10)], &s));
+        assert_eq!(tree.advance(&cache).unwrap(), [(next.clone(), 2)]);
+        assert_eq!(tree.nodes[SINGLE_LEGAL].forced_move.as_deref(), Some("1a1b"));
+        cache.insert(next.clone(), reading(&next, &[(&legal(&next)[0], 456)], &s));
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert_eq!(tree.negamax(&tree.reach(&tree.edge)).unwrap()[root]["2b1b"], 456);
+    }
+}
+
+#[test]
+fn consecutive_single_legal_positions_extend_past_cap_without_a_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = settings();
+    let root = "3s1K1kr/7R1/9/9/9/9/9/9/9 w -";
+    assert_eq!(legal(root), ["2a2b"]);
+    let middle = child(root, "2a2b").unwrap();
+    assert_eq!(legal(&middle), ["4a4b"]);
+    let end = child(&middle, "4a4b").unwrap();
+    assert!(legal(&end).len() > 1);
+    let params = single_legal_tree(dir.path(), 0, 0).def;
+    let mut tree = Tree::build(params, &[(root.into(), 1, Vec::new())]).unwrap();
+    let mut cache = BTreeMap::new();
+    assert_eq!(tree.advance(&cache).unwrap(), [(end.clone(), 2)]);
+    assert_eq!(tree.reading_counts(), (0, 1));
+    assert_eq!(tree.edge[&middle], BTreeSet::from(["4a4b".into()]));
+    cache.insert(end.clone(), reading(&end, &[(&legal(&end)[0], 234)], &s));
+    assert!(tree.advance(&cache).unwrap().is_empty());
+    let values = tree.negamax(&tree.reach(&tree.edge)).unwrap();
+    assert_eq!(values[root]["2a2b"], 234);
+    assert_eq!(values[&middle]["4a4b"], -234);
+    assert!(tree.write_outputs().unwrap());
+}
+
+#[test]
+fn single_legal_prefetch_shadow_requests_only_the_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tree = single_legal_tree(dir.path(), 1, 0);
+    tree.def.rounds = 1;
+    let cache = BTreeMap::<String, Reading>::new();
+    tree.advance(&cache).unwrap();
+    let candidates =
+        tree.prefetch(&[(SINGLE_LEGAL.into(), 1, vec![])], &cache, false, 1000).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].key, child(SINGLE_LEGAL, "1a1b").unwrap());
+}
+
+#[test]
+fn single_legal_propagates_terminal_readings_without_changing_their_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = settings();
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    for (best, expected) in [("win", -30000), ("resign", 0)] {
+        let mut tree = single_legal_tree(dir.path(), 0, 0);
+        let mut terminal = reading(&next, &[], &s);
+        terminal.bestmove = best.into();
+        terminal.multipv = if best == "win" {
+            vec![Pv {
+                mv: "win".into(),
+                cp: 30000,
+                depth: 0,
+            }]
+        } else {
+            vec![]
+        };
+        terminal.validate(&s).unwrap();
+        assert!(tree.advance(&BTreeMap::from([(next.clone(), terminal)])).unwrap().is_empty());
+        assert_eq!(tree.negamax(&tree.reach(&tree.edge)).unwrap()[SINGLE_LEGAL]["1a1b"], expected);
+        assert!(tree.write_outputs().unwrap());
+        let text = std::fs::read_to_string(tree.def.out.join("node_moves.tsv")).unwrap();
+        let known = tree.nodes.keys().cloned().collect();
+        let parsed = super::register::parse_node_moves(&text, 0, Some(&known)).unwrap();
+        assert_eq!(parsed[SINGLE_LEGAL].moves[0].value_kind, "tree:1");
     }
 }
