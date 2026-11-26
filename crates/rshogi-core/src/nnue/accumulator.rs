@@ -606,11 +606,9 @@ impl<T> Drop for AlignedBox<T> {
             AlignedBoxBacking::Shared { map_base, map_len } => {
                 // SAFETY: map_base / map_len は from_shared が受け取った mmap 領域
                 // そのもの。1 box : 1 mapping のため他に参照はなく、Drop 後に
-                // この領域へアクセスする箇所はない。munmap 失敗は無視（プロセス
-                // 終了時に OS が回収するため実害なし）。
-                unsafe {
-                    libc::munmap(*map_base, *map_len);
-                }
+                // この領域へアクセスする箇所はない。`release` が munmap し、最後の
+                // 利用者ならセグメント名を消す。
+                unsafe { super::shared_weights::release(*map_base, *map_len) };
             }
         }
     }
