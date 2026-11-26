@@ -174,6 +174,39 @@ pub(super) type GameLine = (String, u32, Vec<String>);
 pub(super) fn child(key: &str, mv: &str) -> Result<String> {
     Ok(strip_ply(&child_position_after_move(&format!("{key} 1"), mv)?.to_sfen()).to_owned())
 }
+pub(super) fn single_legal_move(key: &str) -> Result<Option<String>> {
+    use rshogi_core::movegen::{MoveList, generate_legal_all};
+    let pos = position_from_sfen(&format!("{key} 1"))?;
+    let mut legal = MoveList::new();
+    generate_legal_all(&pos, &mut legal);
+    if legal.len() != 1 {
+        return Ok(None);
+    }
+    // 宣言の規則はエンジンに委ね、合法手への接続で宣言勝ちを置き換えない。
+    use rshogi_core::types::{EnteringKingRule, Move};
+    if [
+        EnteringKingRule::Point24,
+        EnteringKingRule::Point24H,
+        EnteringKingRule::Point27,
+        EnteringKingRule::Point27H,
+        EnteringKingRule::TryRule,
+    ]
+    .iter()
+    .any(|rule| pos.declaration_win(*rule) != Move::NONE)
+    {
+        return Ok(None);
+    }
+    let mv = legal.as_slice()[0].to_usi();
+    let next = child_position_after_move(&format!("{key} 1"), &mv)?;
+    let mut legal = MoveList::new();
+    generate_legal_all(&next, &mut legal);
+    // 終局の読みは PV を持たないことがあるため、詰みの値は親の探索で求める。
+    if legal.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(mv))
+}
+
 pub(super) fn side(key: &str) -> &str {
     key.split_whitespace().nth(1).unwrap_or("")
 }
@@ -203,6 +236,8 @@ pub(super) struct Tree {
     pub ready: bool,
     pub failed: bool,
     expanded: BTreeMap<String, (usize, u32)>,
+    forced_nodes: usize,
+    legal_cache: std::sync::Arc<std::sync::Mutex<BTreeMap<String, Option<String>>>>,
     /// 前回の `advance` が返した不足 (読みの無い局面)。
     waiting: Vec<(String, usize)>,
 }
@@ -338,8 +373,21 @@ impl Tree {
             ready: false,
             failed: false,
             expanded: BTreeMap::new(),
+            forced_nodes: 0,
+            legal_cache: Default::default(),
             waiting: Vec::new(),
         })
+    }
+
+    fn cached_single_legal_move(&self, key: &str) -> Result<Option<String>> {
+        let mut cache =
+            self.legal_cache.lock().map_err(|e| anyhow::anyhow!("合法手キャッシュ: {e}"))?;
+        if let Some(mv) = cache.get(key) {
+            return Ok(mv.clone());
+        }
+        let mv = single_legal_move(key)?;
+        cache.insert(key.to_owned(), mv.clone());
+        Ok(mv)
     }
 
     fn root_candidates(&mut self, key: &str) -> Result<()> {
@@ -347,6 +395,11 @@ impl Tree {
             return Ok(());
         }
         let node = &self.nodes[key];
+        if let Some(mv) = &node.forced_move {
+            self.candidates.insert(key.into(), vec![mv.clone()]);
+            self.compare.insert(key.into(), None);
+            return Ok(());
+        }
         let mut cands = Vec::new();
         let game = self.game.get(key).cloned().unwrap_or_default();
         if side(key) != self.def.own {
@@ -389,6 +442,9 @@ impl Tree {
     }
 
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+        if let Some(mv) = &self.nodes[key].forced_move {
+            return (BTreeSet::from([mv.clone()]), BTreeSet::new());
+        }
         let mp = self.nodes[key].lines();
         let level = self.level[key];
         if level >= self.def.depth || self.settle_rounds_used > 0 {
@@ -422,6 +478,10 @@ impl Tree {
         (pick, extra)
     }
 
+    pub fn reading_counts(&self) -> (usize, usize) {
+        (self.nodes.len() - self.forced_nodes, self.level.len() - self.forced_nodes)
+    }
+
     pub fn waiting(&self) -> &[(String, usize)] {
         &self.waiting
     }
@@ -452,15 +512,36 @@ impl Tree {
             while let Some(key) = work.pop_front() {
                 budget.tick()?;
                 if !self.nodes.contains_key(&key) {
-                    let Some(reading) = self.reading(cache, &key) else {
-                        continue;
-                    };
-                    self.reading_conditions.insert(
-                        cache
-                            .condition(&key, self.def.preferred_fingerprint.as_deref())
-                            .map(str::to_owned),
-                    );
-                    self.nodes.insert(key.clone(), reading.clone());
+                    if let Some(mv) = self.cached_single_legal_move(&key)? {
+                        self.forced_nodes += 1;
+                        self.nodes.insert(
+                            key.clone(),
+                            Reading {
+                                forced_move: Some(mv.clone()),
+                                tag: String::new(),
+                                ply: self.ply[&key],
+                                key: key.clone(),
+                                nodes_limit: 0,
+                                nodes: None,
+                                sec: 0.0,
+                                threads: 0,
+                                hash: 0,
+                                draw: BTreeMap::new(),
+                                multipv: Vec::new(),
+                                bestmove: mv,
+                            },
+                        );
+                    } else {
+                        let Some(reading) = self.reading(cache, &key) else {
+                            continue;
+                        };
+                        self.reading_conditions.insert(
+                            cache
+                                .condition(&key, self.def.preferred_fingerprint.as_deref())
+                                .map(str::to_owned),
+                        );
+                        self.nodes.insert(key.clone(), reading.clone());
+                    }
                 }
                 if self.roots.contains_key(&key) {
                     self.root_candidates(&key)?;
@@ -471,7 +552,7 @@ impl Tree {
                     continue;
                 }
                 self.expanded.insert(key.clone(), (level, ply));
-                if level >= self.def.max_depth() {
+                if level >= self.def.max_depth() && self.nodes[&key].forced_move.is_none() {
                     continue;
                 }
                 let (pick, extra) = self.picks(&key);
@@ -572,6 +653,8 @@ impl Tree {
         self.game_lines.clear();
         self.normal_unresolved = None;
         self.nodes.clear();
+        self.forced_nodes = 0;
+        self.legal_cache = Default::default();
         self.level.clear();
         self.ply.clear();
         self.edge.clear();
@@ -1058,6 +1141,7 @@ impl Tree {
         def.extend_rounds = 0;
         def.settle_rounds = 0;
         let mut shadow = Self::build_borrowed(def, lines, work)?;
+        shadow.legal_cache = self.legal_cache.clone();
         for (key, moves) in self.force.iter().chain(predicted.iter()) {
             work.tick()?;
             for mv in moves {
@@ -1127,13 +1211,19 @@ impl Tree {
         let mut found: BTreeMap<String, (usize, u32)> = BTreeMap::new();
         let mut visited = 0;
         while let Some((level, key, ply)) = pending.pop_first() {
-            if level >= self.def.max_depth() || visited >= limit {
+            if visited >= limit {
                 break;
             }
             visited += 1;
+            let forced = self.cached_single_legal_move(&key).ok().flatten();
+            if level >= self.def.max_depth() && forced.is_none() {
+                continue;
+            }
             let in_tree = self.level.contains_key(&key);
             let mut moves: Vec<&str> = Vec::new();
-            if !in_tree && let Some(reading) = self.reading(cache, &key) {
+            if let Some(mv) = &forced {
+                moves.push(mv);
+            } else if !in_tree && let Some(reading) = self.reading(cache, &key) {
                 let lines = reading.lines();
                 if lines.first().is_some_and(|pv| pv.cp.abs() < self.def.stop) {
                     let n = if level >= self.def.depth || side(&key) == self.def.own {
@@ -1179,7 +1269,10 @@ impl Tree {
         }
         found
             .into_iter()
-            .filter(|(key, _)| self.reading(cache, key).is_none())
+            .filter(|(key, _)| {
+                self.reading(cache, key).is_none()
+                    && self.cached_single_legal_move(key).ok().flatten().is_none()
+            })
             .map(|(key, (level, ply))| PrefetchCandidate { key, level, ply })
             .collect()
     }
@@ -1327,6 +1420,7 @@ pub(super) mod prefetch_tests {
 
     fn reading(key: &str, rows: &[(&str, i32)]) -> Reading {
         Reading {
+            forced_move: None,
             tag: "test".into(),
             key: key.into(),
             ply: 1,
@@ -1407,6 +1501,29 @@ pub(super) mod prefetch_tests {
         let tree =
             Tree::build(def, &[(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])]).unwrap();
         (tree, cache, keys)
+    }
+
+    #[test]
+    fn single_legal_cache_is_shared_with_shadows_and_cleared_on_shrink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = super::super::tests::single_legal_tree(dir.path(), 1, 0);
+        let root = super::super::tests::SINGLE_LEGAL;
+        let next = child(root, "1a1b").unwrap();
+        let cache = BTreeMap::<String, Reading>::new();
+        tree.advance(&cache).unwrap();
+        assert_eq!(tree.legal_cache.lock().unwrap().get(root), Some(&Some("1a1b".into())));
+        assert_eq!(tree.legal_cache.lock().unwrap().get(&next), Some(&None));
+        let shadow = tree
+            .shadow(&[(root.into(), 1, vec![])], Edges::new(), &cache, &mut unlimited())
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&tree.legal_cache, &shadow.legal_cache));
+        let before = tree.legal_cache.lock().unwrap().clone();
+        tree.advance(&cache).unwrap();
+        tree.speculate(&BTreeMap::from([(next, (vec![], 0, 3))]), &cache, 100);
+        assert_eq!(*tree.legal_cache.lock().unwrap(), before);
+        tree.shrink();
+        assert!(tree.legal_cache.lock().unwrap().is_empty());
+        assert_eq!(*shadow.legal_cache.lock().unwrap(), before);
     }
 
     #[test]
@@ -1763,6 +1880,7 @@ pub(super) mod prefetch_tests {
     fn prediction_uses_raw_unexpanded_move_and_does_not_mutate_tree() {
         let (tree, lines, cache) = fixture();
         let before = format!("{tree:?}");
+        let before_cache = tree.legal_cache.lock().unwrap().clone();
         let predicted = tree.predict(&mut unlimited()).unwrap();
         assert_eq!(predicted[ROOT], BTreeSet::from(["5i6i".into()]));
         let shadow = tree.shadow(&lines, predicted, &cache, &mut unlimited()).unwrap();
@@ -1770,11 +1888,15 @@ pub(super) mod prefetch_tests {
         let candidates = tree.prefetch(&lines, &cache, false, PREFETCH_WORK).unwrap();
         let b = child(ROOT, "5i6i").unwrap();
         assert!(candidates.contains(&PrefetchCandidate {
-            key: b,
+            key: b.clone(),
             level: 1,
             ply: 12
         }));
+        // 判定キャッシュの追加は、木の展開状態の変更とは区別する。
+        let cached = std::mem::replace(&mut *tree.legal_cache.lock().unwrap(), before_cache);
+        assert_eq!(cached.get(&b), Some(&None));
         assert_eq!(format!("{tree:?}"), before);
+        *tree.legal_cache.lock().unwrap() = cached;
         assert_shadow(&tree, &tree.shadow(&lines, Edges::new(), &cache, &mut unlimited()).unwrap());
     }
 
@@ -2305,8 +2427,27 @@ pub(super) mod prefetch_tests {
         assert!(error.is::<WorkLimit>());
         assert_eq!(budget.remaining, Some(0));
         let mut tree = Tree::build(params(), &[(ROOT.into(), 1, vec![])]).unwrap();
-        for n in 0..6000 {
-            tree.level.insert(format!("unread-{n}"), 1);
+        for rank in 2..9 {
+            for file in 0..9 {
+                let mut ranks = vec!["9".to_owned(); 9];
+                ranks[0] = "4k4".into();
+                ranks[rank] = format!(
+                    "{}K{}",
+                    if file == 0 {
+                        String::new()
+                    } else {
+                        file.to_string()
+                    },
+                    if file == 8 {
+                        String::new()
+                    } else {
+                        (8 - file).to_string()
+                    }
+                );
+                let key = format!("{} b -", ranks.join("/"));
+                tree.level.insert(key.clone(), 1);
+                tree.ply.insert(key, 1);
+            }
         }
         let mut budget = Work {
             remaining: Some(50),

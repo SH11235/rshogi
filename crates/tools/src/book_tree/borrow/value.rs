@@ -277,6 +277,14 @@ pub(super) fn value_root(
     for e in &tree.edges {
         edges.entry(e.key.as_str()).or_default().push(e);
     }
+    let mut forced_children = BTreeSet::new();
+    for edge in &tree.edges {
+        if readings.get(&edge.child).is_some_and(|r| r.lines().is_empty())
+            && crate::book_tree::model::single_legal_move(&edge.key)?.as_deref() == Some(&edge.mv)
+        {
+            forced_children.insert(edge.child.as_str());
+        }
+    }
     let mut written: BTreeMap<&str, Vec<Written>> = BTreeMap::new();
     let db = work.join(format!("{}.db", root.id));
     let mut out = BufWriter::new(
@@ -287,7 +295,9 @@ pub(super) fn value_root(
         writeln!(out, "sfen {key} {}", node.ply)?;
         let rows = written.entry(key.as_str()).or_default();
         match node.kind {
-            Kind::Inner => {
+            Kind::Inner | Kind::Master
+                if node.kind == Kind::Inner || edges.contains_key(key.as_str()) =>
+            {
                 for e in edges.get(key.as_str()).into_iter().flatten() {
                     writeln!(out, "{} none 0 1 1", e.mv)?;
                     rows.push(Written {
@@ -323,7 +333,17 @@ pub(super) fn value_root(
                     .get(key)
                     .with_context(|| format!("{}: 読みがありません: {key}", root.id))?;
                 if reading.lines().is_empty() {
-                    writeln!(out, "none none {} 1 1", leaf_value(reading))?;
+                    // 唯一手から接続した終局の値は model の伝播と揃える。
+                    let value = if forced_children.contains(key.as_str()) {
+                        if reading.bestmove == "win" {
+                            reading.multipv.first().map_or(0, |pv| pv.cp)
+                        } else {
+                            0
+                        }
+                    } else {
+                        leaf_value(reading)
+                    };
+                    writeln!(out, "none none {value} 1 1")?;
                     rows.push(Written {
                         mv: None,
                         expanded: false,
@@ -400,7 +420,7 @@ pub(super) fn value_root(
         .map(|node| {
             let key = graph.key(node);
             let n = &tree.nodes[key];
-            let cond = if n.kind == Kind::Master && !n.read {
+            let cond = if n.kind == Kind::Master && !n.read && !edges.contains_key(key) {
                 input.master_known.get(key).map(String::as_str)
             } else if n.kind != Kind::Inner {
                 input.conditions.get(key).map(String::as_str)
@@ -432,7 +452,7 @@ pub(super) fn value_root(
         own_nodes[node] = readings.get(key).map_or(0, |reading| reading.nodes_limit);
         *count = if own_nodes[node] > 0 {
             own_nodes[node]
-        } else if n.kind == Kind::Master && !n.read {
+        } else if n.kind == Kind::Master && !n.read && !edges.contains_key(key) {
             input
                 .master_known
                 .get(key)

@@ -263,9 +263,19 @@ impl Report<'_> {
         }
         let depth = depth.context("通常深さの記録がありません。--depth を指定してください")?;
         let cap = depth.checked_add(extend).context("延長段数の上限")?;
+        let mandatory_children: BTreeSet<_> = readings
+            .values()
+            .filter_map(|parent| {
+                let mv = parent.forced_move.as_ref()?;
+                Some(child(&parent.key, mv).map(|key| (key, levels[&parent.key] + 1)))
+            })
+            .collect::<Result<_>>()?;
         ensure!(
-            levels.values().all(|&level| level <= cap),
-            "木に depth + extend より深い読みがあります"
+            levels
+                .iter()
+                .all(|(key, &level)| level <= cap
+                    || mandatory_children.contains(&(key.clone(), level))),
+            "木に唯一手の延長でない depth + extend より深い読みがあります"
         );
         Ok(Self {
             traces: RefCell::default(),
@@ -328,7 +338,9 @@ impl Report<'_> {
             }
             let first = reading.lines().first();
             let chosen = match follow {
-                Follow::FirstRead => first.map(|pv| pv.mv.as_str()),
+                Follow::FirstRead => {
+                    reading.forced_move.as_deref().or_else(|| first.map(|pv| pv.mv.as_str()))
+                }
                 Follow::Propagated => position.best.as_deref(),
             };
             let Some(mv) = chosen else {

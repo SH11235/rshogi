@@ -108,8 +108,8 @@ impl Tree {
             super::service::monitor(&self.def.out.join("STATUS"), "NOT_READY\n");
             return Ok(false);
         }
-        self.write_db("tree.db", &all, &self.edge)?;
-        self.write_db("tree_rule.db", &rule_set, &self.rule)?;
+        self.write_db("tree.db", &all, &self.edge, &replace)?;
+        self.write_db("tree_rule.db", &rule_set, &self.rule, &rule)?;
         let min_result = backprop_file_with(
             &self.def.out.join("tree.db"),
             &self.def.out.join("tree_bp_min.db"),
@@ -158,13 +158,26 @@ impl Tree {
                 } else {
                     v.zip(vc).map(|(v, c)| sgn * (v - c))
                 };
-                let n = self.reach_from(vec![c.clone()], &self.edge).len();
+                let n = self
+                    .reach_from(vec![c.clone()], &self.edge)
+                    .iter()
+                    .filter(|k| self.nodes[*k].forced_move.is_none())
+                    .count();
                 let game = if self.game.get(key).is_some_and(|g| g.contains(mv)) {
                     "○"
                 } else {
                     ""
                 };
-                let read = raw.get(mv).map_or_else(|| "MultiPV の外".into(), ToString::to_string);
+                let read = raw.get(mv).map_or_else(
+                    || {
+                        if self.nodes[key].forced_move.is_some() {
+                            "唯一の合法手 (読みなし)".into()
+                        } else {
+                            "MultiPV の外".into()
+                        }
+                    },
+                    ToString::to_string,
+                );
                 writeln!(
                     report,
                     "{mv} | {read} | {} | {} | {} | {} | {} | {n} | {game} | {mv} {}",
@@ -202,7 +215,9 @@ impl Tree {
         let own_sign = if self.def.own == "b" { 1 } else { -1 };
         let mut own_rows = Vec::new();
         for key in self.reach(&self.edge) {
-            if side(&key) != self.def.own || self.nodes[&key].lines().is_empty() {
+            if side(&key) != self.def.own
+                || (self.nodes[&key].lines().is_empty() && self.nodes[&key].forced_move.is_none())
+            {
                 continue;
             }
             let values = rows_for(&replace, &key)?;
@@ -260,7 +275,7 @@ impl Tree {
         writeln!(
             report,
             "\n読んだ局面 {} | 規則の枝だけで届く局面 {} | こちらの手番で伸ばした局面 {} (うち実戦の手の下 {under}、own_nodes.tsv)",
-            self.nodes.len(),
+            self.nodes.values().filter(|node| node.forced_move.is_none()).count(),
             rule_set.len(),
             own_rows.len()
         )?;
@@ -281,7 +296,7 @@ impl Tree {
         let mut text = format!("{NODE_MOVES_HEADER}\n");
         for key in self.reach(&self.edge) {
             let reading = &self.nodes[&key];
-            if reading.lines().is_empty() {
+            if reading.lines().is_empty() && reading.forced_move.is_none() {
                 continue;
             }
             let values = rows_for(replace, &key)?;
@@ -308,16 +323,27 @@ impl Tree {
         name: &str,
         nodes: &BTreeSet<String>,
         edges: &BTreeMap<String, BTreeSet<String>>,
+        values: &Values,
     ) -> Result<()> {
         let mut db = format!("{BOOK_HEADER}\n");
         for key in nodes {
-            let mut rows = self.raw_rows(key);
+            let mut rows = if self.nodes[key].forced_move.is_some() {
+                values[key].clone()
+            } else {
+                self.raw_rows(key)
+            };
             for mv in edges.get(key).into_iter().flatten() {
                 let c = child(key, mv)?;
                 if !rows.contains_key(mv)
-                    && let Some(first) = self.nodes.get(&c).and_then(|n| n.lines().first())
+                    && let Some(value) = self.nodes.get(&c).and_then(|node| {
+                        if node.forced_move.is_some() {
+                            values.get(&c)?.values().copied().max()
+                        } else {
+                            node.lines().first().map(|pv| pv.cp)
+                        }
+                    })
                 {
-                    rows.insert(mv.clone(), -first.cp);
+                    rows.insert(mv.clone(), -value);
                 }
             }
             writeln!(db, "sfen {key} {}", self.ply[key])?;

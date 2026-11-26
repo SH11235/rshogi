@@ -424,3 +424,40 @@ fn large_cycle_trace_bounds_ancestor_dependent_evaluation() {
         trace.moves.len()
     );
 }
+
+#[test]
+fn single_legal_structure_loads_and_traces_past_cap() {
+    use crate::book_tree::tests::{SINGLE_LEGAL, reading, settings, single_legal_tree};
+    let dir = tempfile::tempdir().unwrap();
+    let s = settings();
+    let mut tree = single_legal_tree(dir.path(), 0, 0);
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    let cache = BTreeMap::from([(next.clone(), reading(&next, &[("3c3b", 456)], &s))]);
+    assert!(tree.advance(&cache).unwrap().is_empty());
+    assert!(tree.write_outputs().unwrap());
+    let report = Report::load(&LinesArgs {
+        dir: tree.def.out.clone(),
+        out: None,
+        game_out: None,
+        depth: None,
+        extend: None,
+        stop: None,
+        paths: None,
+    })
+    .unwrap();
+    for follow in [Follow::FirstRead, Follow::Propagated] {
+        let trace = report
+            .trace(
+                &mut report.propagation().unwrap().evaluator(NEGAMAX_EXACT_CALLS),
+                SINGLE_LEGAL.into(),
+                BTreeSet::new(),
+                follow,
+                0,
+            )
+            .unwrap();
+        assert_eq!(trace.key, next);
+        assert_eq!(trace.moves, ["1a1b"]);
+        assert_eq!(trace.value, Some(456));
+        assert_ne!(trace.reason, Reason::MissingRead);
+    }
+}

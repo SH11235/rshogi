@@ -233,10 +233,11 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
             format!("{} を読めません (古い木は tree replay で作り直してください)", path.display())
         })?;
         let fingerprint = tree_fingerprint(dir)?;
-        let tree_readings = tree_readings(dir)?;
+        let mut tree_readings = tree_readings(dir)?;
         let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
         let mut parsed =
             parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
+        tree_readings.retain(|reading| reading.forced_move.is_none());
         let matching =
             fingerprint.is_none() && !args.journal.is_empty() && !tree_readings.is_empty();
         if let Some(fp) = &fingerprint {
@@ -881,6 +882,10 @@ pub(super) fn parse_node_moves(
             if let Some(depth) = remaining.get(&destination) {
                 let depth = depth.checked_add(1).context("行き先の remaining が大きすぎます")?;
                 mv.value_kind = format!("tree:{depth}");
+            } else if node.nodes == 0
+                && known_nodes.is_some_and(|known| known.contains(&destination))
+            {
+                mv.value_kind = "tree:1".into();
             } else if known_nodes.is_none_or(|known| known.contains(&destination)) {
                 // TSV にない局面への合流や、読みの一覧がない木では、伝播の有無や深さを確定できない。
                 mv.value_kind = "unknown".into();
@@ -2554,6 +2559,28 @@ mod tests {
         assert_eq!(format_nodes(230_000_000), "2.3e8");
     }
     #[test]
+    fn single_legal_registration_uses_propagated_value_and_child_condition() {
+        use crate::book_tree::tests::{SINGLE_LEGAL, reading, settings, single_legal_tree};
+        let dir = tempfile::tempdir().unwrap();
+        let s = settings();
+        let mut tree = single_legal_tree(dir.path(), 0, 0);
+        let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+        let cache = BTreeMap::from([(next.clone(), reading(&next, &[("3c3b", 456)], &s))]);
+        tree.advance(&cache).unwrap();
+        assert!(tree.write_outputs().unwrap());
+        let text = std::fs::read_to_string(tree.def.out.join(NODE_MOVES)).unwrap();
+        let known = tree.nodes.keys().cloned().collect();
+        let mut nodes = parse_node_moves(&text, 0, Some(&known)).unwrap();
+        move_cond::assign(&mut nodes, &BTreeMap::from([(next, "child".into())])).unwrap();
+        let (rows, _, _) = register(vec![], &nodes, &options()).unwrap();
+        let row = find(&rows, SINGLE_LEGAL, "1a1b").unwrap();
+        assert_eq!(
+            (row.get("evals"), row.get("value_kind"), row.get("nodes"), row.get("cond")),
+            ("-456", "tree:1", "0", "child")
+        );
+    }
+
+    #[test]
     fn expanded_and_metadata_changes_are_registered_without_value_changes() {
         const B: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
         let white = child(B, "5i4i").unwrap();
@@ -2738,6 +2765,7 @@ mod tests {
         second.engine_sha256 = "another".into();
         second.fingerprint = second.computed_fingerprint().unwrap();
         let reading = |key: &str, ply, moves: &[(&str, i32)]| Reading {
+            forced_move: None,
             tag: "test".into(),
             ply,
             key: key.into(),
@@ -2899,6 +2927,7 @@ mod tests {
         })
         .unwrap();
         let mut reading = Reading {
+            forced_move: None,
             tag: "test".into(),
             ply: 1,
             key: "4k4/9/9/9/9/9/9/9/4K4 b -".into(),

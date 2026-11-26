@@ -40,6 +40,7 @@ impl Deps {
 }
 
 struct Position {
+    structural: bool,
     /// この局面の読みの条件 (`names` の番号)。
     reading: Option<usize>,
     /// 値がどの読みから来たかを辿れない手がある。
@@ -116,7 +117,8 @@ fn reachable(positions: &[Position]) -> Vec<Deps> {
         for &i in group {
             all.merge(Deps {
                 known: positions[i].reading.map_or(Known::None, Known::One),
-                unsure: positions[i].reading.is_none() || positions[i].untraceable,
+                unsure: (!positions[i].structural && positions[i].reading.is_none())
+                    || positions[i].untraceable,
             });
             for j in edges(i) {
                 if component[j] == id {
@@ -158,6 +160,7 @@ pub(super) fn assign(
             destinations.push(destination);
         }
         positions.push(Position {
+            structural: node.nodes == 0,
             reading: conds.get(key).and_then(|name| names.binary_search(&name.as_str()).ok()),
             untraceable,
             destinations,
@@ -239,6 +242,22 @@ mod tests {
         assert_eq!(cond(&nodes, R, "5i4i"), "unknown");
         assert_eq!(cond(&nodes, &w1, "5a6a"), "a");
         assert_eq!(cond(&nodes, &x, "4i3i"), "unknown");
+    }
+
+    #[test]
+    fn forced_connection_does_not_add_an_unknown_reading_condition() {
+        let w = child(R, "5i4i").unwrap();
+        let x = child(&w, "5a4a").unwrap();
+        let table = format!(
+            "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n\
+             {R}\t1\t0\t2\t100\t5i4i\t10\t1\t1\n\
+             {w}\t2\t1\t1\t0\t5a4a\t-10\t1\t1\n\
+             {x}\t3\t2\t0\t100\t4i3i\t10\t0\t1\n"
+        );
+        let mut nodes = parse_node_moves(&table, 0, Some(&BTreeSet::new())).unwrap();
+        assign(&mut nodes, &conds(&[(R, "a"), (&x, "b")])).unwrap();
+        assert_eq!(cond(&nodes, R, "5i4i"), "b");
+        assert_eq!(cond(&nodes, &w, "5a4a"), "b");
     }
 
     #[test]

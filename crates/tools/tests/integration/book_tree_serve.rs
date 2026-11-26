@@ -2711,3 +2711,51 @@ fn extend_default_and_override_survive_serve_and_replay() {
         std::fs::read(state.join("replayed/node_moves.tsv")).unwrap()
     );
 }
+
+#[test]
+fn single_legal_moves_never_reach_engine_with_prefetch_and_speculation() {
+    let child = |key: &str, mv: &str| {
+        strip_ply(&child_position_after_move(&format!("{key} 1"), mv).unwrap().to_sfen()).to_owned()
+    };
+    let root = "3s1K1kr/6R2/9/9/9/9/9/9/9 b -";
+    let first = child(root, "3b2b");
+    let second = child(&first, "2a2b");
+    let end = child(&second, "4a4b");
+    for speculate in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let config = state.join("engine.json");
+        let positions = BTreeMap::from([
+            (root.to_owned(), json!([{"move":"3b2b","cp":10,"depth":8}])),
+            (end.clone(), json!([{"move":"1a1b","cp":456,"depth":8}])),
+        ]);
+        let mut data = json!({"positions":positions,"delay":0.1,"mid_nodes":50,"log":state.join("protocol.jsonl")});
+        data[format!("delay:{root}")] = json!(1.5);
+        std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+        enqueue(
+            &state,
+            json!({"id":"forced","root":format!("sfen {root} 1"),"own":"w","depth":1,"opts":{"opp_n":1,"rounds":0,"stop":1}}),
+        );
+        let mut command = serve_command(&state, &config, 0, 3, dir.path());
+        if speculate {
+            command.args(["--prefetch", "--speculate-at", "0.25"]);
+        }
+        let mut server = Server(command.spawn().unwrap());
+        wait_for(|| progress(&state)["trees"][0]["finished"] == true);
+        stop(&state, &mut server);
+        let rows = journal_rows(&state);
+        let read_keys: BTreeSet<_> =
+            rows.iter().map(|r| r["reading"]["key"].as_str().unwrap()).collect();
+        assert_eq!(read_keys, BTreeSet::from([root, end.as_str()]));
+        assert_eq!(searches(&state), 2);
+        let protocol = std::fs::read_to_string(state.join("protocol.jsonl")).unwrap();
+        assert!(!protocol.contains(&format!("position sfen {first} ")));
+        assert!(!protocol.contains(&format!("position sfen {second} ")));
+        let table =
+            std::fs::read_to_string(out(&state, "forced", "w").join("node_moves.tsv")).unwrap();
+        assert!(table.contains(&format!("{first}\t2\t1\t0\t0\t2a2b\t456\t1\t1")));
+        assert!(table.contains(&format!("{second}\t3\t2\t0\t0\t4a4b\t-456\t1\t1")));
+        assert_eq!(targets_status(&state)["targets"][0]["read"], 2);
+    }
+}

@@ -8,7 +8,7 @@ use crate::book_backprop::DrawValues;
 use crate::book_db::{BookDb, BookMove, PositionEntry};
 use crate::book_tree::ReadingArgs;
 use crate::book_tree::audit::{Flips, MasterValue};
-use crate::book_tree::journal::{Journal, Pv, Reading, Settings};
+use crate::book_tree::journal::{Journal, Pv, Reading, Readings, Settings};
 use crate::book_tree::master_table::{COLUMNS, parse_master};
 use crate::book_tree::model::child;
 use crate::book_tree::targets::{DEFAULT_PRIORITY, Defaults, Line};
@@ -235,6 +235,7 @@ fn reading(key: &str, rows: &[(&str, i32)], s: &Settings) -> Reading {
         })
         .collect();
     Reading {
+        forced_move: None,
         tag: "t".into(),
         ply: 1,
         key: key.into(),
@@ -2219,4 +2220,304 @@ fn borrow_value_direct_lookup_registers_with_flipped_joins() {
         );
         assert!(d.join("value/roots.tsv").exists());
     }
+}
+
+#[test]
+fn single_legal_cut_enqueue_serve_value_and_skip_journal() {
+    use crate::book_tree::tests::{SINGLE_LEGAL, serve_args};
+    use crate::book_tree::{queue, service};
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Enqueue {
+        #[command(flatten)]
+        args: queue::EnqueueArgs,
+    }
+    for (terminal, expected) in [("", -456), ("win", -30000), ("win_empty", 0), ("resign", 0)] {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write_book(&d.join("big.db"));
+        std::fs::write(
+            d.join("roots.jsonl"),
+            format!("{{\"id\":\"forced\",\"root\":\"sfen {SINGLE_LEGAL} 1\",\"own\":\"w\"}}\n"),
+        )
+        .unwrap();
+        cut::run(cut_args(d, "cut", None)).unwrap();
+        let summary = std::fs::read_to_string(d.join("cut/summary.tsv")).unwrap();
+        assert_eq!(summary.lines().nth(1).unwrap().split('\t').nth(2), Some("0"));
+        let (_, trees) = read_cut(&d.join("cut")).unwrap();
+        let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+        assert!(!trees[0].nodes[SINGLE_LEGAL].read);
+        assert!(trees[0].nodes[&next].read);
+        let engine = std::env::current_exe().unwrap();
+        let state = d.join("state");
+        let journal = d.join("journal");
+        let args = serve_args(&state, &journal, &d.join("served"), &engine);
+        let settings = Settings::new(&args.reading).unwrap();
+        let mut answer = reading(&next, &[("3c3d", 456)], &settings);
+        if !terminal.is_empty() {
+            answer.bestmove = if terminal == "win_empty" {
+                "win"
+            } else {
+                terminal
+            }
+            .into();
+            answer.multipv = if terminal == "win" {
+                vec![Pv {
+                    mv: "win".into(),
+                    cp: 30000,
+                    depth: 0,
+                }]
+            } else {
+                vec![]
+            };
+        }
+        {
+            let mut j = Journal::open(&journal, &settings.fingerprint).unwrap();
+            j.append(answer, &settings, "fixture".into()).unwrap();
+            assert!(j.get(SINGLE_LEGAL).is_none());
+        }
+        let from = d.join("cut/targets.jsonl");
+        let cli = Enqueue::try_parse_from([
+            std::ffi::OsStr::new("enqueue"),
+            std::ffi::OsStr::new("--state"),
+            state.as_os_str(),
+            std::ffi::OsStr::new("--from"),
+            from.as_os_str(),
+        ])
+        .unwrap();
+        queue::enqueue(cli.args).unwrap();
+        std::thread::scope(|scope| {
+            let monitor = scope.spawn(|| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                loop {
+                    let done = std::fs::read(state.join("targets.status.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .is_some_and(|status| {
+                            status["targets"].as_array().is_some_and(|targets| {
+                                !targets.is_empty()
+                                    && targets.iter().all(|target| target["state"] == "DONE")
+                            })
+                        });
+                    if done || std::time::Instant::now() >= deadline {
+                        std::fs::write(state.join("stop"), "").unwrap();
+                        return done;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+            service::serve(args).unwrap();
+            assert!(monitor.join().unwrap(), "serve が DONE になりませんでした");
+        });
+        let line: Line =
+            serde_json::from_str(std::fs::read_to_string(from).unwrap().trim()).unwrap();
+        let status = std::fs::read_to_string(state.join("targets.status.json")).unwrap();
+        assert!(status.contains("DONE"), "{status}");
+        assert!(status.contains(&line.id));
+        let master = d.join("master.tsv");
+        std::fs::write(&master, format!("{}\n", COLUMNS.join("\t"))).unwrap();
+        value::run(ValueArgs::for_test(
+            d.join("cut"),
+            journal.clone(),
+            master.clone(),
+            d.join("value"),
+            true,
+        ))
+        .unwrap();
+        let rows = parse_master(&std::fs::read_to_string(&master).unwrap()).unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.get("key") == SINGLE_LEGAL && row.get("move") == "1a1b")
+            .unwrap();
+        assert_eq!(row.get("evals"), expected.to_string());
+        let mut args = cut_args(d, "parts", None);
+        args.set_parts(vec![1], Some(journal), None);
+        cut::run(args).unwrap();
+        assert!(std::fs::read_to_string(d.join("parts/parts/part-0.jsonl")).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn single_legal_checks_shared_roots_and_mate_keep_read_targets() {
+    use crate::book_tree::tests::SINGLE_LEGAL;
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    let forced = RootInfo {
+        key: SINGLE_LEGAL.into(),
+        own: "w".into(),
+        ..root()
+    };
+    let mut lookup = |sfen: &str| -> Result<Vec<BookEntryMove>> {
+        Ok(if crate::book_db::strip_ply(sfen) == SINGLE_LEGAL {
+            vec![BookEntryMove {
+                move_usi: "1a1b".into(),
+                value: 999,
+                depth: 10,
+                move_count: 1,
+            }]
+        } else {
+            vec![]
+        })
+    };
+    let empty = BTreeMap::new();
+    for max_plies in [0, 4] {
+        let p = params(max_plies, 100);
+        let tree = cut_root(&forced, &p, &mut lookup, None, &empty).unwrap();
+        assert!(!tree.nodes[SINGLE_LEGAL].read);
+        assert!(tree.nodes[&next].read);
+        assert_eq!(tree.edges.len(), 1);
+        assert_eq!(tree.edges[0].mv, "1a1b");
+    }
+    let roots = [
+        forced.clone(),
+        RootInfo {
+            id: "r2".into(),
+            key: next.clone(),
+            ply: 2,
+            ..forced
+        },
+    ];
+    let trees = cut::cut_shared(&roots, &params(4, 100), &mut lookup, None, &empty).unwrap();
+    assert!(!trees[0].nodes[SINGLE_LEGAL].read);
+    assert!(!trees[0].nodes.contains_key(&next));
+    assert!(trees[1].nodes[&next].read);
+    let mate = "3s1K1kr/7R1/5g3/9/9/9/9/9/9 w -";
+    let tree = cut_root(
+        &RootInfo {
+            key: mate.into(),
+            own: "w".into(),
+            ..root()
+        },
+        &params(0, 1),
+        &mut |_| Ok(vec![]),
+        None,
+        &empty,
+    )
+    .unwrap();
+    assert!(tree.nodes[mate].read);
+    assert_eq!(tree.nodes.len(), 1);
+    assert!(tree.edges.is_empty());
+}
+
+#[test]
+fn single_legal_master_read_uses_child_but_preserves_master_registration() {
+    use crate::book_tree::tests::SINGLE_LEGAL;
+    let parent = "8k/7R1/6K2/9/9/9/9/9/7L1 b -";
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    let root = RootInfo {
+        key: parent.into(),
+        ..root()
+    };
+    let master = BTreeMap::from([(
+        SINGLE_LEGAL.into(),
+        MasterValue {
+            main: Some(999),
+            best: Some(999),
+        },
+    )]);
+    let empty = BTreeMap::new();
+    let stop = MasterStop {
+        values: &master,
+        moves: &empty,
+        mode: MasterExit::Read,
+    };
+    let tree = cut_root(
+        &root,
+        &params(4, 100),
+        &mut |sfen| {
+            Ok(if crate::book_db::strip_ply(sfen) == parent {
+                vec![BookEntryMove {
+                    move_usi: "2b1b".into(),
+                    value: 1,
+                    depth: 1,
+                    move_count: 1,
+                }]
+            } else {
+                vec![]
+            })
+        },
+        Some(&stop),
+        &empty,
+    )
+    .unwrap();
+    assert_eq!(
+        (tree.nodes[SINGLE_LEGAL].kind, tree.nodes[SINGLE_LEGAL].read),
+        (Kind::Master, false)
+    );
+    assert!(tree.nodes[&next].read);
+    let s = settings();
+    let readings = BTreeMap::from([
+        (parent.into(), reading(parent, &[("2b1b", 10)], &s)),
+        (next.clone(), reading(&next, &[("3c3d", 456)], &s)),
+    ]);
+    let work = tempfile::tempdir().unwrap();
+    let values = value_root(
+        &root,
+        &tree,
+        &ValueInput {
+            readings: &readings,
+            master: &master,
+            master_known: &BTreeMap::new(),
+            conditions: &readings.keys().map(|key| (key.clone(), "test".into())).collect(),
+        },
+        DrawValues::default(),
+        Some(40),
+        work.path(),
+    )
+    .unwrap();
+    assert_eq!(values.moves[parent][0].value, 456);
+    assert_eq!(values.moves[SINGLE_LEGAL][0].value, -456);
+    let nodes = register_nodes(0, &root, "opp", &tree, &values, &BTreeSet::new(), 4, &readings);
+    assert!(!nodes.contains_key(SINGLE_LEGAL));
+    let stop = MasterStop {
+        mode: MasterExit::Use,
+        ..stop
+    };
+    let tree = cut_root(
+        &root,
+        &params(4, 100),
+        &mut |sfen| {
+            Ok(if crate::book_db::strip_ply(sfen) == parent {
+                vec![BookEntryMove {
+                    move_usi: "2b1b".into(),
+                    value: 1,
+                    depth: 1,
+                    move_count: 1,
+                }]
+            } else {
+                vec![]
+            })
+        },
+        Some(&stop),
+        &empty,
+    )
+    .unwrap();
+    assert!(!tree.nodes.contains_key(&next));
+    assert!(!tree.nodes[SINGLE_LEGAL].read);
+}
+
+#[test]
+fn single_legal_declaration_stays_an_engine_read() {
+    use rshogi_core::movegen::{MoveList, generate_legal_all};
+    use rshogi_core::types::EnteringKingRule;
+    let key = "9/9/9/9/9/4K4/9/2B1k1B2/3L1L3 w -";
+    let pos = crate::book_db::position_from_sfen(&format!("{key} 1")).unwrap();
+    let mut legal = MoveList::new();
+    generate_legal_all(&pos, &mut legal);
+    assert_eq!(legal.len(), 1);
+    assert_eq!(pos.declaration_win(EnteringKingRule::TryRule).to_usi(), "5h5i");
+    let tree = cut_root(
+        &RootInfo {
+            key: key.into(),
+            own: "w".into(),
+            ..root()
+        },
+        &params(0, 1),
+        &mut |_| Ok(vec![]),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(tree.nodes[key].read);
+    assert_eq!(tree.nodes.len(), 1);
+    assert!(tree.edges.is_empty());
 }
