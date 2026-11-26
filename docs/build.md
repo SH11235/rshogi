@@ -523,7 +523,7 @@ Cargo の edition feature は preset 名に `edition-` を付けた名前です�
 構成部品を直接指定する場合は、モデルの FT 幅に合う `layerstacks-dense-concat-<FT幅>x16x64` と、
 `mode-specific`、`layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
 Threat 付きのモデルには `nnue-threat` を足し、部分幅のモデルにはさらに対応する `threat-width-*` を足します。
-これらは rshogi-core の feature なので、`-p tools` や `-p rshogi-usi` から指定するときは `rshogi-core/` を前に付けます (例: `rshogi-core/threat-width-3072`)。
+構成部品の直接指定は rshogi-core を build するとき向けです。tools と rshogi-usi は、crate ごとに feature の受け渡しが違うので、上の edition feature で build します。
 4096 / 6144 / 8192 / 12288 の内部寸法 feature `layerstacks-<FT幅>x15x64` は DenseConcat 専用です。
 `threat-width-3072` は 6144、`threat-width-2816` は 8192 の固定 DenseConcat edition 専用で、他の部分幅 feature とは排他です。
 
