@@ -1563,7 +1563,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
     #[cfg(any(
         feature = "layerstack-arch",
-        all(test, not(feature = "nnue-effect-bucket"))
+        all(test, feature = "nnue-threat", not(feature = "nnue-effect-bucket"))
     ))]
     #[inline]
     pub(super) fn ensure_accumulator(
