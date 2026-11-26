@@ -14,9 +14,65 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
-- LayerStacks の Cargo feature と edition / xtask preset のサイズ名は、中央の数から shortcut 1 個を除きます。
-  `1536x16x32` → `1536x15x32`、`1536x32x32` → `1536x31x32`、`768x8x32` → `768x7x32` となります。
-  build の指定を新しい名前に置き換えてください。既存の NNUE ファイルはそのまま使えます。
+## v1.11.0 — 2026-11-26
+
+LayerStacks の build 名を、近道 (shortcut) を除いた数え方にするリリース。Stockfish の後ろの層を移植した
+DenseConcat も足す。crates.io の `rshogi-core` は 0.9.1 のままで、今回は公開しない。core の feature 名が
+変わったので、次に公開するときは minor を上げる (0.10.0)。
+
+詳細は各 PR を参照。
+
+### 移行が要る変更
+
+- LayerStacks の Cargo feature と edition / xtask preset のサイズ名で、中央の数から fc_0 の近道の 1 個を除く。
+  YaneuraOu・BulletOu の表記に合わせた。旧名は残していないので、旧名を指定すると cargo / xtask が
+  「feature・preset が無い」で止まる。過去の版は tag から build する。評価関数のファイル形式・読み込みは
+  変えていないので、既存の NNUE ファイルはそのまま使える (#1668)。
+
+  | 旧 | 新 |
+  |---|---|
+  | `1536x16x32` | `1536x15x32` |
+  | `1536x32x32` | `1536x31x32` |
+  | `768x16x32` / `768x8x32` | `768x15x32` / `768x7x32` |
+  | `512x16x32` / `1024x16x32` / `3072x16x32` | `512x15x32` / `1024x15x32` / `3072x15x32` |
+  | `1024x16x64` / `1536x16x64` / `2304x16x64` / `3072x16x64` | `1024x15x64` / `1536x15x64` / `2304x15x64` / `3072x15x64` |
+
+  サイズ名と実寸法 (NNUE ヘッダーの l2 = 16) の対応は `docs/build.md` と `docs/nnue-supported-architectures.md`。
+
+### NNUE
+
+- LayerStacks-DenseConcat を足した。Stockfish の `nnue_architecture.h` の後ろの層の移植で、fc_0 と fc_1 の
+  出力を全部 SqrClippedReLU と ClippedReLU にかけ、両方を連結して fc_2 に入れる。近道は fc_0 の最後の
+  2 出力の差。評価関数は arch 文字列の `Head=DenseConcat,` で見分け、今までの構造は SplitSkip と呼ぶ (#1671)。
+  - edition は `edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-{none,threat,threat512,threat768}` と
+    `edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-{none,threat,threat256,threat512,threat768}`。
+  - DenseConcat の評価関数は専用の edition でだけ読める。汎用の build (`edition-universal`) は拒否する。
+    EffectBucket、prepacked、重みの差分・SPSA は対象外。
+  - 学習と書き出しは tatara v0.9.0 の `--layerstack-head dense-concat`。
+  - Threat 付きの DenseConcat の評価関数を読めなかった不具合を直した (#1678)。
+- Threat の部分幅: 768 と、FT 2304 の Threat の edition を足した (#1647)。768 を FT 1536x16x64 と 1024x16x64
+  でも使えるようにし (#1653)、FT 1536x16x64 に 256 を足した (#1661)。新しい build 名では 1536x15x64・
+  1024x15x64・2304x15x64。
+- LayerStack 1024x16x64 (新しい build 名では 1024x15x64): Threat 部分幅 512 の edition を足し (#1651)、
+  1536x16x64 と同じ AVX-512 VNNI の融合経路に載せた (#1659)。
+- 汎用の LayerStacks の実装に AVX2 の経路を足した (#1649)。汎用と静的の両方が入った build では、LayerStacks を
+  静的な実装へ振り分ける (#1650)。
+
+### tools
+
+- `eval_sfens` が、header の `ls_bucket=` (spec の bucket) を持つ評価関数に対応した (#1652)。
+- `book_mine` の tree serve に、エンジンのスレッド数を指定する `--threads` を足した (#1657)。
+- gensfen などの単一構成の build を doc で案内した (#1648)。
+
+### CSA
+
+- 手番のアラームを、実際の期限から予約するようにした (#1665)。
+- 観戦の状態と棋譜の着手処理を整理した (#1666)。
+
+### その他
+
+- 定跡の読み込みの循環依存を解消した (#1664)。
+- skill (verify-nnue・edition-build) の手順を足した (#1660)。
 
 ## v1.10.2 — 2026-11-23
 
