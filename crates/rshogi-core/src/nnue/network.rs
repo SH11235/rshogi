@@ -1169,13 +1169,7 @@ impl NNUENetwork {
 
     /// LayerStacks ネットの駒 FT の格納形式を返す。
     pub fn layer_stack_piece_ft_storage(&self) -> Option<&'static str> {
-        match self {
-            #[cfg(feature = "nnue-runtime-dimensions")]
-            Self::DynamicLayerStacks(network) => Some(network.piece_ft_storage()),
-            #[cfg(feature = "layerstack-arch")]
-            Self::LayerStacks(network) => Some(network.piece_ft_storage()),
-            _ => None,
-        }
+        self.is_layer_stacks().then_some("i16")
     }
 
     /// LayerStacks なら `"static"` または `"dynamic"`、それ以外なら `None` を返す。

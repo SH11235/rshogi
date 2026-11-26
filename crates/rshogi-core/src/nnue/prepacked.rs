@@ -1000,17 +1000,8 @@ mod extension_tests {
         pack_layer_stacks_with_layout(&fixture.source, &fixture.packed, FcLayout::Native).unwrap();
         let original = Net::load(&fixture.source).unwrap();
         let packed = Net::load(&fixture.packed).unwrap();
-        let expected_storage = if cfg!(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw"
-        )) {
-            "int8 x 2"
-        } else {
-            "i16"
-        };
         for net in [&original, &packed] {
-            assert_eq!(net.feature_transformer.piece_ft_storage(), expected_storage);
+            assert_eq!(net.feature_transformer.piece_ft_storage(), "i16");
             assert_eq!(net.bucket_spec(), Some("ownking:2".parse().unwrap()));
             assert_eq!(net.feature_transformer.threat_weights.len(), threat_dims * width);
         }

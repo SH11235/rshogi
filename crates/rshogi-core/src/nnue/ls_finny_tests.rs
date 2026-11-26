@@ -21,16 +21,14 @@ fn check_refresh<const L1: usize, FT: LsFeatureSpec>(
         FT::Feature::append_active_indices(pos, perspective, &mut active);
         let mut expected = ft.biases.0;
         for index in active.iter() {
-            for (value, weight) in
-                expected.iter_mut().zip(ft.unpacked_for_tests().weight_row(index))
-            {
+            for (value, weight) in expected.iter_mut().zip(ft.weight_row(index)) {
                 *value = value.wrapping_add(*weight);
             }
         }
         // miss/hit に続けて同じ局面を再度要求し、差分ゼロでも出力が書かれることを確認。
         for _ in 0..2 {
             let mut actual = Aligned([i16::MAX; L1]);
-            ft.unpacked_for_tests().refresh_perspective_with_cache(
+            ft.refresh_perspective_with_cache(
                 pos,
                 perspective,
                 &mut actual.0,
@@ -114,7 +112,7 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
                 }
                 let source = Aligned(previous[p]);
                 let mut new = Aligned(previous[p]);
-                let new_ok = ft.unpacked_for_tests().try_apply_dirty_piece_fast_impl::<false>(
+                let new_ok = ft.try_apply_dirty_piece_fast_impl::<false>(
                     perspective,
                     king,
                     None,
@@ -125,7 +123,7 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
                     fast += 1;
                     assert_eq!(new.0, expected[p]);
                     new.0.fill(0);
-                    assert!(ft.unpacked_for_tests().try_apply_dirty_piece_fast_impl::<true>(
+                    assert!(ft.try_apply_dirty_piece_fast_impl::<true>(
                         perspective,
                         king,
                         Some(&source.0),
