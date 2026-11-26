@@ -54,12 +54,6 @@ mod mapped_weights;
 pub mod net_bin_layout;
 #[macro_use]
 pub mod macros;
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "avx512bw"
-))]
-mod ft_packed8;
 pub mod net_delta;
 mod network;
 pub(crate) mod network_halfka_hm_merged;
@@ -69,7 +63,6 @@ pub(crate) mod network_halfka_split;
 pub(crate) mod network_halfkp;
 mod network_layer_stacks;
 pub mod piece_list;
-mod piece_weights;
 pub mod prelude;
 #[cfg(feature = "prepacked-nnue")]
 pub mod prepacked;

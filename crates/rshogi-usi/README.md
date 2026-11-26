@@ -137,12 +137,6 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
-AVX-512F/BW ビルドでは、駒 FT 幅が 32 の倍数で、駒 FT の重みがすべて
-−254 から 254 の範囲の偶数である LayerStacks ネットを読み込むと、駒 FT の重みを
-半分の値にして int8 で格納します。固定幅の LayerStacks ローダーは正の 32 の倍数を要求します。
-評価値は i16 格納時と同じです。ロード時の `info string NNUE LayerStack piece FT storage=`
-で格納形式を確認できます。
-
 tatara の `--bucket-mode spec --bucket-spec <axes>` で出力した LayerStacks ネットは、
 `EvalFile` に指定するとネットの `ls_bucket=` に従って bucket を選びます。
 軸は `+` 区切りで 1〜3 個、左端が最上位桁です。各軸の bucket 数の積は

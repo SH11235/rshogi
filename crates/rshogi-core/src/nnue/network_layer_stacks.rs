@@ -1431,11 +1431,6 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         ls_match_size!(self, net => net.num_buckets)
     }
 
-    #[cfg(feature = "layerstack-arch")]
-    pub(super) fn piece_ft_storage(&self) -> &'static str {
-        ls_match_size!(self, net => net.feature_transformer.piece_ft_storage())
-    }
-
     /// ネットに記録された bucket spec を返す。
     pub fn bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
         ls_match_size!(self, net => net.bucket_spec())
@@ -2884,11 +2879,6 @@ impl LayerStacksNetwork {
         ls_match_ft!(self, by_ft => by_ft.num_buckets())
     }
 
-    #[cfg(feature = "layerstack-arch")]
-    pub(super) fn piece_ft_storage(&self) -> &'static str {
-        ls_match_ft!(self, by_ft => by_ft.piece_ft_storage())
-    }
-
     /// ネットに記録された bucket spec を返す。
     pub fn bucket_spec(&self) -> Option<super::LayerStackBucketSpec> {
         ls_match_ft!(self, by_ft => by_ft.bucket_spec())
@@ -3864,174 +3854,6 @@ mod tests {
                 / get_fv_scale_override().unwrap_or(16);
             assert_eq!(network.evaluate_with_bucket(&pos, &acc, 0), Value::new(expected));
         }
-    }
-
-    #[cfg(not(any(feature = "nnue-effect-bucket", ls_dense_concat)))]
-    fn check_packed8_accumulators<const N: usize>() {
-        use super::super::ls_feature_spec::HalfKaHmMergedSpec;
-        use super::super::piece_weights;
-        use super::*;
-        use crate::nnue::accumulator::{AlignedBox, WeightBox};
-        use crate::nnue::accumulator_layer_stacks::AccumulatorCacheLayerStacks;
-        use crate::types::Move;
-
-        let mut pos = Position::new();
-        pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
-        let mut ft =
-            FeatureTransformerLayerStacks::<N, HalfKaHmMergedSpec>::for_output_transform_tests();
-        ft.biases.0.fill(41);
-        ft.biases.0[0] = i16::MAX;
-        ft.biases.0[N / 2] = i16::MIN;
-        let mut weights = AlignedBox::new_zeroed(HalfKaHmMergedSpec::DIMENSIONS * N);
-        for (i, value) in weights.iter_mut().enumerate() {
-            *value = if i % 32 == 0 {
-                if (i / N).is_multiple_of(2) { -254 } else { 254 }
-            } else {
-                2 * ((i.wrapping_mul(17) % 11) as i16 - 5)
-            };
-        }
-        let mut reference_weights = weights.clone().into();
-        ft.weights = piece_weights::select(WeightBox::from(weights), N).unwrap();
-        assert_eq!(ft.piece_ft_storage(), "int8 x 2");
-
-        #[cfg(feature = "nnue-psqt")]
-        if N == 768 {
-            ft.psqt_weights = AlignedBox::new_zeroed(HalfKaHmMergedSpec::DIMENSIONS).into();
-            for (i, weight) in ft.psqt_weights.make_mut().iter_mut().enumerate() {
-                *weight = (i % 17) as i32 - 8;
-            }
-            ft.psqt_num_buckets = 1;
-            ft.has_psqt = true;
-        }
-
-        #[cfg(feature = "nnue-threat")]
-        {
-            use super::super::{threat_features, threat_width};
-            let width = threat_width::width(N);
-            let mut weights = AlignedBox::new_zeroed(threat_features::THREAT_DIMENSIONS * width);
-            for (i, value) in weights.iter_mut().enumerate() {
-                *value = ((i * 73 + i / width * 19) % 17) as i8 - 8;
-            }
-            ft.threat_weights = weights.into();
-        }
-
-        let mut layer_stacks = TestLayerStacks::with_num_buckets(1);
-        let bucket = &mut layer_stacks.buckets[0];
-        bucket.edit_l1(|l1| l1.weights.make_mut().fill(1));
-        bucket.l2.weights.make_mut().fill(1);
-        bucket.output.weights.make_mut().fill(8);
-        let mut net = NetworkLayerStacks::<N, 16, 30, 32, HalfKaHmMergedSpec> {
-            feature_transformer: ft,
-            layer_stacks,
-            fv_scale: 16,
-            num_buckets: 1,
-            bucket_routing: BucketRouting::NONE,
-            _ft: PhantomData,
-        };
-
-        let moves = [
-            "7g7f", "3c3d", "8h2b+", "3a2b", "B*7g", "B*3c", "5i6h", "5a6b", "6h5i",
-        ];
-        for use_threat in [false, true] {
-            #[cfg(feature = "nnue-threat")]
-            {
-                net.feature_transformer.has_threat = use_threat;
-            }
-            #[cfg(not(feature = "nnue-threat"))]
-            if use_threat {
-                continue;
-            }
-
-            pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
-            let mut packed = AccumulatorStackLayerStacks::<N>::new();
-            let mut reference = AccumulatorStackLayerStacks::<N>::new();
-            let mut packed_cache = AccumulatorCacheLayerStacks::new();
-            let mut reference_cache = AccumulatorCacheLayerStacks::new();
-            let mut nonzero_score = false;
-            for (ply, move_text) in
-                std::iter::once(None).chain(moves.into_iter().map(Some)).enumerate()
-            {
-                if let Some(move_text) = move_text {
-                    let mv = pos.to_move(Move::from_usi(move_text).unwrap()).unwrap();
-                    assert!(pos.is_legal(mv));
-                    let dirty = pos.do_move(mv, pos.gives_check(mv));
-                    for stack in [&mut packed, &mut reference] {
-                        stack.push();
-                        stack.current_mut().dirty_piece = dirty;
-                    }
-                }
-
-                // 3 手分をまとめて適用。玉が動く 7 手目では親も未計算で Finny に戻る。
-                if !matches!(ply, 0 | 3 | 4 | 7..=9) {
-                    continue;
-                }
-                if ply == 3 {
-                    assert_eq!(packed.find_usable_accumulator(4), Some((0, 3)));
-                    #[cfg(feature = "nnue-threat")]
-                    if use_threat {
-                        use super::super::{accumulator::IndexList, threat_features};
-                        let mut ancestor = threat_features::ThreatAncestor::new(&pos);
-                        for index in (1..=ply).rev() {
-                            ancestor.undo(&packed.entry_at(index).dirty_piece);
-                        }
-                        assert!(
-                            [Color::Black, Color::White]
-                                .into_iter()
-                                .all(|side| ancestor.same_mirror(side))
-                        );
-                        assert!(threat_features::append_threat_endpoint_diff(
-                            &ancestor,
-                            &mut std::array::from_fn(|_| IndexList::new()),
-                            &mut std::array::from_fn(|_| IndexList::new()),
-                        ));
-                    }
-                }
-                if ply == 7 {
-                    assert_eq!(packed.find_usable_accumulator(4), None);
-                }
-
-                // 1536 幅の 3 手目では祖先探索上限により、通常の full refresh を通る。
-                let cached = ply != 3 || use_threat;
-                let ft = &mut net.feature_transformer;
-                ft.ensure_accumulator(&pos, &mut packed, cached.then_some(&mut packed_cache));
-                std::mem::swap(&mut ft.weights, &mut reference_weights);
-                assert_eq!(ft.piece_ft_storage(), "i16");
-                ft.ensure_accumulator(&pos, &mut reference, cached.then_some(&mut reference_cache));
-                let mut fresh = AccumulatorLayerStacks::new();
-                ft.refresh_accumulator(&pos, &mut fresh);
-                std::mem::swap(&mut ft.weights, &mut reference_weights);
-
-                let actual = &packed.current().accumulator;
-                let reference_acc = &reference.current().accumulator;
-                assert!(actual.computed_accumulation && reference_acc.computed_accumulation);
-                for expected in [reference_acc, &fresh] {
-                    assert_eq!(actual.accumulation, expected.accumulation, "width={N}, ply={ply}");
-                    #[cfg(feature = "nnue-threat")]
-                    assert_eq!(actual.threat_accumulation, expected.threat_accumulation);
-                    #[cfg(feature = "nnue-psqt")]
-                    assert_eq!(actual.psqt_accumulation, expected.psqt_accumulation);
-                    let score = net.evaluate_with_bucket(&pos, expected, 0);
-                    assert_eq!(net.evaluate_with_bucket(&pos, actual, 0), score);
-                    nonzero_score |= score != Value::ZERO;
-                }
-            }
-            assert!(nonzero_score);
-        }
-    }
-
-    #[cfg(not(any(feature = "nnue-effect-bucket", ls_dense_concat)))]
-    #[cfg_attr(
-        not(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw"
-        )),
-        ignore = "requires an AVX-512F/BW build"
-    )]
-    #[test]
-    fn packed8_search_updates_match_i16_at_two_widths() {
-        check_packed8_accumulators::<768>();
-        check_packed8_accumulators::<1536>();
     }
 
     fn synthetic_evaluate_with_bucket_matches_legacy_both_sides<const N: usize, const L2: usize>(
