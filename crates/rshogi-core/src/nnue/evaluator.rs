@@ -30,6 +30,8 @@
 //! let mut thread_evaluator = evaluator.clone_for_thread(&position);
 //! ```
 
+#[cfg(all(test, ls_dense_concat_large))]
+use super::dense_concat::DENSE_CONCAT_FT;
 use std::sync::Arc;
 
 use super::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
@@ -715,6 +717,7 @@ mod tests {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64"
@@ -824,6 +827,18 @@ mod tests {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L2304x16x64(AccumulatorStackLayerStacks::<2304>::new()),
                 );
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+            #[cfg(ls_dense_concat_large)]
+            {
+                let mut stack =
+                    AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::LargeDenseConcat(
+                        AccumulatorStackLayerStacks::<DENSE_CONCAT_FT>::new(),
+                    ));
                 stack.reset();
                 stack.push(dirty);
                 stack.push(dirty);

@@ -28,8 +28,14 @@ fn main() {
         panic!("rshogi-core build.rs: {msg}");
     }
     println!("cargo:rustc-check-cfg=cfg(ls_dense_concat)");
-    if DENSE_CONCAT_SLOTS.iter().any(|(feature, _)| has_feature(feature)) {
+    println!("cargo:rustc-check-cfg=cfg(ls_dense_concat_large)");
+    if let Some(&(width, _, _)) =
+        DENSE_CONCAT_SLOTS.iter().find(|(_, feature, _)| has_feature(feature))
+    {
         println!("cargo:rustc-cfg=ls_dense_concat");
+        if width > 2304 {
+            println!("cargo:rustc-cfg=ls_dense_concat_large");
+        }
     }
 
     println!("cargo:rerun-if-changed=Cargo.toml");

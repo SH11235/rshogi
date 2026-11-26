@@ -3,13 +3,17 @@
 #[cfg(any(
     feature = "threat-width-256",
     feature = "threat-width-512",
-    feature = "threat-width-768"
+    feature = "threat-width-768",
+    feature = "threat-width-2816",
+    feature = "threat-width-3072"
 ))]
 pub(crate) type ThreatAccumulation<const L1: usize> = [i16; width(0)];
 #[cfg(not(any(
     feature = "threat-width-256",
     feature = "threat-width-512",
-    feature = "threat-width-768"
+    feature = "threat-width-768",
+    feature = "threat-width-2816",
+    feature = "threat-width-3072"
 )))]
 pub(crate) type ThreatAccumulation<const L1: usize> = [i16; L1];
 
@@ -20,6 +24,10 @@ pub(crate) const fn width(l1: usize) -> usize {
         768
     } else if cfg!(feature = "threat-width-512") {
         512
+    } else if cfg!(feature = "threat-width-2816") {
+        2816
+    } else if cfg!(feature = "threat-width-3072") {
+        3072
     } else {
         l1
     }

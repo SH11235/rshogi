@@ -40,6 +40,7 @@ use super::constants::{LAYER_STACK_8X32_L1_OUT, LAYER_STACK_8X32_L2_IN};
     feature = "layerstacks-1024x15x32",
     feature = "layerstacks-3072x15x32",
     feature = "layerstacks-1024x15x64",
+    ls_dense_concat_large,
     feature = "layerstacks-2304x15x64",
     feature = "layerstacks-3072x15x64",
     feature = "layerstacks-1536x15x64"
@@ -1213,6 +1214,19 @@ pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
             NetworkLayerStacks<2304, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT, 64>,
         >,
     ),
+    #[cfg(ls_dense_concat_large)]
+    LargeDenseConcat(
+        Box<
+            NetworkLayerStacks<
+                DENSE_CONCAT_FT,
+                LAYER_STACK_16X32_L1_OUT,
+                LAYER_STACK_16X32_L2_IN,
+                32,
+                FT,
+                64,
+            >,
+        >,
+    ),
     #[cfg(feature = "layerstacks-3072x15x64")]
     L3072x16x64(
         Box<
@@ -1246,6 +1260,7 @@ pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
         feature = "layerstacks-1024x15x32",
         feature = "layerstacks-3072x15x32",
         feature = "layerstacks-1024x15x64",
+        ls_dense_concat_large,
         feature = "layerstacks-2304x15x64",
         feature = "layerstacks-3072x15x64",
         feature = "layerstacks-1536x15x64",
@@ -1278,6 +1293,8 @@ macro_rules! ls_match_size {
             LsNetByFt::L1024x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-2304x15x64")]
             LsNetByFt::L2304x16x64($pat) => $body,
+            #[cfg(ls_dense_concat_large)]
+            LsNetByFt::LargeDenseConcat($pat) => $body,
             #[cfg(feature = "layerstacks-3072x15x64")]
             LsNetByFt::L3072x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -1291,6 +1308,7 @@ macro_rules! ls_match_size {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64",
@@ -1322,6 +1340,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             Self::L1024x16x64(_) => 1024,
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => 2304,
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => DENSE_CONCAT_FT,
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => 3072,
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -1335,6 +1355,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64",
@@ -1364,6 +1385,8 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             Self::L1024x16x64(_) => (1024, 16, 64),
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => (2304, 16, 64),
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => (DENSE_CONCAT_FT, 16, 64),
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => (3072, 16, 64),
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -1377,6 +1400,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64",
@@ -1595,6 +1619,23 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 )?;
                 Ok(Self::L2304x16x64(Box::new(net)))
             }
+            #[cfg(ls_dense_concat_large)]
+            (DENSE_CONCAT_FT, 16, 64) => {
+                let net = NetworkLayerStacks::<
+                    DENSE_CONCAT_FT,
+                    LAYER_STACK_16X32_L1_OUT,
+                    LAYER_STACK_16X32_L2_IN,
+                    32,
+                    FT,
+                    64,
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
+                Ok(Self::LargeDenseConcat(Box::new(net)))
+            }
             #[cfg(feature = "layerstacks-3072x15x64")]
             (3072, 16, 64) => {
                 let net = NetworkLayerStacks::<
@@ -1766,6 +1807,14 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
                 None => net.evaluate(pos, &st.current().accumulator),
             },
+            #[cfg(ls_dense_concat_large)]
+            (
+                Self::LargeDenseConcat(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::LargeDenseConcat(st),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-3072x15x64")]
             (
                 Self::L3072x16x64(net),
@@ -1838,6 +1887,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                         feature = "layerstacks-512x15x32",
                         feature = "layerstacks-1024x15x32",
                         feature = "layerstacks-3072x15x32",
+                        ls_dense_concat_large,
                         feature = "layerstacks-2304x15x64",
                         feature = "layerstacks-3072x15x64",
                         feature = "layerstacks-1536x15x64",
@@ -1919,6 +1969,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     feature = "layerstacks-512x15x32",
                     feature = "layerstacks-1024x15x32",
                     feature = "layerstacks-3072x15x32",
+                    ls_dense_concat_large,
                     feature = "layerstacks-2304x15x64",
                     feature = "layerstacks-3072x15x64",
                     feature = "layerstacks-1536x15x64",
@@ -1982,6 +2033,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     feature = "layerstacks-512x15x32",
                     feature = "layerstacks-1024x15x32",
                     feature = "layerstacks-3072x15x32",
+                    ls_dense_concat_large,
                     feature = "layerstacks-2304x15x64",
                     feature = "layerstacks-3072x15x64",
                     feature = "layerstacks-1536x15x64",
@@ -2067,6 +2119,13 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             ) => {
                 do_update!(net, st, L2304x16x64);
             }
+            #[cfg(ls_dense_concat_large)]
+            (
+                Self::LargeDenseConcat(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::LargeDenseConcat(st),
+            ) => {
+                do_update!(net, st, LargeDenseConcat);
+            }
             #[cfg(feature = "layerstacks-3072x15x64")]
             (
                 Self::L3072x16x64(net),
@@ -2137,6 +2196,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                         feature = "layerstacks-512x15x32",
                         feature = "layerstacks-1024x15x32",
                         feature = "layerstacks-3072x15x32",
+                        ls_dense_concat_large,
                         feature = "layerstacks-2304x15x64",
                         feature = "layerstacks-3072x15x64",
                         feature = "layerstacks-1536x15x64",
@@ -2206,6 +2266,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<2304>::new(),
                 )
             }
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccStack::LargeDenseConcat(
+                    super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<DENSE_CONCAT_FT>::new(),
+                )
+            }
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x64(
@@ -2227,6 +2293,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64",
@@ -2291,6 +2358,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<2304>::new(),
                 )
             }
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccCache::LargeDenseConcat(
+                    super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<DENSE_CONCAT_FT>::new(),
+                )
+            }
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L3072x16x64(
@@ -2312,6 +2385,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64",
@@ -2380,6 +2454,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 net.refresh_accumulator(pos, &mut acc);
                 net.evaluate_with_diagnostics(pos, &acc)
             }
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(net) => {
+                let mut acc = AccumulatorLayerStacks::<DENSE_CONCAT_FT>::new();
+                net.refresh_accumulator(pos, &mut acc);
+                net.evaluate_with_diagnostics(pos, &acc)
+            }
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(net) => {
                 let mut acc = AccumulatorLayerStacks::<3072>::new();
@@ -2401,6 +2481,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64",
@@ -2535,6 +2616,15 @@ macro_rules! ls_dispatch_ft_size {
             #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-2304x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
                 $crate::nnue::LsNetByFt::L2304x16x64($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_merged", any(
+                feature = "layerstacks-dense-concat-4096x16x64",
+                feature = "layerstacks-dense-concat-6144x16x64",
+                feature = "layerstacks-dense-concat-8192x16x64",
+                feature = "layerstacks-dense-concat-12288x16x64",
+            )))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
+                $crate::nnue::LsNetByFt::LargeDenseConcat($inner),
             ) => $body,
             #[cfg(all(feature = "ft-halfka_hm_merged", feature = "layerstacks-3072x15x64"))]
             $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
@@ -3162,7 +3252,10 @@ fn validate_static_layer_stacks_head(arch: &str) -> io::Result<()> {
 }
 
 #[cfg(ls_dense_concat)]
-fn validate_dense_concat_dimensions(arch: &str, expected: (usize, usize, usize)) -> io::Result<()> {
+pub(super) fn validate_dense_concat_dimensions(
+    arch: &str,
+    expected: (usize, usize, usize),
+) -> io::Result<()> {
     fn invalid() -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, "Invalid DenseConcat network architecture")
     }
@@ -3217,7 +3310,7 @@ fn validate_dense_concat_dimensions(arch: &str, expected: (usize, usize, usize))
     let input_dims = input_dims.checked_add(threat_dims).ok_or_else(invalid)?;
     let (ft, l1, l2) = expected;
     let actual = super::spec::parse_arch_dimensions(arch);
-    if actual != expected || !matches!(ft, 1536 | 2304) || (l1, l2) != (16, 64) {
+    if actual != expected || !super::dense_concat::is_supported_ft(ft) || (l1, l2) != (16, 64) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -3450,6 +3543,9 @@ mod tests {
     #[cfg(all(feature = "nnue-threat", feature = "layerstack-arch"))]
     #[test]
     fn partial_threat_forward_matches_zero_padded_scalar_and_avx512_lane_model() {
+        #[cfg(ls_dense_concat)]
+        const N: usize = super::DENSE_CONCAT_FT;
+        #[cfg(not(ls_dense_concat))]
         const N: usize = if cfg!(feature = "layerstacks-1024x15x64") {
             1024
         } else if cfg!(feature = "layerstacks-2304x15x64") {
@@ -3512,6 +3608,9 @@ mod tests {
     ))]
     #[test]
     fn loader_checks_threat_width_before_reading_ft() {
+        #[cfg(ls_dense_concat)]
+        const N: usize = super::DENSE_CONCAT_FT;
+        #[cfg(not(ls_dense_concat))]
         const N: usize = if cfg!(feature = "layerstacks-1024x15x64") {
             1024
         } else if cfg!(feature = "layerstacks-2304x15x64") {
@@ -3520,6 +3619,7 @@ mod tests {
             1536
         };
         const L3: usize = if cfg!(any(
+            ls_dense_concat,
             feature = "layerstacks-1024x15x64",
             feature = "layerstacks-2304x15x64",
             feature = "layerstacks-1536x15x64"
@@ -3528,7 +3628,8 @@ mod tests {
         } else {
             32
         };
-        for width in [256, 512, 768, N] {
+        let expected_width = super::super::expected_threat_width(N);
+        for width in [128, expected_width, N] {
             #[cfg(not(ls_dense_concat))]
             let mut arch = format!(
                 "Features=HalfKA_hm[138510->{N}x2],LayerStacks,l2=16,l3={L3},Threat=216720"
@@ -3559,7 +3660,7 @@ mod tests {
             >::read(&mut std::io::Cursor::new(bytes))
             .err()
             .unwrap();
-            if width == super::super::expected_threat_width(N) {
+            if width == expected_width {
                 assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
             } else {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
@@ -4060,6 +4161,9 @@ mod tests {
     #[cfg(feature = "nnue-threat")]
     #[test]
     fn synthetic_threat_evaluation_matches_scalar_for_both_sides() {
+        #[cfg(ls_dense_concat)]
+        const SHAPE: (usize, usize) = (super::DENSE_CONCAT_FT, 64);
+        #[cfg(not(ls_dense_concat))]
         const SHAPE: (usize, usize) = if cfg!(feature = "layerstacks-1024x15x64") {
             (1024, 64)
         } else if cfg!(feature = "layerstacks-1536x15x64") {

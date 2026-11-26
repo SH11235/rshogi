@@ -118,7 +118,8 @@ fn read_compressed_i16_block<R: Read>(
     let mut size_buf = [0u8; 4];
     reader.read_exact(&mut size_buf)?;
     let compressed_size = u32::from_le_bytes(size_buf) as usize;
-    validate_compressed_size(compressed_size)?;
+    let limit = compressed_i16_block_limit(max_values);
+    validate_compressed_size(compressed_size, limit)?;
     // 既存 decoder は非最短形も受け付けるため、i64 の最大符号化長を使う。
     if compressed_size > max_values.saturating_mul(10) {
         return Err(io::Error::new(
@@ -268,14 +269,23 @@ pub fn read_compressed_tensor_i16_all<R: Read>(reader: &mut R) -> io::Result<Vec
     decode_leb128_all_i16(&block.payload)
 }
 
-fn validate_compressed_size(compressed_size: usize) -> io::Result<()> {
+fn compressed_i16_block_limit(max_values: usize) -> usize {
+    if cfg!(ls_dense_concat_large) {
+        // 12288 の FT は i16 の最短符号化でも 3 byte/係数なら 2 GiB を超える。
+        MAX_COMPRESSED_SIZE.max(max_values.saturating_mul(3)).min(isize::MAX as usize)
+    } else {
+        MAX_COMPRESSED_SIZE
+    }
+}
+
+fn validate_compressed_size(compressed_size: usize, limit: usize) -> io::Result<()> {
     // 不正ファイルの巨大 alloc を防ぐ sanity 上限。HalfKaHmMerged + EffectBucket は base 特徴を NB 倍に
     // 拡張するため FT block が大きく (2x2×1024=600MB 生 / ~300MB 圧縮、3x3 系はさらに大)、
     // 旧 256MB では正当な effect bucket net を弾く。size field は u32 なので上限は 4GiB 未満。
-    if compressed_size == 0 || compressed_size > MAX_COMPRESSED_SIZE {
+    if compressed_size == 0 || compressed_size > limit {
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Invalid compressed size: {compressed_size} (max: {MAX_COMPRESSED_SIZE})"),
+            format!("Invalid compressed size: {compressed_size} (max: {limit})"),
         ))
     } else {
         Ok(())
@@ -551,6 +561,17 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
         let error = read_compressed_i16_block(&mut &bytes[..], 3).err().unwrap();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(all(ls_dense_concat_large, target_pointer_width = "64"))]
+    #[test]
+    fn large_ft_accepts_lengths_above_two_gib_without_allocating_on_eof() {
+        let values = (73_305 + 1) * 12_288;
+        let mut bytes = LEB128_MAGIC.to_vec();
+        bytes.extend_from_slice(&((3 * values) as u32).to_le_bytes());
+        bytes.push(0);
+        let error = read_compressed_i16_block(&mut bytes.as_slice(), values).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

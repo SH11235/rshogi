@@ -292,6 +292,8 @@ macro_rules! layer_observe {
             LayerStacksAccStack::L1024x16x64($entry) => $body,
             #[cfg(feature = "layerstacks-2304x15x64")]
             LayerStacksAccStack::L2304x16x64($entry) => $body,
+            #[cfg(ls_dense_concat_large)]
+            LayerStacksAccStack::LargeDenseConcat($entry) => $body,
             #[cfg(feature = "layerstacks-3072x15x64")]
             LayerStacksAccStack::L3072x16x64($entry) => $body,
             #[cfg(feature = "layerstacks-1536x15x64")]

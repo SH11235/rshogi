@@ -75,7 +75,7 @@
 | [`mate_bench`](mate_bench.md) | df-pn 詰み探索の正解・探索量・時間を集計。最短手順 (詰将棋ルール / 全応手) と作意手数との照合、変長駒余りの候補の検出 (`--check-leftover`) |
 | [`compare_nodes`](compare_nodes.md) | 2 エンジンの深度別ノード数を比較。`--strict` で score・PV・bestmove の乖離、未完了・欠損もエラー判定 |
 | [`compare_eval_nnue`](compare_eval_nnue.md) | PSV をサンプリングして NNUE の静的評価・探索スコアを比較 |
-| [`eval_sfens`](eval_sfens.md) | SFEN 局面集の静的評価と中間層の診断（`ls_bucket=` 自動適用、最大 3 軸・64 bucket、PSQT 付きは最大 32 bucket、専用 edition で LayerStacks-DenseConcat 1536-16-64 / 2304-16-64 に対応、AVX-512F/BW で条件を満たす駒 FT を圧縮格納） |
+| [`eval_sfens`](eval_sfens.md) | SFEN 局面集の静的評価と中間層の診断（`ls_bucket=` 自動適用、最大 3 軸・64 bucket、PSQT 付きは最大 32 bucket、専用 edition で LayerStacks-DenseConcat の FT 幅 1536 / 2304 / 4096 / 6144 / 8192 / 12288 に対応、AVX-512F/BW で条件を満たす駒 FT を圧縮格納） |
 | [`nnue_saturation`](nnue_saturation.md) | LayerStacks / LayerStacks-DenseConcat の活性飽和率と bucket 分布を計測（`ls_bucket=` 自動適用、最大 3 軸・64 bucket、PSQT 付きは最大 32 bucket） |
 | [`verify_nnue_accumulator`](verify_nnue_accumulator.md) | NNUE の差分更新と再計算の一致を検証（LayerStacks 最大 64 bucket（PSQT 付きは最大 32）） |
 | [`dump_effect_bucket_golden`](dump_effect_bucket_golden.md) | effect bucket の active index を設定別に dump |

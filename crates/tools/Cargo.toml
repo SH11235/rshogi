@@ -62,6 +62,14 @@ layerstacks-3072x15x32 = ["rshogi-core/layerstacks-3072x15x32"]
 layerstacks-1024x15x64 = ["rshogi-core/layerstacks-1024x15x64"]
 layerstacks-2304x15x64 = ["rshogi-core/layerstacks-2304x15x64"]
 layerstacks-dense-concat-2304x16x64 = ["layerstacks-2304x15x64", "rshogi-core/layerstacks-dense-concat-2304x16x64"]
+layerstacks-4096x15x64 = ["rshogi-core/layerstacks-4096x15x64"]
+layerstacks-dense-concat-4096x16x64 = ["layerstacks-4096x15x64", "rshogi-core/layerstacks-dense-concat-4096x16x64"]
+layerstacks-6144x15x64 = ["rshogi-core/layerstacks-6144x15x64"]
+layerstacks-dense-concat-6144x16x64 = ["layerstacks-6144x15x64", "rshogi-core/layerstacks-dense-concat-6144x16x64"]
+layerstacks-8192x15x64 = ["rshogi-core/layerstacks-8192x15x64"]
+layerstacks-dense-concat-8192x16x64 = ["layerstacks-8192x15x64", "rshogi-core/layerstacks-dense-concat-8192x16x64"]
+layerstacks-12288x15x64 = ["rshogi-core/layerstacks-12288x15x64"]
+layerstacks-dense-concat-12288x16x64 = ["layerstacks-12288x15x64", "rshogi-core/layerstacks-dense-concat-12288x16x64"]
 layerstacks-dense-concat-1536x16x64 = ["layerstacks-1536x15x64", "rshogi-core/layerstacks-dense-concat-1536x16x64"]
 edition-layerstacks-dense-concat-halfka_hm_merged-2304x16x64-none = [
     "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-dense-concat-2304x16x64",
@@ -100,6 +108,44 @@ edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat512 = [
 edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat768 = [
     "edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat",
     "rshogi-core/threat-width-768",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-4096x16x64-none = [
+    "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-dense-concat-4096x16x64",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-4096x16x64-none",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-4096x16x64-threat = [
+    "edition-layerstacks-dense-concat-halfka_hm_merged-4096x16x64-none",
+    "nnue-threat",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-4096x16x64-threat",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-none = [
+    "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-dense-concat-6144x16x64",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-none",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat = [
+    "edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-none",
+    "nnue-threat",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat3072 = ["edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat", "rshogi-core/threat-width-3072"]
+edition-layerstacks-dense-concat-halfka_hm_merged-8192x16x64-none = [
+    "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-dense-concat-8192x16x64",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-8192x16x64-none",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-8192x16x64-threat = [
+    "edition-layerstacks-dense-concat-halfka_hm_merged-8192x16x64-none",
+    "nnue-threat",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-8192x16x64-threat",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-8192x16x64-threat2816 = ["edition-layerstacks-dense-concat-halfka_hm_merged-8192x16x64-threat", "rshogi-core/threat-width-2816"]
+edition-layerstacks-dense-concat-halfka_hm_merged-12288x16x64-none = [
+    "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-dense-concat-12288x16x64",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-12288x16x64-none",
+]
+edition-layerstacks-dense-concat-halfka_hm_merged-12288x16x64-threat = [
+    "edition-layerstacks-dense-concat-halfka_hm_merged-12288x16x64-none",
+    "nnue-threat",
+    "rshogi-core/edition-layerstacks-dense-concat-halfka_hm_merged-12288x16x64-threat",
 ]
 layerstacks-3072x15x64 = ["rshogi-core/layerstacks-3072x15x64"]
 layerstacks-1536x15x64 = ["rshogi-core/layerstacks-1536x15x64"]

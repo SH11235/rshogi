@@ -14,6 +14,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+- LayerStacks-DenseConcat に FT 幅 4096 / 6144 / 8192 / 12288 の edition を追加。すべて Threat なしと全幅に対応し、6144 は部分幅 3072、8192 は部分幅 2816 にも対応。
+
 ## v1.11.0 — 2026-11-26
 
 LayerStacks の build 名を、近道 (shortcut) を除いた数え方にするリリース。Stockfish の後ろの層を移植した
