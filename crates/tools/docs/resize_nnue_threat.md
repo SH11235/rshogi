@@ -25,7 +25,8 @@ cargo run -p tools --no-default-features --bin resize_nnue_threat -- \
 部分幅の net は FT と後段の寸法、Threat 幅が一致する edition で読み込みます。
 256列では 1536x15x64 の `threat256` を選びます。
 512列では 1024x15x64 / 1536x15x32 / 1536x15x64 / 2304x15x64 の `threat512`、768列では
-1024x15x64 / 1536x15x64 / 2304x15x64 の `threat768` を選びます。全幅の net は同じ寸法の `threat` edition を使います。
+1024x15x64 / 1536x15x64 / 2304x15x64 の `threat768` を選びます。DenseConcat の 3072列は 6144x16x64 の `threat3072`、
+2816列は 8192x16x64 の `threat2816` を選びます。全幅の net は同じ寸法の `threat` edition を使います。
 `edition-universal` は全幅の profile 0 に対応します。
 edition 名は [ビルドガイド](../../../docs/build.md) を参照してください。
 

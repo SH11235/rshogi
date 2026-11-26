@@ -21,6 +21,10 @@ pub(super) mod avx512 {
     {
         OUTPUT == 16
             && if cfg!(target_feature = "avx512vnni") {
+                #[cfg(ls_dense_concat)]
+                if L2 == 64 && super::super::dense_concat::is_supported_ft(INPUT) {
+                    return true;
+                }
                 (INPUT == 1024 && L2 == 64) || matches!(INPUT, 1536 | 2304 | 3072)
             } else {
                 !cfg!(any(feature = "nnue-threat", feature = "nnue-psqt")) && matches!(INPUT, 1536)
@@ -59,14 +63,14 @@ pub(super) mod avx512 {
         l1: &AffineTransform<INPUT, OUTPUT>,
         weights: &FusedWeights<INPUT>,
     ) -> [i32; OUTPUT] {
-        #[cfg(target_feature = "avx512vnni")]
+        #[cfg(all(target_feature = "avx512vnni", not(ls_dense_concat_large)))]
         let output =
             if INPUT == 3072 || (INPUT == 2304 && cfg!(feature = "layerstacks-2304-sparse-l1")) {
                 sparse_index_only(us, them, &l1.weights[..], &l1.biases)
             } else {
                 fused(us, them, weights, &l1.biases)
             };
-        #[cfg(not(target_feature = "avx512vnni"))]
+        #[cfg(any(not(target_feature = "avx512vnni"), ls_dense_concat_large))]
         let output = fused(us, them, weights, &l1.biases);
         output
     }
@@ -185,7 +189,7 @@ pub(super) mod avx512 {
         }
     }
 
-    #[cfg(target_feature = "avx512vnni")]
+    #[cfg(all(target_feature = "avx512vnni", any(test, not(ls_dense_concat_large))))]
     pub(crate) fn sparse_index_only<const N: usize, const OUT: usize>(
         us: &[i16; N],
         them: &[i16; N],
@@ -294,7 +298,7 @@ pub(super) mod avx512 {
         weights: &FusedWeights<N>,
         biases: &[i32; OUT],
     ) -> [i32; OUT] {
-        assert!(matches!(N, 1024 | 1536 | 2304 | 3072));
+        assert!(N != 0 && N.is_multiple_of(128));
         assert_eq!(OUT, 16);
         let mut output = [0; OUT];
         // SAFETY: cfg が命令セットを保証する。入力・重み・出力の寸法は確認済み。

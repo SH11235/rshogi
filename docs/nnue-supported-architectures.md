@@ -23,7 +23,7 @@ LayerStacks では、下記の振り分け方式も `isready` の前に設定し
 | LayerStacks の FT | 上記5種、HalfKaHmMerged の EffectBucket | FT と EffectBucket 設定をビルドに含める |
 | HalfKX の形状 | 各幅1〜16384。PairwiseCReLU の L1 は偶数。ヘッダー・payload の整合が必要 | 下記の静的構成とビルドの組合せ |
 | LayerStacks の形状 | L1 は正の偶数、L2 は2以上、L3 は1以上。各幅16384以下 | 下記の11構成からビルド時に選択 |
-| LayerStacks-DenseConcat | 非対応 | HalfKaHmMerged 1536-16-64 / 2304-16-64 の専用 edition |
+| LayerStacks-DenseConcat | 非対応 | HalfKaHmMerged の専用 edition。FT 幅 1536 / 2304 / 4096 / 6144 / 8192 / 12288、後段 16-64 |
 | HalfKX の活性化 | CReLU / SCReLU / PairwiseCReLU | ビルドに含めた活性化のみ |
 | LayerStacks の活性化 | Product Pooling、SCReLU と CReLU の混在、skip を持つ専用構造 | 同じ専用構造。任意の活性化グラフは非対応 |
 | PSQT | LayerStacks のヘッダーから読み込む | `nnue-psqt` を含む構成 |
@@ -131,18 +131,22 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 部分幅の Threat は固定 edition で扱います。`ThreatWidth=256` は `1536x15x64` の `threat256` を選びます。
 `ThreatWidth=512` は `1024x15x64` / `1536x15x32` /
 `1536x15x64` / `2304x15x64` の `threat512`、`ThreatWidth=768` は `1024x15x64` / `1536x15x64` / `2304x15x64` の
-`threat768` を選びます。`ThreatWidth` を省略したヘッダーは FT と同じ全幅を表します。
+`threat768` を選びます。DenseConcat では `ThreatWidth=3072` が 6144-16-64 の `threat3072`、
+`ThreatWidth=2816` が 8192-16-64 の `threat2816` を選びます。`ThreatWidth` を省略したヘッダーは FT と同じ全幅を表します。
 
 LayerStacks 2304-15-64（SplitSkip）は `fc_0` の 1 出力を skip 専用に取り分け、残る 15 出力を活性化します。
 この構造のヘッダーに `Head=` はありません。
 
 ### LayerStacks-DenseConcat
 
-`Head=DenseConcat,` を持つモデル向けに 1536-16-64 と 2304-16-64 の固定構成があります。数字は FT 幅、`fc_0` 出力数、
+`Head=DenseConcat,` を持つモデル向けに 1536-16-64 / 2304-16-64 / 4096-16-64 / 6144-16-64 /
+8192-16-64 / 12288-16-64 の固定構成があります。数字は FT 幅、`fc_0` 出力数、
 `fc_1` 出力数を表します。`fc_0` と `fc_1` の全出力に SCReLU と CReLU を適用し、
 両層の活性化を連結した 160 要素を `fc_2` に渡します。`fc_0` の末尾 2 要素の差が skip になります。
 
 モデルの FT 幅と Threat 幅に合う [DenseConcat 専用 edition](./build.md#layerstacks-denseconcat) を選びます。
+4096 以上の FT 幅は DenseConcat 専用です。Threat 付きモデルの `Features=` の入力次元は、駒特徴の 73,305 に
+`Threat=` の次元数を加えた値です。
 DenseConcat の重みを対象とする SPSA、prepacked 形式、EffectBucket、YaneuraOu 形式への変換は未対応です。
 
 ### 振り分け方式の設定

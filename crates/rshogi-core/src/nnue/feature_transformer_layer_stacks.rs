@@ -633,9 +633,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             self.has_threat = true;
             return Ok(());
         }
-        let mut threat_weights: AlignedBox<i8> = AlignedBox::new_zeroed(weight_count);
+        let mut threat_weights: AlignedBox<i8> = AlignedBox::try_new_zeroed(weight_count)?;
         // SAFETY:
-        // - `AlignedBox::new_zeroed(weight_count)` は `weight_count` 個の `i8`
+        // - `AlignedBox::try_new_zeroed(weight_count)` は `weight_count` 個の `i8`
         //   を保持する領域をゼロ初期化で確保している。
         // - `i8` と `u8` はサイズ (1 バイト) もアラインメントも同一で、任意の
         //   バイトパターンが両者とも valid（Rust reference: "Numeric types").
@@ -3376,6 +3376,8 @@ mod tests {
         check::<512>();
         check::<768>();
         check::<1536>();
+        #[cfg(ls_dense_concat_large)]
+        check::<{ super::super::dense_concat::DENSE_CONCAT_FT }>();
     }
 
     #[cfg(feature = "nnue-threat")]

@@ -2081,6 +2081,10 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
                 LayerStacksAccStack::L1024x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
                 #[cfg(feature = "layerstacks-2304x15x64")]
                 LayerStacksAccStack::L2304x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
+                #[cfg(ls_dense_concat_large)]
+                LayerStacksAccStack::LargeDenseConcat(s) => {
+                    ensure_progress_bucket(pos, s, num_buckets)
+                }
                 #[cfg(feature = "layerstacks-3072x15x64")]
                 LayerStacksAccStack::L3072x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
                 #[cfg(feature = "layerstacks-1536x15x64")]
@@ -2094,6 +2098,7 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
                     feature = "layerstacks-1024x15x32",
                     feature = "layerstacks-3072x15x32",
                     feature = "layerstacks-1024x15x64",
+                    ls_dense_concat_large,
                     feature = "layerstacks-2304x15x64",
                     feature = "layerstacks-3072x15x64",
                     feature = "layerstacks-1536x15x64"
@@ -3686,6 +3691,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
+        #[cfg(not(ls_dense_concat))]
         let (l1, l2, l3) = [
             (cfg!(feature = "layerstacks-1536x15x32"), (1536, 16, 32)),
             (cfg!(feature = "layerstacks-1536x31x32"), (1536, 32, 32)),
@@ -3726,7 +3732,8 @@ mod tests {
         };
         #[cfg(ls_dense_concat)]
         let arch = {
-            let mut arch = super::super::dense_concat_tests::dense_concat_arch(l1, l2, l3);
+            let ft = super::super::dense_concat::DENSE_CONCAT_FT;
+            let mut arch = super::super::dense_concat_tests::dense_concat_arch(ft, 16, 64);
             if psqt {
                 arch = arch.replace(",Head=", &format!(",PSQT={num_buckets},Head="));
             }

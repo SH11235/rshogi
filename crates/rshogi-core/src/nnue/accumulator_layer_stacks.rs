@@ -8,6 +8,8 @@ use super::accumulator::{DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::MAX_LAYER_STACK_PSQT_BUCKETS;
+#[cfg(ls_dense_concat_large)]
+use super::dense_concat::DENSE_CONCAT_FT;
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
 
@@ -683,6 +685,8 @@ pub enum LayerStacksAccStack {
     L1024x16x64(AccumulatorStackLayerStacks<1024>),
     #[cfg(feature = "layerstacks-2304x15x64")]
     L2304x16x64(AccumulatorStackLayerStacks<2304>),
+    #[cfg(ls_dense_concat_large)]
+    LargeDenseConcat(AccumulatorStackLayerStacks<DENSE_CONCAT_FT>),
     #[cfg(feature = "layerstacks-3072x15x64")]
     L3072x16x64(AccumulatorStackLayerStacks<3072>),
     #[cfg(feature = "layerstacks-1536x15x64")]
@@ -720,6 +724,8 @@ macro_rules! ls_match {
             Self::L1024x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64($pat) => $body,
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat($pat) => $body,
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64($pat) => $body,
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -733,6 +739,7 @@ macro_rules! ls_match {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64"
@@ -778,6 +785,8 @@ impl LayerStacksAccStack {
             Self::L1024x16x64(_) => 1024,
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => 2304,
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => DENSE_CONCAT_FT,
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => 3072,
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -791,6 +800,7 @@ impl LayerStacksAccStack {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64"
@@ -820,6 +830,8 @@ impl LayerStacksAccStack {
             Self::L1024x16x64(_) => (1024, 16, 64),
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => (2304, 16, 64),
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => (DENSE_CONCAT_FT, 16, 64),
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => (3072, 16, 64),
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -833,6 +845,7 @@ impl LayerStacksAccStack {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64"
@@ -885,6 +898,8 @@ pub enum LayerStacksAccCache {
     L1024x16x64(AccumulatorCacheLayerStacks<1024>),
     #[cfg(feature = "layerstacks-2304x15x64")]
     L2304x16x64(AccumulatorCacheLayerStacks<2304>),
+    #[cfg(ls_dense_concat_large)]
+    LargeDenseConcat(AccumulatorCacheLayerStacks<DENSE_CONCAT_FT>),
     #[cfg(feature = "layerstacks-3072x15x64")]
     L3072x16x64(AccumulatorCacheLayerStacks<3072>),
     #[cfg(feature = "layerstacks-1536x15x64")]
@@ -923,6 +938,8 @@ impl LayerStacksAccCache {
             Self::L1024x16x64(_) => 1024,
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => 2304,
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => DENSE_CONCAT_FT,
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => 3072,
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -936,6 +953,7 @@ impl LayerStacksAccCache {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64"
@@ -965,6 +983,8 @@ impl LayerStacksAccCache {
             Self::L1024x16x64(_) => (1024, 16, 64),
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(_) => (2304, 16, 64),
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(_) => (DENSE_CONCAT_FT, 16, 64),
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(_) => (3072, 16, 64),
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -978,6 +998,7 @@ impl LayerStacksAccCache {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64"
@@ -1007,6 +1028,8 @@ impl LayerStacksAccCache {
             Self::L1024x16x64(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-2304x15x64")]
             Self::L2304x16x64(c) => c.invalidate(),
+            #[cfg(ls_dense_concat_large)]
+            Self::LargeDenseConcat(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-3072x15x64")]
             Self::L3072x16x64(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-1536x15x64")]
@@ -1020,6 +1043,7 @@ impl LayerStacksAccCache {
                 feature = "layerstacks-1024x15x32",
                 feature = "layerstacks-3072x15x32",
                 feature = "layerstacks-1024x15x64",
+                ls_dense_concat_large,
                 feature = "layerstacks-2304x15x64",
                 feature = "layerstacks-3072x15x64",
                 feature = "layerstacks-1536x15x64"

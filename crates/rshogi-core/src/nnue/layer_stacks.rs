@@ -1907,6 +1907,9 @@ mod kernel_tests {
         #[cfg(target_feature = "avx512vnni")]
         assert!(avx512::supported::<1536, 16, 64>());
         fn check<const N: usize, const L2: usize>() {
+            if super::super::threat_width::width(N) > N {
+                return;
+            }
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0153_6512);
             let bucket = random_bucket::<N, L2>(&mut rng);
             if !avx512::supported::<N, 16, L2>() {

@@ -164,40 +164,62 @@ fn dense_concat_rejects_noncanonical_arch_tokens() {
 #[cfg(ls_dense_concat)]
 #[test]
 fn dense_concat_threat_arch_counts_threat_dimensions_in_features() {
-    let ft = DENSE_CONCAT_FT;
-    let threat = 216_720;
-    let with_threat = dense_concat_threat_arch(ft, 16, 64, threat)
-        + ",ThreatWidth=512,ls_bucket=ownking:2/3/7+oppking:2/3/7";
-    let err = static_read_error(&with_threat, ft);
-    assert!(!err.contains("DenseConcat"), "{err}");
+    use super::network_layer_stacks::validate_dense_concat_dimensions;
 
-    let piece_dims_only = with_threat.replace(
-        &format!("[{}->", HALFKA_HM_DIMENSIONS + threat),
-        &format!("[{HALFKA_HM_DIMENSIONS}->"),
-    );
-    let err = static_read_error(&piece_dims_only, ft);
-    assert!(err.contains("Invalid DenseConcat network architecture"), "{err}");
+    let threat = 216_720;
+    for (ft, partial) in [
+        (1536, Some(512)),
+        (2304, Some(768)),
+        (4096, None),
+        (6144, Some(3072)),
+        (8192, Some(2816)),
+        (12288, None),
+    ] {
+        let shape = (ft, 16, 64);
+        let without_threat = dense_concat_arch(ft, 16, 64);
+        validate_dense_concat_dimensions(&without_threat, shape).unwrap();
+
+        let full = dense_concat_threat_arch(ft, 16, 64, threat);
+        validate_dense_concat_dimensions(&full, shape).unwrap();
+        let mut with_threat = full;
+        if let Some(width) = partial {
+            use std::fmt::Write;
+            write!(with_threat, ",ThreatWidth={width}").unwrap();
+        }
+        with_threat.push_str(",ls_bucket=ownking:2/3/7+oppking:2/3/7");
+        validate_dense_concat_dimensions(&with_threat, shape).unwrap();
+
+        let piece_dims_only = with_threat.replace(
+            &format!("[{}->", HALFKA_HM_DIMENSIONS + threat),
+            &format!("[{HALFKA_HM_DIMENSIONS}->"),
+        );
+        let err = validate_dense_concat_dimensions(&piece_dims_only, shape).unwrap_err();
+        assert!(err.to_string().contains("Invalid DenseConcat network architecture"), "{err}");
+    }
 }
 
 #[cfg(ls_dense_concat)]
-#[test]
-fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
+mod scalar_reference {
+    #[cfg(ls_dense_concat_large)]
     use rand::{Rng, SeedableRng};
+    #[cfg(ls_dense_concat_large)]
     use rand_xoshiro::Xoshiro256PlusPlus;
 
-    use super::leb128::{LEB128_MAGIC, encode_signed_leb128};
-    use super::{AccumulatorLayerStacks, LsNetByFt, LsSaturationCounts};
-    use crate::position::{Position, SFEN_HIRATE};
-    use crate::types::Move;
+    #[cfg(ls_dense_concat_large)]
+    use super::super::dense_concat::DenseConcatBucket;
 
-    struct Affine {
+    pub(super) struct Affine {
         input_width: usize,
         biases: Vec<i32>,
         weights: Vec<i8>,
     }
 
     impl Affine {
-        fn random(rng: &mut impl Rng, input_width: usize, output_width: usize) -> Self {
+        pub(super) fn random(
+            rng: &mut impl rand::Rng,
+            input_width: usize,
+            output_width: usize,
+        ) -> Self {
             Self {
                 input_width,
                 biases: (0..output_width).map(|_| rng.random_range(-8000..8000)).collect(),
@@ -207,7 +229,7 @@ fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
             }
         }
 
-        fn write(&self, bytes: &mut Vec<u8>) {
+        pub(super) fn write(&self, bytes: &mut Vec<u8>) {
             bytes.extend(self.biases.iter().flat_map(|bias| bias.to_le_bytes()));
             for weights in self.weights.chunks_exact(self.input_width) {
                 bytes.extend(weights.iter().map(|&w| w as u8));
@@ -239,6 +261,99 @@ fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
             .map(|&x| (i64::from(x).pow(2) / 524_288).min(127) as u8)
             .chain(xs.iter().map(|&x| (x / 64).clamp(0, 127) as u8))
     }
+
+    pub(super) fn eval(layers: &[Affine; 3], input: &[u8]) -> (i32, Vec<u8>) {
+        let [fc0, fc1, fc2] = layers;
+        let o0 = fc0.eval(input);
+        let mut concat: Vec<_> = activations(&o0).collect();
+        let o1 = fc1.eval(&concat);
+        concat.extend(activations(&o1));
+        (fc2.eval(&concat)[0] + o0[14] - o0[15], concat)
+    }
+
+    #[cfg(ls_dense_concat_large)]
+    fn check_bucket<const FT: usize>() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x4443_4e43);
+        let mut bytes = Vec::new();
+        let layers = [(FT, 16), (32, 64), (160, 1)].map(|(i, o)| Affine::random(&mut rng, i, o));
+        for layer in &layers {
+            layer.write(&mut bytes);
+        }
+        let bucket = DenseConcatBucket::<FT, 16, 64>::read(&mut bytes.as_slice()).unwrap();
+
+        for _ in 0..4 {
+            let us: [i16; FT] = std::array::from_fn(|_| rng.random_range(-32..160));
+            let them: [i16; FT] = std::array::from_fn(|_| rng.random_range(-32..160));
+            let input: Vec<_> = [&us, &them]
+                .into_iter()
+                .flat_map(|acc| {
+                    let (left, right) = acc.split_at(FT / 2);
+                    left.iter()
+                        .zip(right)
+                        .map(|(&a, &b)| (a.clamp(0, 127) * b.clamp(0, 127) / 128) as u8)
+                })
+                .collect();
+            let (expected, _) = eval(&layers, &input);
+            let transformed = super::super::layer_stacks::sqr_clipped_relu_new(&us, &them);
+            assert_eq!(transformed.0.as_slice(), input, "FT={FT}");
+            assert_eq!(bucket.propagate(&transformed.0), expected, "FT={FT}");
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                any(target_feature = "avx512vnni", ls_avx512bw_fused_1536)
+            ))]
+            assert_eq!(bucket.propagate_accumulators(&us, &them), expected, "FT={FT}");
+        }
+    }
+
+    #[cfg(ls_dense_concat_large)]
+    #[test]
+    fn dense_concat_large_buckets_match_scalar_reference() {
+        check_bucket::<4096>();
+        check_bucket::<6144>();
+        check_bucket::<8192>();
+        check_bucket::<12288>();
+    }
+}
+
+#[cfg(ls_dense_concat_large)]
+#[test]
+fn dense_concat_large_static_loader_accepts_the_configured_header() {
+    let ft = DENSE_CONCAT_FT;
+    #[cfg(feature = "nnue-threat")]
+    let arch = {
+        use std::fmt::Write;
+
+        let mut arch =
+            dense_concat_threat_arch(ft, 16, 64, super::threat_features::THREAT_DIMENSIONS);
+        let width = super::threat_width::width(ft);
+        if width != ft {
+            write!(arch, ",ThreatWidth={width}").unwrap();
+        }
+        arch
+    };
+    #[cfg(not(feature = "nnue-threat"))]
+    let arch = dense_concat_arch(ft, 16, 64);
+
+    let mut bytes = header(&arch);
+    bytes.extend_from_slice(&9u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    let error = NNUENetwork::read(&mut Cursor::new(bytes)).err().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof, "{error}");
+}
+
+#[cfg(all(ls_dense_concat, not(ls_dense_concat_large)))]
+#[test]
+fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    use self::scalar_reference::{Affine, eval};
+    use super::leb128::{LEB128_MAGIC, encode_signed_leb128};
+    use super::{AccumulatorLayerStacks, LsNetByFt, LsSaturationCounts};
+    use crate::position::{Position, SFEN_HIRATE};
+    use crate::types::Move;
 
     const FT: usize = DENSE_CONCAT_FT;
     const BUCKETS: usize = 2;
@@ -318,12 +433,8 @@ fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
                 a.iter().zip(b).map(|(&a, &b)| (a.clamp(0, 127) * b.clamp(0, 127) / 128) as u8)
             })
             .collect();
-        for (bucket, [fc0, fc1, fc2]) in params.iter().enumerate() {
-            let o0 = fc0.eval(&input);
-            let c0: Vec<_> = activations(&o0).collect();
-            let o1 = fc1.eval(&c0);
-            let c = c0.iter().copied().chain(activations(&o1)).collect::<Vec<_>>();
-            let expected = fc2.eval(&c)[0] + o0[14] - o0[15];
+        for (bucket, layers) in params.iter().enumerate() {
+            let (expected, concat) = eval(layers, &input);
             let (score, raw) = net.evaluate_with_bucket_and_raw(&pos, &acc, bucket);
             assert_eq!(raw, expected, "{move_text:?}, bucket {bucket}");
             assert_eq!(score, crate::types::Value::new(expected / 28));
@@ -334,8 +445,14 @@ fn dense_concat_file_forward_matches_scalar_and_refresh_matches_update() {
             net.accumulate_saturation_counts(&acc, side, bucket, &mut counts);
             assert_eq!(counts.l1_act_total, 32);
             assert_eq!(counts.l2_act_total, 128);
-            assert_eq!(counts.l1_act_sat, c0.iter().filter(|&&x| x == 127).count() as u64);
-            assert_eq!(counts.l2_act_sat, c[32..].iter().filter(|&&x| x == 127).count() as u64);
+            assert_eq!(
+                counts.l1_act_sat,
+                concat[..32].iter().filter(|&&x| x == 127).count() as u64
+            );
+            assert_eq!(
+                counts.l2_act_sat,
+                concat[32..].iter().filter(|&&x| x == 127).count() as u64
+            );
         }
     }
 }

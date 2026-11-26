@@ -13,6 +13,10 @@ const LAYERSTACK_FEATURES: &[&str] = &[
     "layerstacks-2304x15x64",
     "layerstacks-3072x15x64",
     "layerstacks-1536x15x64",
+    "layerstacks-4096x15x64",
+    "layerstacks-6144x15x64",
+    "layerstacks-8192x15x64",
+    "layerstacks-12288x15x64",
 ];
 
 const FT_FEATURES: &[&str] = &[
@@ -23,9 +27,13 @@ const FT_FEATURES: &[&str] = &[
     "ft-halfka_hm_merged",
 ];
 
-const DENSE_CONCAT_SLOTS: &[(&str, &str)] = &[
-    ("layerstacks-dense-concat-1536x16x64", "layerstacks-1536x15x64"),
-    ("layerstacks-dense-concat-2304x16x64", "layerstacks-2304x15x64"),
+const DENSE_CONCAT_SLOTS: &[(usize, &str, &str)] = &[
+    (1536, "layerstacks-dense-concat-1536x16x64", "layerstacks-1536x15x64"),
+    (2304, "layerstacks-dense-concat-2304x16x64", "layerstacks-2304x15x64"),
+    (4096, "layerstacks-dense-concat-4096x16x64", "layerstacks-4096x15x64"),
+    (6144, "layerstacks-dense-concat-6144x16x64", "layerstacks-6144x15x64"),
+    (8192, "layerstacks-dense-concat-8192x16x64", "layerstacks-8192x15x64"),
+    (12288, "layerstacks-dense-concat-12288x16x64", "layerstacks-12288x15x64"),
 ];
 
 /// DenseConcat と同じ寸法の枠を使う SplitSkip の edition。枠を共有するので枠の数では
@@ -83,8 +91,9 @@ fn validate_feature_combination(
     let ft_count = FT_FEATURES.iter().filter(|f| has_feature(f)).count();
 
     let mut dense_concat_slots =
-        DENSE_CONCAT_SLOTS.iter().filter(|(feature, _)| has_feature(feature));
-    if let Some(&(_, slot)) = dense_concat_slots.next() {
+        DENSE_CONCAT_SLOTS.iter().filter(|(_, feature, _)| has_feature(feature));
+    let dense_concat = dense_concat_slots.next();
+    if let Some(&(_, _, slot)) = dense_concat {
         if dense_concat_slots.next().is_some() {
             return Err("DenseConcat features are mutually exclusive".to_owned());
         }
@@ -108,19 +117,32 @@ fn validate_feature_combination(
                 "DenseConcat requires a single static HalfKaHmMerged LayerStacks slot ({slot}) without EffectBucket or prepacked-nnue"
             ));
         }
+    } else if let Some(&(_, feature, slot)) = DENSE_CONCAT_SLOTS
+        .iter()
+        .find(|(width, _, slot)| *width > 2304 && has_feature(slot))
+    {
+        return Err(format!("{slot} requires {feature}; SplitSkip is unavailable at this FT width"));
     }
 
     let threat_width_256 = has_feature("threat-width-256");
     let threat_width_512 = has_feature("threat-width-512");
     let threat_width_768 = has_feature("threat-width-768");
-    if [threat_width_256, threat_width_512, threat_width_768]
+    let threat_width_2816 = has_feature("threat-width-2816");
+    let threat_width_3072 = has_feature("threat-width-3072");
+    if [
+        threat_width_256,
+        threat_width_512,
+        threat_width_768,
+        threat_width_2816,
+        threat_width_3072,
+    ]
         .into_iter()
         .filter(|&enabled| enabled)
         .count()
         > 1
     {
         return Err(
-            "threat-width-256, threat-width-512 and threat-width-768 are mutually exclusive"
+            "threat-width-256, threat-width-512, threat-width-768, threat-width-2816 and threat-width-3072 are mutually exclusive"
                 .to_owned(),
         );
     }
@@ -140,6 +162,15 @@ fn validate_feature_combination(
     }
     if threat_width_768 && !(static_layerstack && partial_width_l2_64) {
         return Err("threat-width-768 requires a static 1024x15x64, 1536x15x64 or 2304x15x64 edition".to_owned());
+    }
+
+    for (enabled, width, required_ft) in [
+        (threat_width_2816, 2816, 8192),
+        (threat_width_3072, 3072, 6144),
+    ] {
+        if enabled && !(static_layerstack && dense_concat.is_some_and(|&(ft, _, _)| ft == required_ft)) {
+            return Err(format!("threat-width-{width} requires a static {required_ft}x16x64 DenseConcat edition"));
+        }
     }
 
     if has_feature("nnue-effect-bucket") {
@@ -250,11 +281,12 @@ fn validate_feature_combination(
                 || has_feature("layerstacks-3072x15x32")
                 || has_feature("layerstacks-2304x15x64")
                 || has_feature("layerstacks-3072x15x64")
-                || has_feature("layerstacks-1536x15x64"));
+                || has_feature("layerstacks-1536x15x64")
+                || dense_concat.is_some());
         if !valid {
             return Err(
                 "nnue-progress-diff は mode-specific + layerstacks-1536x15x32 / layerstacks-1536x31x32 \
-                 / layerstacks-3072x15x32 / layerstacks-2304x15x64 / layerstacks-3072x15x64 / layerstacks-1536x15x64 でのみ有効です。他構成では NPS が退行します。"
+                 / layerstacks-3072x15x32 / layerstacks-2304x15x64 / layerstacks-3072x15x64 / layerstacks-1536x15x64 / DenseConcat でのみ有効です。他構成では NPS が退行します。"
                     .to_string(),
             );
         }

@@ -13,9 +13,21 @@ use super::{layer_stacks::sqr_clipped_relu_new, ls_l1_kernel::avx512};
 
 pub(super) const DENSE_CONCAT_FT: usize = if cfg!(feature = "layerstacks-dense-concat-1536x16x64") {
     1536
-} else {
+} else if cfg!(feature = "layerstacks-dense-concat-2304x16x64") {
     2304
+} else if cfg!(feature = "layerstacks-dense-concat-4096x16x64") {
+    4096
+} else if cfg!(feature = "layerstacks-dense-concat-6144x16x64") {
+    6144
+} else if cfg!(feature = "layerstacks-dense-concat-8192x16x64") {
+    8192
+} else {
+    12288
 };
+
+pub(super) const fn is_supported_ft(width: usize) -> bool {
+    matches!(width, 1536 | 2304 | 4096 | 6144 | 8192 | 12288)
+}
 
 const FC1_IN: usize = 32;
 const FC2_IN: usize = 160;
@@ -38,9 +50,9 @@ pub struct DenseConcatBucket<const L1: usize, const FC0_OUT: usize, const FC1_OU
 impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
     DenseConcatBucket<L1, FC0_OUT, FC1_OUT>
 {
-    fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
+    pub(super) fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         const {
-            assert!(matches!(L1, 1536 | 2304));
+            assert!(is_supported_ft(L1));
             assert!(FC1_IN == 2 * FC0_OUT && FC2_IN == FC1_IN + 2 * FC1_OUT);
         }
         let l1 = AffineTransform::read(reader)?;
@@ -142,8 +154,9 @@ impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
 
         let mut fc2 = [0];
         self.output.propagate_7bit(&concat.0, &mut fc2);
-        let skip = fc0[FC0_OUT - 2] - fc0[FC0_OUT - 1];
-        (fc2[0] + skip, skip)
+        // 学習側の整数参照実装と同じく、i32 を超える極端な重みでは wrap させる。
+        let skip = fc0[FC0_OUT - 2].wrapping_sub(fc0[FC0_OUT - 1]);
+        (fc2[0].wrapping_add(skip), skip)
     }
 }
 

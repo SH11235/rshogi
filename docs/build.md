@@ -484,7 +484,7 @@ AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融�
 
 ## LayerStacks-DenseConcat
 
-LayerStacks-DenseConcat 1536-16-64 と 2304-16-64 は、どちらも `fc_0` の 16 出力すべてを活性化し、`fc_2` に 160 要素を渡します。
+LayerStacks-DenseConcat は、`fc_0` の 16 出力すべてを活性化し、`fc_2` に 160 要素を渡します。
 
 ヘッダーに `Head=DenseConcat,` がある HalfKaHmMerged モデルには、FT 幅と Threat 幅に合う固定 edition を使います。
 すべての構成に `nnue-progress-diff` が含まれます。
@@ -497,13 +497,35 @@ LayerStacks-DenseConcat 1536-16-64 と 2304-16-64 は、どちらも `fc_0` の 
 | 512 | `layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat512` | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat512` |
 | 768 | `layerstacks-dense-concat-halfka_hm_merged-1536x16x64-threat768` | `layerstacks-dense-concat-halfka_hm_merged-2304x16x64-threat768` |
 
+FT 幅 4096 / 6144 / 8192 / 12288 の xtask preset は
+`layerstacks-dense-concat-halfka_hm_merged-<FT幅>x16x64-<末尾>` です。
+
+| FT 幅 | Threat なし | Threat 全幅 | Threat 部分幅 |
+|---|---|---|---|
+| 4096 | `none` | `threat` | — |
+| 6144 | `none` | `threat` | `threat3072` |
+| 8192 | `none` | `threat` | `threat2816` |
+| 12288 | `none` | `threat` | — |
+
+部分幅の Threat は、各視点で FT の前半と後半の先頭の列に、指定幅の半分ずつを加算します。
+部分幅の Threat の FT との合算は、AVX-512 VNNI を有効にした build では融合カーネルで行い、それ以外の build では要素ごとのループになります。
+探索の thread ごとの accumulator と cache は、12288 の全幅 Threat で約 28 MiB です。
+12288 の駒 FT は展開後に最大約 1.8 GB、全幅の Threat は追加で約 2.66 GB の重み領域を使います。
+12288 の全幅 Threat には 64-bit 環境が必要です。
+
 ```sh
-cargo run --release -p xtask -- build --edition layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat3072 --profile production
+cargo build --release -p tools --bin eval_sfens --no-default-features --features edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat3072
+cargo clippy -p rshogi-core --all-targets --no-default-features --features edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat3072 -- -D warnings
 ```
 
 Cargo の edition feature は preset 名に `edition-` を付けた名前です。
-構成部品を直接指定する場合は、モデルの FT 幅に合う `layerstacks-dense-concat-1536x16x64` または
-`layerstacks-dense-concat-2304x16x64` の一方と、`layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
+構成部品を直接指定する場合は、モデルの FT 幅に合う `layerstacks-dense-concat-<FT幅>x16x64` と、
+`mode-specific`、`layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
+Threat 付きのモデルには `nnue-threat` を足し、部分幅のモデルにはさらに対応する `threat-width-*` を足します。
+構成部品の直接指定は rshogi-core を build するとき向けです。tools と rshogi-usi は、crate ごとに feature の受け渡しが違うので、上の edition feature で build します。
+4096 / 6144 / 8192 / 12288 の内部寸法 feature `layerstacks-<FT幅>x15x64` は DenseConcat 専用です。
+`threat-width-3072` は 6144、`threat-width-2816` は 8192 の固定 DenseConcat edition 専用で、他の部分幅 feature とは排他です。
 
 ヘッダーに `PSQT=` があるモデルは、FT 幅と Threat 幅に合う edition に
 `nnue-psqt` を足して build します (例: `cargo build --release -p rshogi-usi --no-default-features

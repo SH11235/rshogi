@@ -273,7 +273,11 @@ fn dump_debug_first<
 
     #[cfg(not(any(
         feature = "layerstacks-dense-concat-2304x16x64",
-        feature = "layerstacks-dense-concat-1536x16x64"
+        feature = "layerstacks-dense-concat-1536x16x64",
+        feature = "layerstacks-dense-concat-4096x16x64",
+        feature = "layerstacks-dense-concat-6144x16x64",
+        feature = "layerstacks-dense-concat-8192x16x64",
+        feature = "layerstacks-dense-concat-12288x16x64"
     )))]
     {
         let main_dim = LS_L1_OUT - 1;
@@ -366,12 +370,20 @@ fn run_eval_for_network<
         let bucket_index = bucketer.bucket(&pos);
         #[cfg(any(
             feature = "layerstacks-dense-concat-2304x16x64",
-            feature = "layerstacks-dense-concat-1536x16x64"
+            feature = "layerstacks-dense-concat-1536x16x64",
+            feature = "layerstacks-dense-concat-4096x16x64",
+            feature = "layerstacks-dense-concat-6144x16x64",
+            feature = "layerstacks-dense-concat-8192x16x64",
+            feature = "layerstacks-dense-concat-12288x16x64"
         ))]
         let (value, raw) = network.evaluate_with_bucket_and_raw(&pos, &acc, bucket_index);
         #[cfg(not(any(
             feature = "layerstacks-dense-concat-2304x16x64",
-            feature = "layerstacks-dense-concat-1536x16x64"
+            feature = "layerstacks-dense-concat-1536x16x64",
+            feature = "layerstacks-dense-concat-4096x16x64",
+            feature = "layerstacks-dense-concat-6144x16x64",
+            feature = "layerstacks-dense-concat-8192x16x64",
+            feature = "layerstacks-dense-concat-12288x16x64"
         )))]
         let (value, raw) = {
             let value = network.evaluate_with_bucket(&pos, &acc, bucket_index);

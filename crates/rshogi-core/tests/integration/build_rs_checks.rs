@@ -204,6 +204,65 @@ fn partial_threat_widths_are_mutually_exclusive() {
 }
 
 #[test]
+fn large_ft_slots_require_dense_concat() {
+    for &(ft, dense_concat, slot) in DENSE_CONCAT_SLOTS {
+        if ft <= 2304 {
+            continue;
+        }
+        let base = [
+            "mode-specific",
+            "layerstack-arch",
+            "ft-halfka_hm_merged",
+            slot,
+        ];
+        let error = validate_feature_combination(&lookup(&base)).unwrap_err();
+        assert!(error.contains("SplitSkip") && error.contains(dense_concat), "{error}");
+        let with_head = [base.as_slice(), &[dense_concat, "nnue-progress-diff"]].concat();
+        assert!(validate_feature_combination(&lookup(&with_head)).is_ok());
+    }
+}
+
+#[test]
+fn large_partial_threat_widths_require_their_dense_concat_edition() {
+    for &(ft, dense_concat, slot) in DENSE_CONCAT_SLOTS {
+        for (width, required_ft) in [("threat-width-2816", 8192), ("threat-width-3072", 6144)] {
+            let base = [
+                "mode-specific",
+                "layerstack-arch",
+                "ft-halfka_hm_merged",
+                slot,
+                "nnue-threat",
+                width,
+            ];
+            assert!(validate_feature_combination(&lookup(&base)).is_err());
+            let with_head = [base.as_slice(), &[dense_concat]].concat();
+            let result = validate_feature_combination(&lookup(&with_head));
+            if ft == required_ft {
+                assert!(result.is_ok(), "{width}: {result:?}");
+            } else {
+                assert!(result.unwrap_err().contains(width));
+            }
+            for other in [
+                "threat-width-256",
+                "threat-width-512",
+                "threat-width-768",
+                "threat-width-2816",
+                "threat-width-3072",
+            ] {
+                if other != width {
+                    let both = [with_head.as_slice(), &[other]].concat();
+                    assert!(
+                        validate_feature_combination(&lookup(&both))
+                            .unwrap_err()
+                            .contains("mutually exclusive")
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn empty_features_pass() {
     let has = lookup(&[]);
     assert!(validate_feature_combination(&has).is_ok());

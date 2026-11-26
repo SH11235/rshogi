@@ -55,7 +55,11 @@
         feature = "layerstacks-1024x15x64",
         feature = "layerstacks-2304x15x64",
         feature = "layerstacks-3072x15x64",
-        feature = "layerstacks-1536x15x64"
+        feature = "layerstacks-1536x15x64",
+        feature = "layerstacks-dense-concat-4096x16x64",
+        feature = "layerstacks-dense-concat-6144x16x64",
+        feature = "layerstacks-dense-concat-8192x16x64",
+        feature = "layerstacks-dense-concat-12288x16x64"
     ))
 ))]
 compile_error!(

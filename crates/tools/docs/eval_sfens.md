@@ -71,16 +71,16 @@ LayerStacks（SplitSkip）の Threat 付きモデルでは、`score` (と `score
 ### LayerStacks-DenseConcat
 
 FT 幅と Threat 幅に合う [DenseConcat 専用 edition](../../../docs/build.md#layerstacks-denseconcat) を指定する。
-以下は 1536-16-64 の Threat なしの例。2304-16-64 では feature 名の `1536x16x64` を `2304x16x64` に置き換える。
+以下は 6144-16-64 の部分幅 Threat 3072 の例。
 
 ```sh
 cargo run --release -p tools --bin eval_sfens --no-default-features \
-  --features edition-layerstacks-dense-concat-halfka_hm_merged-1536x16x64-none -- \
+  --features edition-layerstacks-dense-concat-halfka_hm_merged-6144x16x64-threat3072 -- \
   --nnue "$SHOGI_DATA/nnue/<dense-concat>.bin" --sfens sfens.txt --count 10
 ```
 
 上の例はヘッダーに `ls_bucket=` があるモデル用。ヘッダーに指定がなければ学習時の routing 引数を加える。
-Threat 付きなら feature の末尾を `threat`、`threat256`、`threat512`、`threat768` のいずれかに合わせる。`threat256` は 1536-16-64 専用。
+Threat なしなら feature の末尾は `none`、全幅なら `threat` です。部分幅はモデルの `ThreatWidth=` に合う末尾を選びます。
 DenseConcat の `raw` は Threat を含む `fc_2 + skip` で、PSQT の加算とスケーリングの前の整数値。
 tatara の `--debug` が出す `bucket` と `raw`、内部スケールの `score` を照合する。
 `--dump-debug-first` の駒 FT と第 1 affine 層の診断値は駒特徴だけから計算する。
