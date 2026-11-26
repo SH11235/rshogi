@@ -173,6 +173,7 @@ pub use network_layer_stacks::NetworkLayerStacks3072x16x64;
 pub use network_layer_stacks::{
     LayerStacksNetwork, LsNetByFt, NetworkLayerStacks, compute_layer_stack_kingrank9_bucket_index,
 };
+pub use shared_weights::release_shared_weights_at_exit;
 // `#[macro_export]` で crate root に出る ls_dispatch_ft_size! を nnue:: パスからも参照可能にする。
 pub use crate::ls_dispatch_ft_size;
 pub use piece_list::{PieceList, PieceNumber};

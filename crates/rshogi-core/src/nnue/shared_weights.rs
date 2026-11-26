@@ -40,6 +40,15 @@ pub(crate) unsafe fn release(map_base: *mut libc::c_void, map_len: usize) {
     unsafe { linux::release(map_base, map_len) };
 }
 
+/// プロセスを終える前に呼ぶ。共有している重みの印を全部手放し、他に使うプロセスが
+/// 居ない共有メモリの名前を消す。重みは static に置かれて終了時に Drop されないため、
+/// 呼ばないと名前は次に起動したプロセスの掃除まで残る。呼んだ後も読み込み済みの重みは
+/// 読める。Linux 以外では何もしない。
+pub fn release_shared_weights_at_exit() {
+    #[cfg(target_os = "linux")]
+    linux::release_all_at_exit();
+}
+
 /// キルスイッチ環境変数。`0` / `off` / `false` で共有を無効化する。
 /// 参照は Linux 実装のみのため、他ターゲットでは dead_code になる（cfg で除外）。
 #[cfg(target_os = "linux")]
@@ -269,12 +278,27 @@ mod linux {
         // この領域へアクセスしない。munmap 失敗は無視（プロセス終了時に OS が回収するため
         // 実害なし）。
         unsafe { libc::munmap(base, len) };
-        let Some((_, fd, name)) = entry else {
-            return;
-        };
+        if let Some((_, fd, name)) = entry {
+            give_up_use(fd, &name);
+        }
+    }
+
+    /// プロセスの終わりに、まだ使っている印を全部手放す。重みは static に置かれて終了時に
+    /// Drop されないので、普通の終了でも名前を消すために呼ぶ。マッピングは外さない
+    /// （他のスレッドが読んでいても、名前を消して fd を閉じるだけなので読み続けられる）。
+    pub(super) fn release_all_at_exit() {
+        let entries =
+            std::mem::take(&mut *IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        for (_, fd, name) in entries {
+            give_up_use(fd, &name);
+        }
+    }
+
+    /// 使っている印を手放す。最後の利用者なら名前を消し、fd を閉じる。
+    fn give_up_use(fd: libc::c_int, name: &CString) {
         for attempt in 0..RELEASE_LOCK_ATTEMPTS {
             if try_flock_exclusive(fd) {
-                unlink_if_unused_locked(fd, &name);
+                unlink_if_unused_locked(fd, name);
                 break;
             }
             if attempt + 1 < RELEASE_LOCK_ATTEMPTS {

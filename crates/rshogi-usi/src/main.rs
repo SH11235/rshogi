@@ -2638,6 +2638,9 @@ fn main() -> Result<()> {
         }
     }
 
+    // quit と入力の終わりの両方で、共有メモリに置いた重みの名前を手放す
+    // (重みは static に置かれて終了時に Drop されない)。
+    rshogi_core::nnue::release_shared_weights_at_exit();
     Ok(())
 }
 
