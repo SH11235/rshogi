@@ -507,7 +507,9 @@ FT 幅 4096 / 6144 / 8192 / 12288 の xtask preset は
 | 8192 | `none` | `threat` | `threat2816` |
 | 12288 | `none` | `threat` | — |
 
-部分幅の Threat は、各視点で指定幅の半分だけ先頭の列に加算します。
+部分幅の Threat は、各視点で FT の前半と後半の先頭の列に、指定幅の半分ずつを加算します。
+部分幅の Threat の FT との合算は、AVX-512 VNNI の build では融合カーネルで行い、それ以外の CPU では要素ごとのループになります。
+探索の thread ごとの accumulator と cache は、12288 の全幅 Threat で約 28 MiB です。
 12288 の駒 FT は展開後に最大約 1.8 GB、全幅の Threat は追加で約 2.66 GB の重み領域を使います。
 12288 の全幅 Threat には 64-bit 環境が必要です。
 
@@ -519,7 +521,7 @@ cargo clippy -p rshogi-core --all-targets --no-default-features --features editi
 
 Cargo の edition feature は preset 名に `edition-` を付けた名前です。
 構成部品を直接指定する場合は、モデルの FT 幅に合う `layerstacks-dense-concat-<FT幅>x16x64` と、
-`layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
+`mode-specific`、`layerstack-arch`、`ft-halfka_hm_merged` を有効にし、既定 feature を無効にします。
 4096 / 6144 / 8192 / 12288 の内部寸法 feature `layerstacks-<FT幅>x15x64` は DenseConcat 専用です。
 `threat-width-3072` は 6144、`threat-width-2816` は 8192 の固定 DenseConcat edition 専用で、他の部分幅 feature とは排他です。
 

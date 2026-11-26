@@ -649,10 +649,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         let slice = unsafe {
             std::slice::from_raw_parts_mut(threat_weights.as_mut_ptr() as *mut u8, weight_count)
         };
-        // 全幅の Threat は 2 GiB を超えるため、OS の単発 read のサイズ上限を避ける。
-        for chunk in slice.chunks_mut(16 * 1024 * 1024) {
-            reader.read_exact(chunk)?;
-        }
+        reader.read_exact(slice)?;
         self.threat_weights = threat_weights.into();
         self.has_threat = true;
         Ok(())

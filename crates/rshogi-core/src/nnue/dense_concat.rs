@@ -154,8 +154,9 @@ impl<const L1: usize, const FC0_OUT: usize, const FC1_OUT: usize>
 
         let mut fc2 = [0];
         self.output.propagate_7bit(&concat.0, &mut fc2);
-        let skip = fc0[FC0_OUT - 2] - fc0[FC0_OUT - 1];
-        (fc2[0] + skip, skip)
+        // 学習側の整数参照実装と同じく、i32 を超える極端な重みでは wrap させる。
+        let skip = fc0[FC0_OUT - 2].wrapping_sub(fc0[FC0_OUT - 1]);
+        (fc2[0].wrapping_add(skip), skip)
     }
 }
 
