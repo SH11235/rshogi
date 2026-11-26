@@ -264,7 +264,13 @@ fn read_cut(dir: &Path) -> Result<(Meta, Vec<Subtree>)> {
         ensure!(node_at(&root.key).is_some(), "{}: 根の局面がありません", root.id);
         for edge in &tree.edges {
             ensure!(
-                tree.nodes.get(&edge.key).is_some_and(|n| n.kind == Kind::Inner)
+                (tree.nodes.get(&edge.key).is_some_and(|n| n.kind == Kind::Inner)
+                    || (tree
+                        .nodes
+                        .get(&edge.key)
+                        .is_some_and(|n| n.kind == Kind::Master && !n.read)
+                        && super::model::single_legal_move(&edge.key)?.as_deref()
+                            == Some(&edge.mv)))
                     && node_at(&edge.child).is_some(),
                 "{}: 辺の局面が部分木にありません: {} {}",
                 root.id,

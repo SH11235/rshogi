@@ -8,7 +8,7 @@ use crate::book_backprop::DrawValues;
 use crate::book_tree::audit::{MasterValue, master_values};
 use crate::book_tree::journal::{digest, read_source};
 use crate::book_tree::master_table::read_master;
-use crate::book_tree::model::child;
+use crate::book_tree::model::{child, single_legal_move};
 use crate::book_tree::targets::{DEFAULT_PRIORITY, Line, Opts, parse_root};
 use crate::common::io::write_atomic;
 use anyhow::{Context, Result, ensure};
@@ -274,14 +274,17 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
     } else {
         None
     };
-    let shared_kinds: BTreeMap<_, _> = shared
+    let shared_in_book: BTreeSet<_> = shared
         .as_ref()
         .map(|trees| {
             roots
                 .iter()
                 .zip(trees)
-                .flat_map(|(r, t)| {
-                    t.nodes.iter().map(move |(key, n)| ((r.own.as_str(), key.as_str()), n.kind))
+                .flat_map(|(root, tree)| {
+                    tree.edges
+                        .iter()
+                        .filter(|e| e.book_value.is_some() || e.extra || e.master)
+                        .map(move |e| (root.own.as_str(), e.key.as_str()))
                 })
                 .collect()
         })
@@ -343,11 +346,10 @@ pub(super) fn run(args: CutArgs) -> Result<()> {
         }
         let count = |kind: Kind| tree.nodes.values().filter(|n| n.kind == kind).count();
         let root_in_book = tree
-            .nodes
-            .get(&root.key)
-            .map(|n| n.kind)
-            .or_else(|| shared_kinds.get(&(root.own.as_str(), root.key.as_str())).copied())
-            == Some(Kind::Inner);
+            .edges
+            .iter()
+            .any(|e| e.key == root.key && (e.book_value.is_some() || e.extra || e.master))
+            || shared_in_book.contains(&(root.own.as_str(), root.key.as_str()));
         let checks = tree.nodes.values().filter(|n| n.kind == Kind::Inner && n.read).count();
         let row_reads = tree.nodes.values().filter(|n| n.read).count();
         writeln!(
@@ -679,6 +681,50 @@ fn cut_forest(
             Kind::Master => {}
             Kind::Cap if params.cap_exit == CapExit::Skip => node.read = false,
             _ => node.read = true,
+        }
+    }
+    let mut connected: BTreeSet<_> = tree.edges.iter().map(|edge| edge.key.clone()).collect();
+    let mut pending: VecDeque<_> = tree
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.read)
+        .map(|(key, _)| key.clone())
+        .collect();
+    while let Some(key) = pending.pop_front() {
+        let Some(mv) = single_legal_move(&key)? else {
+            continue;
+        };
+        let next = child(&key, &mv)?;
+        let node = tree.nodes.get_mut(&key).expect("局面がある");
+        node.read = false;
+        if node.kind != Kind::Master {
+            node.kind = Kind::Inner;
+        }
+        let ply = node.ply.checked_add(1).context("手数の上限")?;
+        let level = node.level.checked_add(1).context("段数の上限")?;
+        if connected.insert(key.clone()) {
+            tree.edges.push(Edge {
+                key: key.clone(),
+                mv,
+                child: next.clone(),
+                book_value: None,
+                extra: false,
+                master: false,
+            });
+        }
+        // tree serve が省く唯一手は、上限の外でも値の根拠となる子へ接続する。
+        if !tree.nodes.contains_key(&next) {
+            tree.nodes.insert(
+                next.clone(),
+                Node {
+                    ply,
+                    level,
+                    kind: Kind::Nobook,
+                    read: true,
+                },
+            );
+            owners.insert(next.clone(), owners[&key]);
+            pending.push_back(next);
         }
     }
     tree.edges.sort_by(|a, b| (&a.key, &a.mv).cmp(&(&b.key, &b.mv)));
