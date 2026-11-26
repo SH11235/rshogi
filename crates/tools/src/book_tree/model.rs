@@ -196,7 +196,15 @@ pub(super) fn single_legal_move(key: &str) -> Result<Option<String>> {
     {
         return Ok(None);
     }
-    Ok(Some(legal.as_slice()[0].to_usi()))
+    let mv = legal.as_slice()[0].to_usi();
+    let next = child_position_after_move(&format!("{key} 1"), &mv)?;
+    let mut legal = MoveList::new();
+    generate_legal_all(&next, &mut legal);
+    // 終局の読みは PV を持たないことがあるため、詰みの値は親の探索で求める。
+    if legal.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(mv))
 }
 
 pub(super) fn side(key: &str) -> &str {
@@ -229,6 +237,7 @@ pub(super) struct Tree {
     pub failed: bool,
     expanded: BTreeMap<String, (usize, u32)>,
     forced_nodes: usize,
+    legal_cache: std::sync::Arc<std::sync::Mutex<BTreeMap<String, Option<String>>>>,
     /// 前回の `advance` が返した不足 (読みの無い局面)。
     waiting: Vec<(String, usize)>,
 }
@@ -365,8 +374,20 @@ impl Tree {
             failed: false,
             expanded: BTreeMap::new(),
             forced_nodes: 0,
+            legal_cache: Default::default(),
             waiting: Vec::new(),
         })
+    }
+
+    fn cached_single_legal_move(&self, key: &str) -> Result<Option<String>> {
+        let mut cache =
+            self.legal_cache.lock().map_err(|e| anyhow::anyhow!("合法手キャッシュ: {e}"))?;
+        if let Some(mv) = cache.get(key) {
+            return Ok(mv.clone());
+        }
+        let mv = single_legal_move(key)?;
+        cache.insert(key.to_owned(), mv.clone());
+        Ok(mv)
     }
 
     fn root_candidates(&mut self, key: &str) -> Result<()> {
@@ -491,7 +512,7 @@ impl Tree {
             while let Some(key) = work.pop_front() {
                 budget.tick()?;
                 if !self.nodes.contains_key(&key) {
-                    if let Some(mv) = single_legal_move(&key)? {
+                    if let Some(mv) = self.cached_single_legal_move(&key)? {
                         self.forced_nodes += 1;
                         self.nodes.insert(
                             key.clone(),
@@ -633,6 +654,7 @@ impl Tree {
         self.normal_unresolved = None;
         self.nodes.clear();
         self.forced_nodes = 0;
+        self.legal_cache = Default::default();
         self.level.clear();
         self.ply.clear();
         self.edge.clear();
@@ -1119,6 +1141,7 @@ impl Tree {
         def.extend_rounds = 0;
         def.settle_rounds = 0;
         let mut shadow = Self::build_borrowed(def, lines, work)?;
+        shadow.legal_cache = self.legal_cache.clone();
         for (key, moves) in self.force.iter().chain(predicted.iter()) {
             work.tick()?;
             for mv in moves {
@@ -1192,7 +1215,7 @@ impl Tree {
                 break;
             }
             visited += 1;
-            let forced = single_legal_move(&key).ok().flatten();
+            let forced = self.cached_single_legal_move(&key).ok().flatten();
             if level >= self.def.max_depth() && forced.is_none() {
                 continue;
             }
@@ -1248,7 +1271,7 @@ impl Tree {
             .into_iter()
             .filter(|(key, _)| {
                 self.reading(cache, key).is_none()
-                    && single_legal_move(key).ok().flatten().is_none()
+                    && self.cached_single_legal_move(key).ok().flatten().is_none()
             })
             .map(|(key, (level, ply))| PrefetchCandidate { key, level, ply })
             .collect()
@@ -1478,6 +1501,29 @@ pub(super) mod prefetch_tests {
         let tree =
             Tree::build(def, &[(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])]).unwrap();
         (tree, cache, keys)
+    }
+
+    #[test]
+    fn single_legal_cache_is_shared_with_shadows_and_cleared_on_shrink() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = super::super::tests::single_legal_tree(dir.path(), 1, 0);
+        let root = super::super::tests::SINGLE_LEGAL;
+        let next = child(root, "1a1b").unwrap();
+        let cache = BTreeMap::<String, Reading>::new();
+        tree.advance(&cache).unwrap();
+        assert_eq!(tree.legal_cache.lock().unwrap().get(root), Some(&Some("1a1b".into())));
+        assert_eq!(tree.legal_cache.lock().unwrap().get(&next), Some(&None));
+        let shadow = tree
+            .shadow(&[(root.into(), 1, vec![])], Edges::new(), &cache, &mut unlimited())
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&tree.legal_cache, &shadow.legal_cache));
+        let before = tree.legal_cache.lock().unwrap().clone();
+        tree.advance(&cache).unwrap();
+        tree.speculate(&BTreeMap::from([(next, (vec![], 0, 3))]), &cache, 100);
+        assert_eq!(*tree.legal_cache.lock().unwrap(), before);
+        tree.shrink();
+        assert!(tree.legal_cache.lock().unwrap().is_empty());
+        assert_eq!(*shadow.legal_cache.lock().unwrap(), before);
     }
 
     #[test]
@@ -1834,6 +1880,7 @@ pub(super) mod prefetch_tests {
     fn prediction_uses_raw_unexpanded_move_and_does_not_mutate_tree() {
         let (tree, lines, cache) = fixture();
         let before = format!("{tree:?}");
+        let before_cache = tree.legal_cache.lock().unwrap().clone();
         let predicted = tree.predict(&mut unlimited()).unwrap();
         assert_eq!(predicted[ROOT], BTreeSet::from(["5i6i".into()]));
         let shadow = tree.shadow(&lines, predicted, &cache, &mut unlimited()).unwrap();
@@ -1841,11 +1888,15 @@ pub(super) mod prefetch_tests {
         let candidates = tree.prefetch(&lines, &cache, false, PREFETCH_WORK).unwrap();
         let b = child(ROOT, "5i6i").unwrap();
         assert!(candidates.contains(&PrefetchCandidate {
-            key: b,
+            key: b.clone(),
             level: 1,
             ply: 12
         }));
+        // 判定キャッシュの追加は、木の展開状態の変更とは区別する。
+        let cached = std::mem::replace(&mut *tree.legal_cache.lock().unwrap(), before_cache);
+        assert_eq!(cached.get(&b), Some(&None));
         assert_eq!(format!("{tree:?}"), before);
+        *tree.legal_cache.lock().unwrap() = cached;
         assert_shadow(&tree, &tree.shadow(&lines, Edges::new(), &cache, &mut unlimited()).unwrap());
     }
 

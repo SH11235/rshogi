@@ -335,9 +335,15 @@ impl Tree {
             for mv in edges.get(key).into_iter().flatten() {
                 let c = child(key, mv)?;
                 if !rows.contains_key(mv)
-                    && let Some(first) = self.nodes.get(&c).and_then(|n| n.lines().first())
+                    && let Some(value) = self.nodes.get(&c).and_then(|node| {
+                        if node.forced_move.is_some() {
+                            values.get(&c)?.values().copied().max()
+                        } else {
+                            node.lines().first().map(|pv| pv.cp)
+                        }
+                    })
                 {
-                    rows.insert(mv.clone(), -first.cp);
+                    rows.insert(mv.clone(), -value);
                 }
             }
             writeln!(db, "sfen {key} {}", self.ply[key])?;

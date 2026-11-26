@@ -65,7 +65,7 @@ struct ReadingLine {
     forced_move: Option<String>,
     key: String,
     nodes: Option<u64>,
-    sec: f64,
+    sec: Option<f64>,
 }
 
 struct Filters {
@@ -403,9 +403,12 @@ fn write_readings(dir: &Path, index: u32, out: &mut impl Write) -> Result<usize>
             if row.forced_move.is_some() {
                 continue;
             }
+            let sec = row.sec.with_context(|| {
+                format!("{}:{}: missing field `sec`", path.display(), line_index + 1)
+            })?;
             readings += 1;
             if let Some(nodes) = row.nodes {
-                out.write_all(&reading_id(&row.key, nodes, row.sec))?;
+                out.write_all(&reading_id(&row.key, nodes, sec))?;
                 out.write_all(&index.to_le_bytes())?;
             }
         }
@@ -541,6 +544,17 @@ mod tests {
         assert_eq!(write_readings(&tree.def.out, 0, &mut bytes).unwrap(), 1);
         assert_eq!(bytes.len(), 20);
         assert!(content_hash(&tree.def.out).is_ok());
+        let path = tree.def.out.join("d1.jsonl");
+        let mut row: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        row.as_object_mut().unwrap().remove("sec");
+        std::fs::write(path, serde_json::to_string(&row).unwrap()).unwrap();
+        assert!(
+            write_readings(&tree.def.out, 0, &mut Vec::new())
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `sec`")
+        );
     }
 
     fn args(tmp: &Path, roots: &[&Path]) -> InventoryArgs {

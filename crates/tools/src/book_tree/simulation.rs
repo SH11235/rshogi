@@ -132,7 +132,7 @@ pub(super) fn simulate(samples: &[&Sample], workers: usize, timing: Timing) -> R
         }
     }
     for (tree, sample) in trees.iter().zip(samples) {
-        for key in tree.nodes.keys() {
+        for (key, _) in tree.nodes.iter().filter(|(_, node)| node.forced_move.is_none()) {
             requested.entry(key.clone()).or_default().insert(&sample.fingerprint);
         }
     }
@@ -658,7 +658,15 @@ pub(super) fn simulate_prefetch(
             }
         }
     }
-    let used: BTreeSet<_> = trees.iter().flat_map(|t| t.nodes.keys()).collect();
+    let used: BTreeSet<_> = trees
+        .iter()
+        .flat_map(|t| {
+            t.nodes
+                .iter()
+                .filter(|(_, node)| node.forced_move.is_none())
+                .map(|(key, _)| key)
+        })
+        .collect();
     for key in &used {
         waits.entry((*key).clone()).or_default();
     }
@@ -698,7 +706,12 @@ pub(super) fn preflight(sample: &mut Sample) -> Result<()> {
         missing.first().map_or("不明", |(key, _)| key.as_str()),
         missing.len()
     );
-    sample.requested = tree.nodes.into_keys().collect();
+    sample.requested = tree
+        .nodes
+        .into_iter()
+        .filter(|(_, node)| node.forced_move.is_none())
+        .map(|(key, _)| key)
+        .collect();
     Ok(())
 }
 

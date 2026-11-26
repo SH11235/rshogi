@@ -187,6 +187,7 @@ pub(super) struct Pv {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(try_from = "ReadingRecord", into = "ReadingRecord")]
 pub(super) struct Reading {
     /// エンジンの読みを持たない、木の唯一の合法手への接続。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +203,70 @@ pub(super) struct Reading {
     pub draw: BTreeMap<String, String>,
     pub multipv: Vec<Pv>,
     pub bestmove: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReadingRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forced_move: Option<String>,
+    tag: String,
+    ply: u32,
+    key: String,
+    nodes_limit: u64,
+    nodes: Option<u64>,
+    // 旧 reader と inventory が構造行を読みとして受理しないよう、必須だった欄を省く。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sec: Option<f64>,
+    threads: usize,
+    hash: u32,
+    draw: BTreeMap<String, String>,
+    multipv: Vec<Pv>,
+    bestmove: String,
+}
+
+impl From<Reading> for ReadingRecord {
+    fn from(reading: Reading) -> Self {
+        Self {
+            sec: reading.forced_move.is_none().then_some(reading.sec),
+            nodes_limit: reading.nodes_limit,
+            forced_move: reading.forced_move,
+            tag: reading.tag,
+            ply: reading.ply,
+            key: reading.key,
+            nodes: reading.nodes,
+            threads: reading.threads,
+            hash: reading.hash,
+            draw: reading.draw,
+            multipv: reading.multipv,
+            bestmove: reading.bestmove,
+        }
+    }
+}
+
+impl TryFrom<ReadingRecord> for Reading {
+    type Error = &'static str;
+
+    fn try_from(record: ReadingRecord) -> std::result::Result<Self, Self::Error> {
+        let sec = match record.sec {
+            Some(value) => value,
+            None if record.forced_move.is_some() => 0.0,
+            None => return Err("missing field `sec`"),
+        };
+        Ok(Self {
+            forced_move: record.forced_move,
+            tag: record.tag,
+            ply: record.ply,
+            key: record.key,
+            nodes_limit: record.nodes_limit,
+            nodes: record.nodes,
+            sec,
+            threads: record.threads,
+            hash: record.hash,
+            draw: record.draw,
+            multipv: record.multipv,
+            bestmove: record.bestmove,
+        })
+    }
 }
 
 impl Reading {

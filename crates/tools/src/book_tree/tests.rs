@@ -2617,10 +2617,11 @@ fn single_legal_prefetch_shadow_requests_only_the_child() {
 }
 
 #[test]
-fn single_legal_propagates_terminal_readings_without_changing_their_values() {
+fn single_legal_propagates_declaration_or_resignation_with_legal_moves() {
     let dir = tempfile::tempdir().unwrap();
     let s = settings();
     let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    assert!(!legal(&next).is_empty());
     for (best, expected) in [("win", -30000), ("resign", 0)] {
         let mut tree = single_legal_tree(dir.path(), 0, 0);
         let mut terminal = reading(&next, &[], &s);
@@ -2643,4 +2644,210 @@ fn single_legal_propagates_terminal_readings_without_changing_their_values() {
         let parsed = super::register::parse_node_moves(&text, 0, Some(&known)).unwrap();
         assert_eq!(parsed[SINGLE_LEGAL].moves[0].value_kind, "tree:1");
     }
+}
+
+#[test]
+fn single_legal_mate_is_read_at_parent() {
+    let root = "3s1K1kr/7R1/5g3/9/9/9/9/9/9 w -";
+    assert_eq!(legal(root), ["2a2b"]);
+    let end = child(root, "2a2b").unwrap();
+    assert!(legal(&end).is_empty());
+    assert!(crate::book_db::position_from_sfen(&format!("{end} 1")).unwrap().in_check());
+    assert_eq!(model::single_legal_move(root).unwrap(), None);
+    let dir = tempfile::tempdir().unwrap();
+    let params = single_legal_tree(dir.path(), 0, 0).def;
+    let mut tree = Tree::build(params, &[(root.into(), 1, vec![])]).unwrap();
+    assert_eq!(tree.advance(&BTreeMap::<String, Reading>::new()).unwrap(), [(root.into(), 0)]);
+    let answer = reading(root, &[("2a2b", 29999)], &settings());
+    assert!(tree.advance(&BTreeMap::from([(root.into(), answer)])).unwrap().is_empty());
+    assert_eq!(tree.negamax(&tree.reach(&tree.edge)).unwrap()[root]["2a2b"], 29999);
+    assert!(!tree.nodes.contains_key(&end));
+}
+
+#[test]
+fn single_legal_child_outside_multipv_keeps_game_and_extra_db_edges() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = settings();
+    let root = "8k/7R1/6K2/9/9/9/9/9/7L1 b -";
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    for game in [false, true] {
+        let mut params = single_legal_tree(dir.path(), 1, 0).def;
+        params.extra = if game { vec![] } else { vec!["2b1b".into()] };
+        let moves = if game { vec!["2b1b".into()] } else { vec![] };
+        let mut tree = Tree::build(params, &[(root.into(), 1, moves)]).unwrap();
+        let mut parent = reading(root, &[("2b2c", 10)], &s);
+        parent.multipv.truncate(1);
+        let other = child(&child(root, "2b2c").unwrap(), "1a1b").unwrap();
+        let cache = BTreeMap::from([
+            (root.into(), parent),
+            (other.clone(), reading(&other, &[(&legal(&other)[0], 100)], &s)),
+            (next.clone(), reading(&next, &[(&legal(&next)[0], 456)], &s)),
+        ]);
+        assert!(tree.advance(&cache).unwrap().is_empty());
+        assert!(tree.write_outputs().unwrap());
+        for name in ["tree.db", "tree_rule.db"] {
+            let db = crate::book_db::BookDb::read(&tree.def.out.join(name)).unwrap();
+            assert!(
+                db.entries[root]
+                    .moves
+                    .iter()
+                    .any(|row| row.move_usi.as_deref() == Some("2b1b") && row.value == 456),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn single_legal_simulations_count_only_engine_reads() {
+    use super::simulation::{
+        PrefetchOptions, Sample, Timing, preflight, simulate, simulate_prefetch,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    let answers = std::sync::Arc::new(BTreeMap::from([(
+        next.clone(),
+        reading(&next, &[(&legal(&next)[0], 456)], &settings()),
+    )]));
+    let mut samples = Vec::new();
+    for order in 0..2 {
+        let mut sample = Sample {
+            params: single_legal_tree(dir.path(), 0, 0).def,
+            lines: vec![(SINGLE_LEGAL.into(), 1, vec![])],
+            answers: answers.clone(),
+            requested: BTreeSet::new(),
+            fingerprint: format!("condition-{order}"),
+            priority: 100,
+            order,
+        };
+        preflight(&mut sample).unwrap();
+        assert_eq!(sample.requested, BTreeSet::from([next.clone()]));
+        samples.push(sample);
+    }
+    let refs = samples.iter().collect::<Vec<_>>();
+    for timing in [Timing::Maximum, Timing::Mean] {
+        let result = simulate(&refs, 2, timing).unwrap();
+        assert_eq!(result.count, 1);
+        assert_eq!(result.mixed, 1);
+        assert_eq!(result.elapsed, 0.1);
+        let result = simulate_prefetch(
+            &refs,
+            2,
+            PrefetchOptions {
+                fallback: timing,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.wait_count, 1);
+        assert_eq!(result.trees_done, 0.1);
+        assert!(result.trees.iter().all(|tree| tree.finished));
+    }
+}
+
+#[test]
+fn single_legal_structure_is_rejected_by_legacy_reader() {
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct LegacyReading {
+        pub tag: String,
+        pub ply: u32,
+        pub key: String,
+        pub nodes_limit: u64,
+        pub nodes: Option<u64>,
+        pub sec: f64,
+        pub threads: usize,
+        pub hash: u32,
+        pub draw: BTreeMap<String, String>,
+        pub multipv: Vec<Pv>,
+        pub bestmove: String,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut tree = single_legal_tree(dir.path(), 0, 0);
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    let answer = reading(&next, &[(&legal(&next)[0], 456)], &settings());
+    tree.advance(&BTreeMap::from([(next, answer.clone())])).unwrap();
+    tree.write_outputs().unwrap();
+    let structural = std::fs::read_to_string(tree.def.out.join("d0.jsonl")).unwrap();
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    struct LegacyInventoryReading {
+        key: String,
+        nodes: Option<u64>,
+        sec: f64,
+    }
+    let error = serde_json::from_str::<LegacyInventoryReading>(structural.trim()).unwrap_err();
+    assert!(error.to_string().contains("missing field `sec`"));
+    let error = serde_json::from_str::<LegacyReading>(structural.trim()).unwrap_err();
+    assert!(error.to_string().contains("missing field `sec`"));
+    let mut expected = tree.nodes[SINGLE_LEGAL].clone();
+    expected.tag = "d0_0001".into();
+    assert_eq!(serde_json::from_str::<Reading>(structural.trim()).unwrap(), expected);
+    let ordinary = serde_json::to_value(&answer).unwrap();
+    let legacy: LegacyReading = serde_json::from_value(ordinary.clone()).unwrap();
+    assert_eq!(serde_json::to_value(legacy).unwrap(), ordinary);
+    let mut broken = ordinary;
+    broken.as_object_mut().unwrap().remove("sec");
+    assert!(serde_json::from_value::<Reading>(broken).is_err());
+}
+
+#[test]
+fn single_legal_cycle_terminates_and_uses_draw_value() {
+    let root = "6R1k/9/6K1p/9/9/9/9/9/7L1 w -";
+    assert_eq!(legal(root), ["1a1b"]);
+    let moves = ["1a1b", "3a3b", "1b1a", "3b3a"];
+    let mut key = root.to_owned();
+    let mut cache = BTreeMap::new();
+    let s = settings();
+    for (i, mv) in moves.iter().enumerate() {
+        if i % 2 == 1 {
+            let mut answer = reading(&key, &[(mv, 0)], &s);
+            answer.multipv.truncate(1);
+            cache.insert(key.clone(), answer);
+        }
+        key = child(&key, mv).unwrap();
+    }
+    assert_eq!(key, root);
+    let dir = tempfile::tempdir().unwrap();
+    let mut params = single_legal_tree(dir.path(), 6, 0).def;
+    params.draw = 37;
+    let mut tree = Tree::build(params, &[(root.into(), 1, vec![])]).unwrap();
+    assert!(tree.advance(&cache).unwrap().is_empty());
+    assert!(tree.finished);
+    assert_eq!(tree.nodes.len(), 4);
+    assert_eq!(tree.reading_counts(), (2, 2));
+    assert_eq!(tree.negamax(&tree.reach(&tree.edge)).unwrap()[root]["1a1b"], -37);
+    tree.write_outputs().unwrap();
+}
+
+#[test]
+fn single_legal_settle_crosses_extension_and_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = settings();
+    let root = "8k/7R1/6K2/9/9/9/9/9/7L1 b -";
+    let next = child(SINGLE_LEGAL, "1a1b").unwrap();
+    let other = child(&child(root, "2b2c").unwrap(), "1a1b").unwrap();
+    let mut params = single_legal_tree(dir.path(), 0, 2).def;
+    params.extend_rounds = 0;
+    params.settle_rounds = 1;
+    let lines = vec![(root.into(), 1, vec!["2b1b".into()])];
+    let mut tree = Tree::build(params.clone(), &lines).unwrap();
+    let mut parent = reading(root, &[("2b2c", 10), ("2b1b", 0)], &s);
+    parent.multipv.truncate(2);
+    let mut cache = BTreeMap::from([
+        (root.into(), parent),
+        (other.clone(), reading(&other, &[(&legal(&other)[0], -600)], &s)),
+    ]);
+    assert_eq!(tree.advance(&cache).unwrap(), [(next.clone(), 2)]);
+    assert_eq!(tree.settle_rounds_used, 1);
+    assert_eq!(tree.nodes[SINGLE_LEGAL].forced_move.as_deref(), Some("1a1b"));
+    assert_eq!(tree.level[SINGLE_LEGAL], 1);
+    assert_eq!(tree.advance(&cache).unwrap(), [(next.clone(), 2)]);
+    cache.insert(next.clone(), reading(&next, &[(&legal(&next)[0], 456)], &s));
+    assert!(tree.advance(&cache).unwrap().is_empty());
+    assert!(tree.finished);
+    let mut replay = Tree::build(params, &lines).unwrap();
+    assert!(replay.advance(&cache).unwrap().is_empty());
+    assert_eq!(tree.edge, replay.edge);
+    assert_eq!(tree.negamax(&tree.reach(&tree.edge)).unwrap()[root]["2b1b"], 456);
+    assert_eq!(replay.settle_rounds_used, 1);
 }
