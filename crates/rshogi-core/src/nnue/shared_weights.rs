@@ -40,6 +40,21 @@ pub(crate) unsafe fn release(map_base: *mut libc::c_void, map_len: usize) {
     unsafe { linux::release(map_base, map_len) };
 }
 
+/// プロセスを終える前に呼ぶ。共有している重みの印を全部手放し、他に使うプロセスが
+/// 居ない共有メモリの名前を消す。重みは static に置かれて終了時に Drop されないため、
+/// 呼ばないと名前は、後から起動したプロセスの掃除が消すまで残る。
+///
+/// - 対象は呼んだ時点で共有している重みだけ。重みを新しく読み込む処理が終わった後
+///   （終了の直前）に呼ぶ。
+/// - 名前を消すのは最善の努力で、他プロセスが作る・繋ぐ最中で lock が取れないときは残す
+///   （後から起動したプロセスの掃除が、消すのを試し直す）。
+/// - マッピングは外さないので、呼んだ後も読み込み済みの重みは読める。
+/// - Linux 以外では何もしない。
+pub fn release_shared_weights_at_exit() {
+    #[cfg(target_os = "linux")]
+    linux::release_all_at_exit();
+}
+
 /// キルスイッチ環境変数。`0` / `off` / `false` で共有を無効化する。
 /// 参照は Linux 実装のみのため、他ターゲットでは dead_code になる（cfg で除外）。
 #[cfg(target_os = "linux")]
@@ -269,21 +284,48 @@ mod linux {
         // この領域へアクセスしない。munmap 失敗は無視（プロセス終了時に OS が回収するため
         // 実害なし）。
         unsafe { libc::munmap(base, len) };
-        let Some((_, fd, name)) = entry else {
-            return;
-        };
+        if let Some((_, fd, name)) = entry {
+            give_up_use(fd, &name);
+        }
+    }
+
+    /// プロセスの終わりに、まだ使っている印を全部手放す。重みは static に置かれて終了時に
+    /// Drop されないので、普通の終了でも名前を消すために呼ぶ。マッピングは外さない
+    /// （他のスレッドが読んでいても、名前を消して fd を閉じるだけなので読み続けられる）。
+    pub(super) fn release_all_at_exit() {
+        let entries =
+            std::mem::take(&mut *IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        for (_, fd, name) in entries {
+            give_up_use(fd, &name);
+        }
+    }
+
+    /// 使っている印を手放す。最後の利用者なら名前を消し、fd を閉じる。
+    ///
+    /// lock は close の前に明示して外す。マッピングが残っている間は、mmap が同じ open file
+    /// description を持ち続けるので、close だけでは flock も OFD lock も外れない
+    /// （終わりの手放しはマッピングを外さない）。
+    fn give_up_use(fd: libc::c_int, name: &CString) {
+        let mut locked = false;
         for attempt in 0..RELEASE_LOCK_ATTEMPTS {
             if try_flock_exclusive(fd) {
-                unlink_if_unused_locked(fd, &name);
+                locked = true;
                 break;
             }
             if attempt + 1 < RELEASE_LOCK_ATTEMPTS {
                 std::thread::sleep(RELEASE_LOCK_SLEEP);
             }
         }
-        // SAFETY: fd は IN_USE から取り出した、この値だけが持つ有効な fd。close で flock と
-        // 使っている印も外れる。
-        unsafe { libc::close(fd) };
+        if locked {
+            unlink_if_unused_locked(fd, name);
+        }
+        ofd_lock(fd, libc::F_UNLCK);
+        // SAFETY: fd は IN_USE から取り出した、この値だけが持つ有効な fd。flock は未取得でも
+        // LOCK_UN は無害。
+        unsafe {
+            libc::flock(fd, libc::LOCK_UN);
+            libc::close(fd);
+        }
     }
 
     /// create-or-attach の成功結果。
