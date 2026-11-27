@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager, nullcontext
@@ -55,6 +56,8 @@ _OPTIONAL_SETTINGS = {
     "ema_decay": 0.999,
     "sgd_momentum": 0.0,
     "sgd_nesterov": False,
+    "checkpoint_keep_latest": None,
+    "checkpoint_pin_steps": (),
 }
 _OPTIMIZERS = ("adamw", "nadam", "sgd", "muon", "batched-muon")
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs")
@@ -71,7 +74,8 @@ class TrainingError(RuntimeError):
 class TrainerConfig:
     """max_steps は AMP skip を含む有限の更新試行数。
 
-    再開で変更できるのは総試行数、保存・記録間隔と入力先読み。他の設定は更新列・評価条件を固定する。
+    再開で変更できるのは総試行数、保存・保持・記録の設定と入力先読み。
+    他の設定は更新列・評価条件を固定する。
     """
 
     max_steps: int
@@ -126,6 +130,8 @@ class TrainerConfig:
     ema_decay: float = 0.999
     sgd_momentum: float = 0.0
     sgd_nesterov: bool = False
+    checkpoint_keep_latest: int | None = None
+    checkpoint_pin_steps: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         limits = {
@@ -293,8 +299,24 @@ class TrainerConfig:
             raise ValueError("CUDA Graph execution requires CUDA, BF16 and fused AdamW")
         if self.device == "cpu" and self.compile_mode in _CUDAGRAPH_MODES:
             raise ValueError("CUDA graph compile modes require a CUDA device")
-        if self.checkpoint_every and self.max_steps // self.checkpoint_every > 8:
+        if self.checkpoint_keep_latest is not None:
+            if type(self.checkpoint_keep_latest) is not int or self.checkpoint_keep_latest < 1:
+                raise ValueError("checkpoint_keep_latest must be a positive integer")
+            if not self.checkpoint_every:
+                raise ValueError("checkpoint_keep_latest requires checkpoint_every")
+        elif self.checkpoint_every and self.max_steps // self.checkpoint_every > 8:
             raise ValueError("at most eight intermediate checkpoints per run are allowed")
+        if type(self.checkpoint_pin_steps) is not tuple:
+            raise ValueError("checkpoint_pin_steps must be a tuple")
+        if self.checkpoint_pin_steps and self.checkpoint_keep_latest is None:
+            raise ValueError("checkpoint_pin_steps requires checkpoint_keep_latest")
+        if any(
+            type(step) is not int or not 0 < step < self.max_steps or step % self.checkpoint_every
+            for step in self.checkpoint_pin_steps
+        ):
+            raise ValueError("pinned checkpoint steps must be checkpoint_every multiples below max_steps")
+        if len(set(self.checkpoint_pin_steps)) != len(self.checkpoint_pin_steps):
+            raise ValueError("pinned checkpoint steps must be unique")
 
 
 def _config_dict(config: TrainerConfig) -> dict:
@@ -324,7 +346,10 @@ def _config_dict(config: TrainerConfig) -> dict:
 def _identity(config: TrainerConfig) -> dict:
     return {
         name: value for name, value in _config_dict(config).items()
-        if name not in ("max_steps", "checkpoint_every", "log_every", "prefetch_input")
+        if name not in (
+            "max_steps", "checkpoint_every", "checkpoint_keep_latest", "checkpoint_pin_steps",
+            "log_every", "prefetch_input",
+        )
     }
 
 
@@ -836,6 +861,8 @@ def run_training(
         rolling = torch.zeros(3, device=device)
         rolling_steps = 0
         finite = torch.ones((), dtype=torch.bool, device=device)
+        recent_checkpoints: deque[tuple[int, Path]] = deque()
+        pinned_steps = set(config.checkpoint_pin_steps)
 
         weighted_loss = (config.policy_loss_weight, config.value_loss_weight) != (1.0, 1.0)
         entropy_weight = config.policy_loss_weight * config.policy_entropy_weight
@@ -982,10 +1009,16 @@ def run_training(
                     if any(not bool(torch.isfinite(parameter).all()) for parameter in model.parameters()):
                         raise TrainingError("non-finite model parameters at checkpoint")
                     _check_optimizer(optimizer, model, progress)
-                    _checkpoint(
-                        output / f"resume-{progress['step']:010d}.pt",
-                        model, optimizer, scaler, config, datasets, progress, average,
-                    )
+                    step = progress["step"]
+                    path = output / f"resume-{step:010d}.pt"
+                    _checkpoint(path, model, optimizer, scaler, config, datasets, progress, average)
+                    if config.checkpoint_keep_latest is not None:
+                        recent_checkpoints.append((step, path))
+                        if len(recent_checkpoints) > config.checkpoint_keep_latest:
+                            oldest_step, oldest_path = recent_checkpoints.popleft()
+                            if oldest_step not in pinned_steps:
+                                oldest_path.unlink()
+                                sync_directory(output)
         _sync(device)
         training_seconds = time.perf_counter() - started
         if graph is not None:
@@ -1095,10 +1128,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--validation-only", action="store_true")
     parser.add_argument("--validation-batches", type=int, default=32, help="0 で全 held-out dataset")
     parser.add_argument("--checkpoint-every", type=int, default=0)
+    parser.add_argument("--checkpoint-keep-latest", type=int, help="保持する直近の中間 checkpoint 数")
+    parser.add_argument(
+        "--checkpoint-pin-step", dest="checkpoint_pin_steps", action="append", type=int,
+        help="直近の範囲を外れても保持する中間 checkpoint の試行数（複数指定可）",
+    )
     parser.add_argument("--log-every", type=int, default=100)
     args = parser.parse_args(argv)
     try:
         options = {field.name: getattr(args, field.name) for field in fields(TrainerConfig)}
+        options["checkpoint_pin_steps"] = tuple(args.checkpoint_pin_steps or ())
         config = TrainerConfig(**options)
         model_config = (
             ModelConfig.from_dict(json.loads(args.model_config))
