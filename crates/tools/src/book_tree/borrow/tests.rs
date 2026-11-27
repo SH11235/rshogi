@@ -235,6 +235,7 @@ fn reading(key: &str, rows: &[(&str, i32)], s: &Settings) -> Reading {
         })
         .collect();
     Reading {
+        skipped: None,
         forced_move: None,
         tag: "t".into(),
         ply: 1,
@@ -832,6 +833,7 @@ fn cut_and_value_run_end_to_end_and_register_ext_rows() {
     // キューの行は段 0 で、手番ごとに読む局面すべてを根に持つ。台帳の読みだけで木が終わる。
     let queue = std::fs::read_to_string(d.join("cut/targets.jsonl")).unwrap();
     let defaults = Defaults {
+        skip: None,
         opp_n: 2,
         stop: 300,
         rounds: 3,

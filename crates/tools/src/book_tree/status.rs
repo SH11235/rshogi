@@ -725,6 +725,7 @@ mod tests {
                 .bytes(),
         );
         let defaults = Defaults {
+            skip: None,
             multipv: 3,
             nodes: 100,
             opp_n: 1,

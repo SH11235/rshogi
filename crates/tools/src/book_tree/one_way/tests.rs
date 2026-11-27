@@ -27,6 +27,7 @@ fn reading(key: &str, mv: &str, cp: i32, second: Option<i32>) -> Reading {
         });
     }
     Reading {
+        skipped: None,
         forced_move: None,
         tag: "fixture".into(),
         ply: 1,

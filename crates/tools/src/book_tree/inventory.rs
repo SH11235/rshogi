@@ -63,6 +63,8 @@ struct ExcludedLine {
 struct ReadingLine {
     #[serde(default)]
     forced_move: Option<String>,
+    #[serde(default)]
+    skipped: Option<super::journal::Skipped>,
     key: String,
     nodes: Option<u64>,
     sec: Option<f64>,
@@ -400,7 +402,7 @@ fn write_readings(dir: &Path, index: u32, out: &mut impl Write) -> Result<usize>
         for (line_index, line) in BufReader::new(file).lines().enumerate() {
             let row: ReadingLine = serde_json::from_str(&line?)
                 .with_context(|| format!("{}:{}", path.display(), line_index + 1))?;
-            if row.forced_move.is_some() {
+            if row.forced_move.is_some() || row.skipped.is_some() {
                 continue;
             }
             let sec = row.sec.with_context(|| {
@@ -526,6 +528,23 @@ mod tests {
         std::fs::write(dir.join("d1.jsonl"), format!("{}\n", reading("other", 1001, "1.5")))
             .unwrap();
         dir
+    }
+
+    #[test]
+    fn shallow_skip_structure_is_not_counted_as_a_reading() {
+        use crate::book_tree::tests::{reading, skip_fixture};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
+        let next = crate::book_tree::model::child(&key, "5a4a").unwrap();
+        journal
+            .append(reading(&next, &[("4i4h", 456)], &settings), &settings, "engine".into())
+            .unwrap();
+        tree.advance(&journal).unwrap();
+        assert!(tree.write_outputs().unwrap());
+        let mut bytes = Vec::new();
+        assert_eq!(write_readings(&tree.def.out, 0, &mut bytes).unwrap(), 2);
+        assert_eq!(bytes.len(), 40);
+        assert!(content_hash(&tree.def.out).is_ok());
     }
 
     #[test]

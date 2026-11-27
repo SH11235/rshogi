@@ -237,7 +237,7 @@ pub(super) fn run(args: RegisterArgs) -> Result<()> {
         let known_nodes = tree_readings.iter().map(|r| r.key.clone()).collect();
         let mut parsed =
             parse_node_moves(&text, tree, (!tree_readings.is_empty()).then_some(&known_nodes))?;
-        tree_readings.retain(|reading| reading.forced_move.is_none());
+        tree_readings.retain(|reading| reading.structural_move().is_none());
         let matching =
             fingerprint.is_none() && !args.journal.is_empty() && !tree_readings.is_empty();
         if let Some(fp) = &fingerprint {
@@ -1246,7 +1246,7 @@ pub(super) fn reading_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn tree_readings(dir: &Path) -> Result<Vec<super::journal::Reading>> {
+pub(super) fn tree_readings(dir: &Path) -> Result<Vec<super::journal::Reading>> {
     use std::io::BufRead;
     let mut readings = Vec::new();
     for path in reading_files(dir)? {
@@ -2581,6 +2581,29 @@ mod tests {
     }
 
     #[test]
+    fn shallow_skip_registration_uses_propagated_value() {
+        use crate::book_tree::tests::{reading, skip_fixture};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
+        let next = child(&key, "5a4a").unwrap();
+        journal
+            .append(reading(&next, &[("4i4h", 456)], &settings), &settings, "engine".into())
+            .unwrap();
+        tree.advance(&journal).unwrap();
+        assert!(tree.write_outputs().unwrap());
+        let text = std::fs::read_to_string(tree.def.out.join(NODE_MOVES)).unwrap();
+        let known = tree.nodes.keys().cloned().collect();
+        let mut nodes = parse_node_moves(&text, 0, Some(&known)).unwrap();
+        move_cond::assign(&mut nodes, &BTreeMap::from([(next, "child".into())])).unwrap();
+        let (rows, _, _) = register(vec![], &nodes, &options()).unwrap();
+        let row = find(&rows, &key, "5a4a").unwrap();
+        assert_eq!(
+            (row.get("evals"), row.get("value_kind"), row.get("nodes"), row.get("cond")),
+            ("-456", "tree:1", "0", "child")
+        );
+    }
+
+    #[test]
     fn expanded_and_metadata_changes_are_registered_without_value_changes() {
         const B: &str = "4k4/9/9/9/9/9/9/9/4K4 b -";
         let white = child(B, "5i4i").unwrap();
@@ -2765,6 +2788,7 @@ mod tests {
         second.engine_sha256 = "another".into();
         second.fingerprint = second.computed_fingerprint().unwrap();
         let reading = |key: &str, ply, moves: &[(&str, i32)]| Reading {
+            skipped: None,
             forced_move: None,
             tag: "test".into(),
             ply,
@@ -2927,6 +2951,7 @@ mod tests {
         })
         .unwrap();
         let mut reading = Reading {
+            skipped: None,
             forced_move: None,
             tag: "test".into(),
             ply: 1,

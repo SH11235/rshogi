@@ -45,6 +45,9 @@ impl Tree {
             "draw_black": self.def.draw_black.unwrap_or(self.def.draw),
             "draw_white": self.def.draw_white.unwrap_or(self.def.draw),
         });
+        if let Some(skip) = self.def.skip {
+            status["skip"] = json!(skip);
+        }
         if self.def.settle_rounds > 0 {
             status["settle_rounds_used"] = json!(self.settle_rounds_used);
             status["unsettled"] = json!(super::lines::unsettled(self)?);
@@ -161,7 +164,7 @@ impl Tree {
                 let n = self
                     .reach_from(vec![c.clone()], &self.edge)
                     .iter()
-                    .filter(|k| self.nodes[*k].forced_move.is_none())
+                    .filter(|k| self.nodes[*k].structural_move().is_none())
                     .count();
                 let game = if self.game.get(key).is_some_and(|g| g.contains(mv)) {
                     "○"
@@ -170,7 +173,9 @@ impl Tree {
                 };
                 let read = raw.get(mv).map_or_else(
                     || {
-                        if self.nodes[key].forced_move.is_some() {
+                        if self.nodes[key].skipped.is_some() {
+                            "短い読みで選択 (本読みなし)".into()
+                        } else if self.nodes[key].forced_move.is_some() {
                             "唯一の合法手 (読みなし)".into()
                         } else {
                             "MultiPV の外".into()
@@ -216,7 +221,8 @@ impl Tree {
         let mut own_rows = Vec::new();
         for key in self.reach(&self.edge) {
             if side(&key) != self.def.own
-                || (self.nodes[&key].lines().is_empty() && self.nodes[&key].forced_move.is_none())
+                || (self.nodes[&key].lines().is_empty()
+                    && self.nodes[&key].structural_move().is_none())
             {
                 continue;
             }
@@ -275,7 +281,7 @@ impl Tree {
         writeln!(
             report,
             "\n読んだ局面 {} | 規則の枝だけで届く局面 {} | こちらの手番で伸ばした局面 {} (うち実戦の手の下 {under}、own_nodes.tsv)",
-            self.nodes.values().filter(|node| node.forced_move.is_none()).count(),
+            self.nodes.values().filter(|node| node.structural_move().is_none()).count(),
             rule_set.len(),
             own_rows.len()
         )?;
@@ -296,7 +302,7 @@ impl Tree {
         let mut text = format!("{NODE_MOVES_HEADER}\n");
         for key in self.reach(&self.edge) {
             let reading = &self.nodes[&key];
-            if reading.lines().is_empty() && reading.forced_move.is_none() {
+            if reading.lines().is_empty() && reading.structural_move().is_none() {
                 continue;
             }
             let values = rows_for(replace, &key)?;
@@ -327,7 +333,7 @@ impl Tree {
     ) -> Result<()> {
         let mut db = format!("{BOOK_HEADER}\n");
         for key in nodes {
-            let mut rows = if self.nodes[key].forced_move.is_some() {
+            let mut rows = if self.nodes[key].structural_move().is_some() {
                 values[key].clone()
             } else {
                 self.raw_rows(key)
@@ -336,7 +342,7 @@ impl Tree {
                 let c = child(key, mv)?;
                 if !rows.contains_key(mv)
                     && let Some(value) = self.nodes.get(&c).and_then(|node| {
-                        if node.forced_move.is_some() {
+                        if node.structural_move().is_some() {
                             values.get(&c)?.values().copied().max()
                         } else {
                             node.lines().first().map(|pv| pv.cp)

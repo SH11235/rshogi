@@ -23,7 +23,11 @@ pub(super) struct Sample {
 
 impl Sample {
     fn tree(&self) -> Result<Tree> {
-        Tree::build(self.params.clone(), &self.lines)
+        let mut params = self.params.clone();
+        // 条件別台帳から確定した構造を再生し、構造行を engine の読みとして配布しない。
+        params.skip = None;
+        params.require_condition = false;
+        Tree::build(params, &self.lines)
     }
 }
 
@@ -67,7 +71,17 @@ pub(super) fn simulate(samples: &[&Sample], workers: usize, timing: Timing) -> R
         }
     }
     let mut trees = samples.iter().map(|s| s.tree()).collect::<Result<Vec<_>>>()?;
-    let mut delivered = vec![BTreeMap::new(); samples.len()];
+    let mut delivered: Vec<BTreeMap<String, Reading>> = samples
+        .iter()
+        .map(|sample| {
+            sample
+                .answers
+                .iter()
+                .filter(|(_, reading)| reading.structural_move().is_some())
+                .map(|(key, reading)| (key.clone(), reading.clone()))
+                .collect()
+        })
+        .collect();
     let mut completed = BTreeSet::new();
     let mut running = BTreeMap::<String, f64>::new();
     let mut requested = BTreeMap::<String, BTreeSet<&str>>::new();
@@ -132,7 +146,7 @@ pub(super) fn simulate(samples: &[&Sample], workers: usize, timing: Timing) -> R
         }
     }
     for (tree, sample) in trees.iter().zip(samples) {
-        for (key, _) in tree.nodes.iter().filter(|(_, node)| node.forced_move.is_none()) {
+        for (key, _) in tree.nodes.iter().filter(|(_, node)| node.structural_move().is_none()) {
             requested.entry(key.clone()).or_default().insert(&sample.fingerprint);
         }
     }
@@ -370,7 +384,17 @@ pub(super) fn simulate_prefetch(
         Timing::Maximum => durations.values().copied().fold(0.0, f64::max),
     };
     let mut trees = samples.iter().map(|s| s.tree()).collect::<Result<Vec<_>>>()?;
-    let mut delivered = vec![BTreeMap::new(); samples.len()];
+    let mut delivered: Vec<BTreeMap<String, Reading>> = samples
+        .iter()
+        .map(|sample| {
+            sample
+                .answers
+                .iter()
+                .filter(|(_, reading)| reading.structural_move().is_some())
+                .map(|(key, reading)| (key.clone(), reading.clone()))
+                .collect()
+        })
+        .collect();
     let mut shadows: Vec<_> = samples
         .iter()
         .map(|_| ShadowCache {
@@ -663,7 +687,7 @@ pub(super) fn simulate_prefetch(
         .flat_map(|t| {
             t.nodes
                 .iter()
-                .filter(|(_, node)| node.forced_move.is_none())
+                .filter(|(_, node)| node.structural_move().is_none())
                 .map(|(key, _)| key)
         })
         .collect();
@@ -709,7 +733,7 @@ pub(super) fn preflight(sample: &mut Sample) -> Result<()> {
     sample.requested = tree
         .nodes
         .into_iter()
-        .filter(|(_, node)| node.forced_move.is_none())
+        .filter(|(_, node)| node.structural_move().is_none())
         .map(|(key, _)| key)
         .collect();
     Ok(())
@@ -765,10 +789,18 @@ fn load_sample(
         .checked_mul(1u64 << 32)
         .context("state 数が範囲外")?;
     ensure!(target.order < 1u64 << 32, "受付順が範囲外");
+    let mut answers = sources[&source_key].clone();
+    if target.definition.skip.is_some() {
+        for reading in super::register::tree_readings(&target.out)? {
+            if reading.skipped.is_some() {
+                Arc::make_mut(&mut answers).insert(reading.key.clone(), reading);
+            }
+        }
+    }
     Ok(Sample {
         params: target.definition.params(&target.own, &target.out),
         lines: target.definition.lines(),
-        answers: sources[&source_key].clone(),
+        answers,
         requested: BTreeSet::new(),
         fingerprint: checkpoint.fingerprint,
         priority: target.priority,

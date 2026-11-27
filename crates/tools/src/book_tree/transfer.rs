@@ -642,6 +642,7 @@ mod tests {
             n => format!("{n}K{}", 8 - n),
         };
         Reading {
+            skipped: None,
             forced_move: None,
             tag: "fixture".into(),
             ply: 1,

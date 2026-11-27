@@ -203,6 +203,7 @@ fn check_range<T: PartialOrd + std::fmt::Display>(name: &str, v: T, lo: T, hi: T
 /// serve の既定 (`--opp-n` など)。行の書かない項目をこれで解決する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Defaults {
+    pub skip: Option<super::model::Skip>,
     pub multipv: usize,
     pub nodes: u64,
     pub opp_n: usize,
@@ -278,6 +279,11 @@ impl Line {
     pub fn resolve(&self, root: &Root, defaults: &Defaults) -> Result<Resolved> {
         let extend = self.opts.extend.unwrap_or(defaults.extend);
         Ok(Resolved {
+            skip: if self.depth == 0 && extend == 0 {
+                None
+            } else {
+                defaults.skip
+            },
             key: root.key.clone(),
             ply: root.ply,
             roots: self
@@ -288,7 +294,7 @@ impl Line {
             depth: self.depth,
             multipv: self.opts.multipv,
             nodes: self.opts.nodes,
-            require_condition: self.opts.require_condition,
+            require_condition: self.opts.require_condition || defaults.skip.is_some(),
             opp_n: self.opts.opp_n.unwrap_or(defaults.opp_n),
             stop: self.opts.stop.unwrap_or(defaults.stop),
             rounds: self.opts.rounds.unwrap_or(defaults.rounds),
@@ -313,6 +319,8 @@ impl Line {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Resolved {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip: Option<super::model::Skip>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipv: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,6 +353,7 @@ pub(super) struct Resolved {
 impl Resolved {
     pub fn params(&self, own: &str, out: &Path) -> TreeParams {
         TreeParams {
+            skip: self.skip,
             out: out.to_owned(),
             multipv: self.multipv,
             nodes: self.nodes,
@@ -709,6 +718,7 @@ mod condition_tests {
     #[test]
     fn extend_range_defaults_and_roundtrip() {
         let defaults = Defaults {
+            skip: None,
             multipv: 3,
             nodes: 100,
             opp_n: 2,
@@ -744,6 +754,7 @@ mod condition_tests {
         assert!(line.check().is_err());
         assert!(
             Defaults {
+                skip: None,
                 extend: 201,
                 ..defaults
             }
@@ -756,6 +767,7 @@ mod condition_tests {
     #[test]
     fn settle_rounds_validation_and_zero_preserves_resolved_bytes() {
         let defaults = Defaults {
+            skip: None,
             multipv: 3,
             nodes: 100,
             opp_n: 2,
@@ -779,6 +791,7 @@ mod condition_tests {
             assert_eq!(line.check().is_ok(), rounds <= 50);
             assert_eq!(
                 Defaults {
+                    skip: None,
                     settle_rounds: rounds,
                     ..defaults
                 }
@@ -802,6 +815,7 @@ mod condition_tests {
     #[test]
     fn extend_rounds_range_defaults_and_roundtrip() {
         let defaults = Defaults {
+            skip: None,
             multipv: 3,
             nodes: 100,
             opp_n: 2,
@@ -821,6 +835,7 @@ mod condition_tests {
             line.resolve(
                 &root,
                 &Defaults {
+                    skip: None,
                     extend_rounds: 4,
                     ..defaults
                 }
@@ -851,6 +866,7 @@ mod condition_tests {
         assert!(line.check().is_err());
         assert!(
             Defaults {
+                skip: None,
                 extend_rounds: 11,
                 ..defaults
             }
@@ -863,6 +879,7 @@ mod condition_tests {
     #[test]
     fn per_tree_condition_options_resolve_and_validate() {
         let defaults = Defaults {
+            skip: None,
             multipv: 3,
             nodes: 100,
             opp_n: 1,

@@ -189,6 +189,7 @@ pub(super) struct Pv {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(try_from = "ReadingRecord", into = "ReadingRecord")]
 pub(super) struct Reading {
+    pub skipped: Option<Box<Skipped>>,
     /// エンジンの読みを持たない、木の唯一の合法手への接続。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forced_move: Option<String>,
@@ -205,8 +206,16 @@ pub(super) struct Reading {
     pub bestmove: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct Skipped {
+    pub multipv: [Pv; 2],
+    pub gap: i64,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ReadingRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skipped: Option<Box<Skipped>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forced_move: Option<String>,
     tag: String,
@@ -227,7 +236,8 @@ struct ReadingRecord {
 impl From<Reading> for ReadingRecord {
     fn from(reading: Reading) -> Self {
         Self {
-            sec: reading.forced_move.is_none().then_some(reading.sec),
+            sec: reading.structural_move().is_none().then_some(reading.sec),
+            skipped: reading.skipped,
             nodes_limit: reading.nodes_limit,
             forced_move: reading.forced_move,
             tag: reading.tag,
@@ -249,10 +259,11 @@ impl TryFrom<ReadingRecord> for Reading {
     fn try_from(record: ReadingRecord) -> std::result::Result<Self, Self::Error> {
         let sec = match record.sec {
             Some(value) => value,
-            None if record.forced_move.is_some() => 0.0,
+            None if record.forced_move.is_some() || record.skipped.is_some() => 0.0,
             None => return Err("missing field `sec`"),
         };
         Ok(Self {
+            skipped: record.skipped,
             forced_move: record.forced_move,
             tag: record.tag,
             ply: record.ply,
@@ -270,6 +281,13 @@ impl TryFrom<ReadingRecord> for Reading {
 }
 
 impl Reading {
+    /// 子の伝播値で評価する構造行の代表手。
+    pub fn structural_move(&self) -> Option<&str> {
+        self.forced_move
+            .as_deref()
+            .or_else(|| self.skipped.as_ref().map(|s| s.multipv[0].mv.as_str()))
+    }
+
     pub fn lines(&self) -> &[Pv] {
         if self.bestmove == "win" {
             &[]
@@ -279,7 +297,7 @@ impl Reading {
     }
 
     pub fn validate(&self, settings: &Settings) -> Result<()> {
-        if self.forced_move.is_some() {
+        if self.structural_move().is_some() {
             bail!("唯一手の接続は台帳の読みではありません: {}", self.key);
         }
         if self.nodes_limit != settings.nodes
@@ -1592,6 +1610,7 @@ mod tests {
             engine_version: None,
         };
         let reading = Reading {
+            skipped: None,
             forced_move: None,
             tag: "fixture".into(),
             ply: 1,
