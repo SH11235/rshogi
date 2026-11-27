@@ -325,6 +325,7 @@ impl Reading {
             || self.threads != settings.threads()?
             || self.hash != settings.hash
             || self.draw != settings.draw()
+            || self.is_shallow() != settings.shallow
         {
             bail!("宣言と読みの条件が矛盾します: {}", self.key);
         }
@@ -2061,7 +2062,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("journal");
         let mut rec = record("", 0);
-        rec.settings.fingerprint = rec.settings.computed_fingerprint().unwrap();
+        rec.settings = rec.settings.for_shallow(rec.settings.nodes).unwrap();
         rec.reading.tag = "serve:shallow".into();
         rec.provenance = "engine".into();
         let key = rec.reading.key.clone();
@@ -2092,6 +2093,33 @@ mod tests {
             .unwrap();
         assert!(imported.get(&key).is_none());
         assert!(imported.shallow(&key, &fp).is_some());
+    }
+
+    #[test]
+    fn load_rejects_rows_with_mismatched_shallow_settings_and_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut unmarked = record("", 0);
+        unmarked.settings = unmarked.settings.for_shallow(unmarked.settings.nodes).unwrap();
+        unmarked.reading.tag = "serve".into();
+        let mut marked = record("", 1);
+        marked.settings.fingerprint = marked.settings.computed_fingerprint().unwrap();
+        marked.reading.tag = "serve:shallow".into();
+        let mut file = File::create(&path).unwrap();
+        for rec in [&unmarked, &marked] {
+            write_record(&mut file, rec);
+        }
+        drop(file);
+
+        let journal = Journal::open(&path, &marked.settings.fingerprint).unwrap();
+        for rec in [&unmarked, &marked] {
+            let key = &rec.reading.key;
+            let fp = &rec.settings.fingerprint;
+            assert!(journal.get(key).is_none());
+            assert!(journal.get_exact(key, fp).is_none());
+            assert!(journal.shallow(key, fp).is_none());
+            assert_eq!(journal.skipped_rows[fp].invalid, 1);
+        }
     }
 
     #[test]
