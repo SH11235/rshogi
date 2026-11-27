@@ -265,9 +265,13 @@ impl Report<'_> {
         let cap = depth.checked_add(extend).context("延長段数の上限")?;
         let mandatory_children: BTreeSet<_> = readings
             .values()
-            .filter_map(|parent| {
-                let mv = parent.forced_move.as_ref()?;
-                Some(child(&parent.key, mv).map(|key| (key, levels[&parent.key] + 1)))
+            .filter(|parent| parent.structural_move().is_some())
+            .flat_map(|parent| {
+                expanded
+                    .get(&parent.key)
+                    .into_iter()
+                    .flatten()
+                    .map(|mv| child(&parent.key, mv).map(|key| (key, levels[&parent.key] + 1)))
             })
             .collect::<Result<_>>()?;
         ensure!(
@@ -339,7 +343,7 @@ impl Report<'_> {
             let first = reading.lines().first();
             let chosen = match follow {
                 Follow::FirstRead => {
-                    reading.forced_move.as_deref().or_else(|| first.map(|pv| pv.mv.as_str()))
+                    reading.structural_move().or_else(|| first.map(|pv| pv.mv.as_str()))
                 }
                 Follow::Propagated => position.best.as_deref(),
             };

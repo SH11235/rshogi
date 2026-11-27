@@ -118,6 +118,12 @@ fn parse_accepted_fingerprint(value: &str) -> std::result::Result<String, String
 
 #[derive(Args, Debug)]
 struct ServeArgs {
+    /// 短い読みの上位 2 手の差がこの値以上なら本読みを省く
+    #[arg(long, value_parser = clap::value_parser!(i32).range(0..))]
+    skip_gap: Option<i32>,
+    #[arg(long, default_value_t = 1_000_000, value_parser = clap::value_parser!(u64).range(1..))]
+    skip_nodes: u64,
+
     /// 互換用の非推奨オプション (動作に影響しない)
     #[arg(long, value_name = "FP", value_parser = parse_accepted_fingerprint)]
     accept_fingerprint: Vec<String>,
@@ -292,6 +298,12 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
             paths::reject_collisions(&args.journal, None, &[&definition])?;
+            if definition.skip.is_none()
+                && definition.out.is_dir()
+                && register::tree_readings(&definition.out)?.iter().any(|r| r.skipped.is_some())
+            {
+                anyhow::bail!("出力に skipped 構造行があります。replay 定義に skip が必要です");
+            }
             // tree.lock を先に取る。後から起動した serve はこの dir を用意する前に tree.lock を見る。
             let output_lock = journal::LockedFile::open(&definition.out.join("tree.lock"))?;
             let root_locks = paths::lock_serve_roots(&definition.out)?;
@@ -300,8 +312,15 @@ pub fn run(args: TreeArgs) -> Result<()> {
             model::remove_candidates(&definition.out)?;
             let out = definition.out.clone();
             let result = (|| -> Result<bool> {
-                let (journal, settings) =
-                    Journal::select(journal_lock, args.fingerprint.as_deref())?;
+                let (journal, settings) = Journal::select(
+                    journal_lock,
+                    args.fingerprint.as_deref().or_else(|| {
+                        definition.skip.as_ref().and(definition.fingerprint.as_deref())
+                    }),
+                )?;
+                if definition.skip.is_some() && settings.is_none() {
+                    anyhow::bail!("skip を使う replay は本読みの fingerprint を指定してください");
+                }
                 let mut tree = Tree::load(definition, settings.as_ref())?;
                 tree.def.preferred_fingerprint =
                     args.fingerprint.clone().or(tree.def.preferred_fingerprint);

@@ -174,10 +174,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(mid_nodes) = mid.take() {
                     for (index, row) in rows.iter().enumerate() {
                         let fields: Vec<_> = row.split_whitespace().collect();
+                        let (kind, score) = fields[1].split_once(':').unwrap_or(("cp", fields[1]));
                         println!(
-                            "info depth 5 nodes {mid_nodes} multipv {} score cp {} pv {}",
+                            "info depth 5 nodes {mid_nodes} multipv {} score {kind} {} pv {}",
                             index + 1,
-                            fields[1],
+                            score,
                             fields[0]
                         );
                     }
@@ -205,11 +206,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             for (index, row) in rows.iter().enumerate() {
                 let fields: Vec<_> = row.split_whitespace().collect();
+                let (kind, score) = fields[1].split_once(':').unwrap_or(("cp", fields[1]));
                 println!(
-                    "info depth {} {node_field} multipv {} score cp {} pv {}",
+                    "info depth {} {node_field} multipv {} score {kind} {} pv {}",
                     fields[2],
                     index + 1,
-                    fields[1],
+                    score,
                     fields[0]
                 );
             }

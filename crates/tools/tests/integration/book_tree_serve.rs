@@ -62,7 +62,17 @@ fn prepare_config(config: &Path) -> std::path::PathBuf {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|r| format!("{} {} {}", r["move"].as_str().unwrap(), r["cp"], r["depth"]))
+                    .map(|r| {
+                        format!(
+                            "{} {} {}",
+                            r["move"].as_str().unwrap(),
+                            r["cp"]
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| r["cp"].to_string()),
+                            r["depth"]
+                        )
+                    })
                     .collect();
                 text.push_str(&format!("{key}\t{}\n", rows.join("|")));
             }
@@ -2758,4 +2768,173 @@ fn single_legal_moves_never_reach_engine_with_prefetch_and_speculation() {
         assert!(table.contains(&format!("{second}\t3\t2\t0\t0\t4a4b\t-456\t1\t1")));
         assert_eq!(targets_status(&state)["targets"][0]["read"], 2);
     }
+}
+
+#[test]
+fn shallow_skip_uses_two_pv_journal_and_resumes_without_searches() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let config = state.join("engine.json");
+    let next =
+        strip_ply(&child_position_after_move(&format!("{ROOT} 1"), "5i4i").unwrap().to_sfen())
+            .to_owned();
+    let end =
+        strip_ply(&child_position_after_move(&format!("{next} 2"), "5a4a").unwrap().to_sfen())
+            .to_owned();
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&json!({
+            "positions": {
+                ROOT: [{"move":"5i4i","cp":0,"depth":8}],
+                &next: [{"move":"5a4a","cp":0,"depth":8},{"move":"5a6a","cp":-500,"depth":8}],
+                &end: [{"move":"4i4h","cp":456,"depth":8},{"move":"4i3i","cp":0,"depth":8}]
+            }, "log":state.join("protocol.jsonl")
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    enqueue(
+        &state,
+        json!({"id":"skip","root":format!("sfen {ROOT} 1"),"own":"w","depth":1,"opts":{"opp_n":1,"rounds":0}}),
+    );
+    for pass in 0..2 {
+        if pass > 0 {
+            std::fs::remove_file(state.join("stop")).unwrap();
+        }
+        let previous_run = progress(&state)["run_id"].clone();
+        let mut command = serve_command(&state, &config, 0, 3, dir.path());
+        command.args(["--skip-gap", "500", "--skip-nodes", "10"]);
+        let mut server = Server(command.spawn().unwrap());
+        wait_for(|| {
+            let current = progress(&state);
+            current["run_id"] != previous_run && current["trees"][0]["finished"] == true
+        });
+        stop(&state, &mut server);
+        let rows = journal_rows(&state);
+        assert_eq!(rows.len(), 4, "pass={pass}");
+        let probes: Vec<_> = rows.iter().filter(|r| r["settings"]["nodes"] == 10).collect();
+        assert_eq!(probes.len(), 2);
+        assert!(
+            probes
+                .iter()
+                .all(|r| r["settings"]["multipv"] == 2 && r["reading"].get("skipped").is_none())
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r["reading"]["key"] == next && r["settings"]["nodes"] == 100)
+        );
+        assert_eq!(searches(&state), 4);
+        let raw = std::fs::read_to_string(out(&state, "skip", "w").join("d1.jsonl")).unwrap();
+        let row: Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(row["skipped"]["gap"], 500);
+    }
+    let output = out(&state, "skip", "w");
+    let replay = state.join("skip.toml");
+    let full_fp = journal_rows(&state)
+        .into_iter()
+        .find(|r| r["settings"]["nodes"] == 100)
+        .unwrap()["settings"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::write(&replay, format!("paths='{}'\nout='{}'\ndepth=1\nopp_n=1\nstop=300\nown='w'\nrounds=0\nskip={{gap=500,nodes=10}}\nfingerprint='{full_fp}'\n", output.join("paths.record.tsv").display(), state.join("replayed").display())).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--tree"])
+        .arg(&replay)
+        .arg("--journal")
+        .arg(state.join("journal.jsonl"))
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        std::fs::read(output.join("node_moves.tsv")).unwrap(),
+        std::fs::read(state.join("replayed/node_moves.tsv")).unwrap()
+    );
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "lines", "--dir"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+
+    let without_skip = std::fs::read_to_string(&replay)
+        .unwrap()
+        .replace("skip={gap=500,nodes=10}\n", "");
+    std::fs::write(&replay, &without_skip).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--tree"])
+        .arg(&replay)
+        .arg("--journal")
+        .arg(state.join("journal.jsonl"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("skipped"));
+    let fresh = without_skip.replace("replayed", "without-skip");
+    std::fs::write(&replay, fresh).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--tree"])
+        .arg(&replay)
+        .arg("--journal")
+        .arg(state.join("journal.jsonl"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("読みが足りない"));
+
+    enqueue(
+        &state,
+        json!({"id":"batch","root":format!("sfen {next} 1"),"own":"w","depth":0}),
+    );
+    std::fs::remove_file(state.join("stop")).unwrap();
+    let mut command = serve_command(&state, &config, 0, 3, dir.path());
+    let mut server = Server(command.spawn().unwrap());
+    wait_for(|| status(&out(&state, "batch", "w")) == "DONE\n");
+    stop(&state, &mut server);
+    assert_eq!(searches(&state), 5);
+    assert!(
+        journal_rows(&state)
+            .iter()
+            .any(|r| r["reading"]["key"] == next && r["settings"]["nodes"] == 100)
+    );
+}
+
+#[test]
+fn shallow_skip_mate_outside_numeric_band_still_requires_full_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let config = state.join("engine.json");
+    let next =
+        strip_ply(&child_position_after_move(&format!("{ROOT} 1"), "5i4i").unwrap().to_sfen())
+            .to_owned();
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&json!({"positions": {
+        ROOT: [{"move":"5i4i","cp":0,"depth":8}],
+        &next: [{"move":"5a4a","cp":0,"depth":8},{"move":"5a6a","cp":"mate:-300","depth":8}]
+    }, "log":state.join("protocol.jsonl")}))
+        .unwrap(),
+    )
+    .unwrap();
+    enqueue(
+        &state,
+        json!({"id":"mate","root":format!("sfen {ROOT} 1"),"own":"w","depth":1,"opts":{"opp_n":1,"rounds":0}}),
+    );
+    let mut command = serve_command(&state, &config, 0, 3, dir.path());
+    command.args(["--skip-gap", "500", "--skip-nodes", "10"]);
+    let mut server = Server(command.spawn().unwrap());
+    wait_for(|| status(&out(&state, "mate", "w")) == "DONE\n");
+    stop(&state, &mut server);
+    let rows = journal_rows(&state);
+    assert_eq!(rows.len(), 3);
+    let probe = rows.iter().find(|r| r["settings"]["nodes"] == 10).unwrap();
+    assert_eq!(probe["reading"]["tag"], "serve:shallow:mate");
+    assert_eq!(probe["reading"]["multipv"][1]["cp"], -29700);
+    let raw = std::fs::read_to_string(out(&state, "mate", "w").join("d1.jsonl")).unwrap();
+    let row: Value = serde_json::from_str(raw.trim()).unwrap();
+    assert!(row.get("skipped").is_none());
+    assert_eq!(row["nodes_limit"], 100);
 }

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 pub(super) struct Collector {
     last: BTreeMap<usize, Pv>,
     nodes: Option<u64>,
+    mate: BTreeSet<usize>,
 }
 impl Collector {
     /// 取り込んだ行の multipv の番号を返す。
@@ -48,6 +49,11 @@ impl Collector {
         }
         if index == 0 {
             bail!("multipv は正数が必要です");
+        }
+        if *kind == "cp" {
+            self.mate.remove(&index);
+        } else {
+            self.mate.insert(index);
         }
         self.last.insert(
             index,
@@ -170,6 +176,7 @@ fn urgent_ranks<'a>(
 }
 
 struct Job {
+    shallow: bool,
     key: String,
     ply: u32,
     cond: Arc<Settings>,
@@ -186,7 +193,7 @@ enum Event {
     ),
     Info(usize, u64, u32),
     /// 読みが `--speculate-at` を越えた局面の、その時点の上位の手と 1 位の値。
-    Speculate(String, Vec<String>, i32, usize),
+    Speculate(String, Vec<String>, i32, usize, String),
     Alert(String),
 }
 struct Worker {
@@ -342,7 +349,7 @@ impl PrefetchStats {
                 .iter()
                 .filter(|key| {
                     tree.level.contains_key(*key)
-                        && tree.nodes.get(*key).is_none_or(|node| node.forced_move.is_none())
+                        && tree.nodes.get(*key).is_none_or(|node| node.structural_move().is_none())
                 })
                 .cloned(),
         );
@@ -670,10 +677,19 @@ fn spawn_worker(
                             .next()
                             .context("bestmove がありません")?
                             .to_owned();
+                        let mate = !collector.mate.is_empty() && job.shallow;
                         let (multipv, nodes) = collector.finish();
                         let reading = Reading {
+                            skipped: None,
                             forced_move: None,
-                            tag: "serve".into(),
+                            tag: if mate {
+                                "serve:shallow:mate"
+                            } else if job.shallow {
+                                "serve:shallow"
+                            } else {
+                                "serve"
+                            }
+                            .into(),
                             ply: job.ply,
                             key: job.key.clone(),
                             nodes_limit: cond.nodes,
@@ -739,6 +755,7 @@ fn spawn_worker(
                         }
                     }
                     if searching
+                        && !job.shallow
                         && !speculated
                         && speculate_nodes.is_some_and(|at| high_nodes >= at)
                         && let Some(group) = &tops.complete
@@ -749,6 +766,7 @@ fn spawn_worker(
                             group.iter().map(|pv| pv.mv.clone()).collect(),
                             group[0].cp,
                             cond.multipv,
+                            cond.fingerprint.clone(),
                         ));
                     }
                 }
@@ -795,11 +813,14 @@ fn configure_tree(tree: &mut Tree, settings: &Settings) -> Result<()> {
         tree.def.nodes.unwrap_or(settings.nodes),
     )?;
     tree.set_condition(&cond);
+    tree.configure_skip(&cond)?;
     Ok(())
 }
 
 fn tree_has_reading(tree: &Tree, cache: &impl Readings, key: &str) -> bool {
-    if tree.nodes.get(key).is_some_and(|node| node.forced_move.is_some()) {
+    if tree.nodes.get(key).is_some_and(|node| node.structural_move().is_some())
+        || tree.skipped(cache, key).is_some()
+    {
         return true;
     }
     if tree.def.require_condition {
@@ -812,8 +833,8 @@ fn tree_has_reading(tree: &Tree, cache: &impl Readings, key: &str) -> bool {
     }
 }
 
-fn failure_key(tree: &Tree, key: &str) -> (String, Option<String>) {
-    (key.to_owned(), tree.def.preferred_fingerprint.clone())
+fn failure_key(tree: &Tree, cache: &impl Readings, key: &str) -> (String, Option<String>) {
+    (key.to_owned(), tree.requested_fingerprint(cache, key))
 }
 
 const PENDING_FILE: &str = "pending.jsonl";
@@ -833,7 +854,8 @@ fn pending_lines(
         .waiting()
         .iter()
         .filter(|(key, _)| {
-            !tree_has_reading(tree, journal, key) && !failures.contains_key(&failure_key(tree, key))
+            !tree_has_reading(tree, journal, key)
+                && !failures.contains_key(&failure_key(tree, journal, key))
         })
         .collect();
     waiting.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
@@ -947,14 +969,14 @@ impl Live {
                     .chain(self.speculative.iter().map(|c| (&c.key, true)))
                 {
                     if !tree_has_reading(&self.tree, journal, key)
-                        && !failures.contains_key(&failure_key(&self.tree, key))
+                        && !failures.contains_key(&failure_key(&self.tree, journal, key))
                     {
                         requests.entry(key.clone()).or_default().insert(Request {
                             id: target.id.clone(),
                             own: target.own.clone(),
                             generation: target.generation,
                             predicted,
-                            fingerprint: self.tree.def.preferred_fingerprint.clone(),
+                            fingerprint: self.tree.requested_fingerprint(journal, key),
                             require_condition: self.tree.def.require_condition,
                         });
                     }
@@ -1296,6 +1318,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         bail!("speculate-priority は --speculate-at と一緒に指定します");
     }
     let defaults = Defaults {
+        skip: args.skip_gap.map(|gap| super::model::Skip {
+            gap,
+            nodes: args.skip_nodes,
+        }),
         opp_n: args.opp_n,
         stop: args.stop,
         rounds: args.rounds,
@@ -1544,9 +1570,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             while let Ok(event) = events_rx.try_recv() {
                 match event {
                     Event::Alert(message) => alerts.push(&message),
-                    Event::Speculate(key, moves, best, multipv) => {
+                    Event::Speculate(key, moves, best, multipv, fingerprint) => {
                         // 読み直し (RESTART など) で同じ局面がまた出しても、最初の 1 回だけを使う。
-                        if journal.get(&key).is_none() && !tops.contains_key(&key) {
+                        if !journal.has_exact(&key, &fingerprint) && !tops.contains_key(&key) {
                             tops.insert(key, (moves, best, multipv));
                             stats.speculation_sources += 1;
                             stats_dirty = true;
@@ -1741,17 +1767,16 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 }
                 match advanced {
                     Ok(missing) => {
-                        if let Some((key, _)) = missing
-                            .iter()
-                            .find(|(key, _)| failures.contains_key(&failure_key(tree, key)))
-                        {
+                        if let Some((key, _)) = missing.iter().find(|(key, _)| {
+                            failures.contains_key(&failure_key(tree, &journal, key))
+                        }) {
                             tree.failed = true;
                             remove_candidates(&tree.def.out)?;
                             monitor(&tree.def.out.join("STATUS"), "FAIL\n");
                             alerts.push(&format!(
                                 "木の失敗 {}: {}",
                                 tree.def.out.display(),
-                                failures[&failure_key(tree, key)]
+                                failures[&failure_key(tree, &journal, key)]
                             ));
                             continue;
                         }
@@ -1860,13 +1885,17 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     // 再構築待ちでも需要は保ち、古い候補の新規配布だけを止める。
                     for candidate in &live.shadow {
                         if tree_has_reading(&live.tree, &journal, &candidate.key)
-                            || failures.contains_key(&failure_key(&live.tree, &candidate.key))
+                            || failures.contains_key(&failure_key(
+                                &live.tree,
+                                &journal,
+                                &candidate.key,
+                            ))
                         {
                             continue;
                         }
                         if live.dirty
                             || prefetch_failures
-                                .get(&failure_key(&live.tree, &candidate.key))
+                                .get(&failure_key(&live.tree, &journal, &candidate.key))
                                 .copied()
                                 .unwrap_or(0)
                                 >= 2
@@ -1885,9 +1914,13 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     }
                     for candidate in &live.speculative {
                         if tree_has_reading(&live.tree, &journal, &candidate.key)
-                            || failures.contains_key(&failure_key(&live.tree, &candidate.key))
+                            || failures.contains_key(&failure_key(
+                                &live.tree,
+                                &journal,
+                                &candidate.key,
+                            ))
                             || prefetch_failures
-                                .get(&failure_key(&live.tree, &candidate.key))
+                                .get(&failure_key(&live.tree, &journal, &candidate.key))
                                 .copied()
                                 .unwrap_or(0)
                                 >= 2
@@ -2095,9 +2128,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 if prefetch {
                                     ((!live.dirty && live.shadow.iter().any(|c| c.key == key))
                                         || live.speculative.iter().any(|c| c.key == key))
-                                        && !failures.contains_key(&failure_key(&live.tree, &key))
+                                        && !failures
+                                            .contains_key(&failure_key(&live.tree, &journal, &key))
                                         && prefetch_failures
-                                            .get(&failure_key(&live.tree, &key))
+                                            .get(&failure_key(&live.tree, &journal, &key))
                                             .copied()
                                             .unwrap_or(0)
                                             < 2
@@ -2110,10 +2144,23 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         let Some((_, live)) = selected else {
                             continue;
                         };
-                        let cond = Arc::new(settings.with_overrides(
-                            live.tree.def.multipv.unwrap_or(settings.multipv),
-                            live.tree.def.nodes.unwrap_or(settings.nodes),
-                        )?);
+                        let requested = live.tree.requested_fingerprint(&journal, &key);
+                        let cond = Arc::new(
+                            if let Some(short) = &live.tree.skip_condition
+                                && requested.as_deref() == Some(&short.fingerprint)
+                            {
+                                short.clone()
+                            } else {
+                                settings.with_overrides(
+                                    live.tree.def.multipv.unwrap_or(settings.multipv),
+                                    live.tree.def.nodes.unwrap_or(settings.nodes),
+                                )?
+                            },
+                        );
+                        let shallow =
+                            live.tree.skip_condition.as_ref().is_some_and(|short| {
+                                requested.as_deref() == Some(&short.fingerprint)
+                            });
                         worker.cond = Some(cond.clone());
                         *worker.restart.lock().unwrap_or_else(|error| error.into_inner()) =
                             Restart {
@@ -2140,7 +2187,12 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             .collect();
                         worker
                             .tx
-                            .send(Some(Job { key, ply, cond }))
+                            .send(Some(Job {
+                                key,
+                                ply,
+                                cond,
+                                shallow,
+                            }))
                             .with_context(|| format!("worker {id} が終了しました"))?;
                     }
                 }
@@ -2396,6 +2448,7 @@ mod tests {
             format!("{}\n", json!({"id":format!("tree{id}"),"root":format!("sfen {key} 1"),"own":"b","depth":0}))
         }).collect();
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 0,
@@ -2472,6 +2525,7 @@ mod tests {
         let settings = super::super::tests::settings();
         let (_, cache, keys) = super::super::model::prefetch_tests::settle_fixture(3);
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 0,
@@ -2546,6 +2600,7 @@ mod tests {
             json!({"id":"tree","root":format!("sfen {root} 7"),"roots":[format!("sfen {other} 9")],"own":"b","depth":1,"priority":3})
         );
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 0,
@@ -2588,7 +2643,7 @@ mod tests {
             super::super::targets::parse_root(row["root"].as_str().unwrap()).unwrap();
         }
         // 失敗した局面と読みのある局面は出さない。
-        let failed = BTreeMap::from([(failure_key(&tree, other), "x".to_owned())]);
+        let failed = BTreeMap::from([(failure_key(&tree, &journal, other), "x".to_owned())]);
         assert_eq!(lines(&tree, &journal, &failed).len(), 1);
         // 段が先、局面キーが後。子の局面キーは `other` より前に並ぶが、段 1 なので後に出る。
         journal
@@ -2656,6 +2711,7 @@ mod tests {
             args
         };
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 0,
@@ -2857,6 +2913,7 @@ mod tests {
         let root = "4k4/9/9/9/9/9/9/9/4K4 b -";
         let chunk: String = (0..6).map(|id| format!("{}\n", json!({"id":format!("tree{id}"),"root":format!("sfen {root} 1"),"own":"b","depth":1}))).collect();
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 1,
@@ -2971,6 +3028,7 @@ mod tests {
         let path = dir.path().join("prefetch_stats.json");
         let key = "4k4/9/9/9/9/9/9/9/4K4 b -".to_owned();
         let def = super::super::model::TreeParams {
+            skip: None,
             out: dir.path().join("tree"),
             depth: 0,
             opp_n: 1,
@@ -3011,6 +3069,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = "sfen 4k4/9/9/9/9/9/9/9/4K4 b - 11";
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 0,
@@ -3043,6 +3102,7 @@ mod tests {
     fn old_checkpoint_priority_only_change_keeps_generation() {
         let dir = tempfile::tempdir().unwrap();
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 0,
@@ -3086,6 +3146,7 @@ mod tests {
             json!({"id":"high","root":format!("sfen {root} 21"),"own":"b","depth":1,"priority":1})
         );
         let defaults = Defaults {
+            skip: None,
             opp_n: 1,
             stop: 300,
             rounds: 0,
@@ -3127,6 +3188,7 @@ mod tests {
         cache.insert(
             root.into(),
             Reading {
+                skipped: None,
                 forced_move: None,
                 tag: "fixed".into(),
                 key: root.into(),

@@ -240,7 +240,10 @@ fn add_duration(
     let Ok(record) = serde_json::from_slice::<Record>(line) else {
         return Ok(false);
     };
-    if record.provenance == "engine" && record.reading.sec.is_finite() && record.reading.sec >= 0.0
+    if record.provenance == "engine"
+        && !record.reading.is_shallow()
+        && record.reading.sec.is_finite()
+        && record.reading.sec >= 0.0
     {
         *count += 1;
         *seconds += record.reading.sec;
@@ -725,6 +728,7 @@ mod tests {
                 .bytes(),
         );
         let defaults = Defaults {
+            skip: None,
             multipv: 3,
             nodes: 100,
             opp_n: 1,
@@ -989,6 +993,29 @@ mod tests {
                 .positions_per_hour,
             None
         );
+    }
+
+    #[test]
+    fn duration_excludes_shallow_readings() {
+        let mut count = 0;
+        let mut seconds = 0.0;
+        let mut nps = Vec::new();
+        let full = journal_line("engine", 10.0, 0);
+        assert!(add_duration(&full, &mut count, &mut seconds, &mut nps).unwrap());
+        for tag in ["serve:shallow", "serve:shallow:mate"] {
+            let mut probe: serde_json::Value = serde_json::from_slice(&full).unwrap();
+            probe["reading"]["tag"] = json!(tag);
+            assert!(
+                !add_duration(
+                    &serde_json::to_vec(&probe).unwrap(),
+                    &mut count,
+                    &mut seconds,
+                    &mut nps
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!((count, seconds, nps), (1, 10.0, vec![10.0]));
     }
 
     fn journal_line(provenance: &str, seconds: f64, padding: usize) -> Vec<u8> {

@@ -1,4 +1,4 @@
-use super::journal::{Reading, Readings, Settings, digest};
+use super::journal::{Reading, Readings, Settings, Skipped, digest};
 use crate::book_db::{child_position_after_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -59,9 +59,17 @@ pub(super) const SPECULATE_WORK: usize = 5_000;
 // 5,000 局面を複数回辿る構築・依存解析・展開を同じ予算で扱う。
 pub(super) const PREFETCH_WORK: usize = 500_000;
 
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct Skip {
+    pub gap: i32,
+    pub nodes: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Definition {
+    #[serde(default)]
+    pub skip: Option<Skip>,
     #[serde(skip)]
     pub source: Option<PathBuf>,
     pub paths: PathBuf,
@@ -94,6 +102,7 @@ pub(super) struct Definition {
 impl Definition {
     pub fn params(&self) -> TreeParams {
         TreeParams {
+            skip: self.skip,
             out: self.out.clone(),
             multipv: None,
             nodes: None,
@@ -132,6 +141,7 @@ impl Definition {
 /// 木の伸ばし方と出力先。定義の入力 (TOML と paths.tsv、キューの行) によらない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TreeParams {
+    pub skip: Option<Skip>,
     pub multipv: Option<usize>,
     pub nodes: Option<u64>,
     pub require_condition: bool,
@@ -182,18 +192,7 @@ pub(super) fn single_legal_move(key: &str) -> Result<Option<String>> {
     if legal.len() != 1 {
         return Ok(None);
     }
-    // 宣言の規則はエンジンに委ね、合法手への接続で宣言勝ちを置き換えない。
-    use rshogi_core::types::{EnteringKingRule, Move};
-    if [
-        EnteringKingRule::Point24,
-        EnteringKingRule::Point24H,
-        EnteringKingRule::Point27,
-        EnteringKingRule::Point27H,
-        EnteringKingRule::TryRule,
-    ]
-    .iter()
-    .any(|rule| pos.declaration_win(*rule) != Move::NONE)
-    {
+    if declaration_possible(key)? {
         return Ok(None);
     }
     let mv = legal.as_slice()[0].to_usi();
@@ -207,12 +206,28 @@ pub(super) fn single_legal_move(key: &str) -> Result<Option<String>> {
     Ok(Some(mv))
 }
 
+fn declaration_possible(key: &str) -> Result<bool> {
+    use rshogi_core::types::{EnteringKingRule, Move};
+    let pos = position_from_sfen(&format!("{key} 1"))?;
+    Ok([
+        EnteringKingRule::Point24,
+        EnteringKingRule::Point24H,
+        EnteringKingRule::Point27,
+        EnteringKingRule::Point27H,
+        EnteringKingRule::TryRule,
+    ]
+    .iter()
+    .any(|rule| pos.declaration_win(*rule) != Move::NONE))
+}
+
 pub(super) fn side(key: &str) -> &str {
     key.split_whitespace().nth(1).unwrap_or("")
 }
 
 #[derive(Debug)]
 pub(super) struct Tree {
+    pub skip_condition: Option<Settings>,
+    rejected_skips: BTreeSet<String>,
     pub def: TreeParams,
     pub roots: BTreeMap<String, u32>,
     pub root_order: Vec<String>,
@@ -236,7 +251,7 @@ pub(super) struct Tree {
     pub ready: bool,
     pub failed: bool,
     expanded: BTreeMap<String, (usize, u32)>,
-    forced_nodes: usize,
+    structural_nodes: usize,
     legal_cache: std::sync::Arc<std::sync::Mutex<BTreeMap<String, Option<String>>>>,
     /// 前回の `advance` が返した不足 (読みの無い局面)。
     waiting: Vec<(String, usize)>,
@@ -266,6 +281,7 @@ impl Tree {
         if let Some(settings) = settings {
             tree.def.multipv = Some(settings.multipv);
             tree.def.nodes = Some(settings.nodes);
+            tree.configure_skip(settings)?;
         }
         Ok(tree)
     }
@@ -283,6 +299,80 @@ impl Tree {
             return None;
         }
         cache.get_preferred(key, preferred)
+    }
+
+    /// 本読みの条件から短い読みの条件を作る。
+    pub fn configure_skip(&mut self, settings: &Settings) -> Result<()> {
+        self.skip_condition = self
+            .def
+            .skip
+            .as_ref()
+            .map(|skip| settings.for_shallow(skip.nodes))
+            .transpose()?;
+        Ok(())
+    }
+
+    fn can_probe(&self, key: &str) -> bool {
+        self.def.skip.is_some()
+            && !self.roots.contains_key(key)
+            && !declaration_possible(key).unwrap_or(true)
+    }
+
+    /// 不足する短い読みを先に要求し、判定済みなら本読みの条件を返す。
+    pub fn requested_fingerprint(&self, cache: &impl Readings, key: &str) -> Option<String> {
+        if self.reading(cache, key).is_none()
+            && self.can_probe(key)
+            && let Some(cond) = &self.skip_condition
+            && cache.shallow(key, &cond.fingerprint).is_none()
+        {
+            return Some(cond.fingerprint.clone());
+        }
+        self.def.preferred_fingerprint.clone()
+    }
+
+    fn shallow<'a>(&self, cache: &'a impl Readings, key: &str) -> Option<&'a Reading> {
+        let cond = self.skip_condition.as_ref()?;
+        cache.shallow(key, &cond.fingerprint)
+    }
+
+    /// 短い読みだけで接続できる局面の構造行を返す。
+    pub fn skipped(&self, cache: &impl Readings, key: &str) -> Option<Reading> {
+        let skip = self.def.skip.as_ref()?;
+        let reading = self.shallow(cache, key)?;
+        if !self.can_probe(key)
+            || self.rejected_skips.contains(key)
+            || self.reading(cache, key).is_some()
+        {
+            return None;
+        }
+        if reading.tag == "serve:shallow:mate" {
+            return None;
+        }
+        let [first, second] = reading.lines() else {
+            return None;
+        };
+        // 保存形式は mate を cp に写すため、同じ値域の cp も安全側に除く。
+        if [first, second]
+            .iter()
+            .any(|pv| pv.cp.unsigned_abs() >= 30000 - rshogi_core::types::MAX_PLY as u32)
+            || i64::from(first.cp).abs() >= i64::from(self.def.stop)
+        {
+            return None;
+        }
+        let gap = i64::from(first.cp) - i64::from(second.cp);
+        if gap < i64::from(skip.gap) {
+            return None;
+        }
+        let mut node = reading.clone();
+        node.skipped = Some(Box::new(Skipped {
+            multipv: [first.clone(), second.clone()],
+            gap,
+        }));
+        node.multipv.clear();
+        node.nodes_limit = 0;
+        node.nodes = None;
+        node.sec = 0.0;
+        Some(node)
     }
 
     /// 根と実戦の手順から木を作る。出力先には触れない。
@@ -305,6 +395,11 @@ impl Tree {
     ) -> Result<Self> {
         if !matches!(def.own.as_str(), "b" | "w") || def.opp_n == 0 || def.stop < 0 {
             bail!("own / opp_n / stop の指定が不正です");
+        }
+        if let Some(skip) = def.skip
+            && (skip.gap < 0 || skip.nodes == 0)
+        {
+            bail!("skip.gap は非負、skip.nodes は正数が必要です");
         }
         if def.extend_rounds > 10 {
             bail!("extend_rounds は 0〜10 が必要です");
@@ -367,13 +462,15 @@ impl Tree {
             round: 0,
             settle_rounds_used: 0,
             normal_unresolved: None,
+            skip_condition: None,
+            rejected_skips: BTreeSet::new(),
             game_lines,
             round_reports: Vec::new(),
             finished: false,
             ready: false,
             failed: false,
             expanded: BTreeMap::new(),
-            forced_nodes: 0,
+            structural_nodes: 0,
             legal_cache: Default::default(),
             waiting: Vec::new(),
         })
@@ -395,8 +492,8 @@ impl Tree {
             return Ok(());
         }
         let node = &self.nodes[key];
-        if let Some(mv) = &node.forced_move {
-            self.candidates.insert(key.into(), vec![mv.clone()]);
+        if let Some(mv) = node.structural_move() {
+            self.candidates.insert(key.into(), vec![mv.to_owned()]);
             self.compare.insert(key.into(), None);
             return Ok(());
         }
@@ -442,8 +539,12 @@ impl Tree {
     }
 
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
-        if let Some(mv) = &self.nodes[key].forced_move {
-            return (BTreeSet::from([mv.clone()]), BTreeSet::new());
+        if let Some(mv) = self.nodes[key].structural_move() {
+            let mut extra = self.force.get(key).cloned().unwrap_or_default();
+            if self.level[key] < self.def.depth && self.settle_rounds_used == 0 {
+                extra.extend(self.game.get(key).into_iter().flatten().cloned());
+            }
+            return (BTreeSet::from([mv.to_owned()]), extra);
         }
         let mp = self.nodes[key].lines();
         let level = self.level[key];
@@ -479,7 +580,10 @@ impl Tree {
     }
 
     pub fn reading_counts(&self) -> (usize, usize) {
-        (self.nodes.len() - self.forced_nodes, self.level.len() - self.forced_nodes)
+        (
+            self.nodes.len() - self.structural_nodes,
+            self.level.len() - self.structural_nodes,
+        )
     }
 
     pub fn waiting(&self) -> &[(String, usize)] {
@@ -491,18 +595,45 @@ impl Tree {
         self.advance_with_work(cache, &mut Work { remaining: None })
     }
 
+    fn restart_expansion(&self, budget: &mut Work) -> Result<Self> {
+        let mut rebuilt = Self::build_borrowed(
+            self.def.clone(),
+            self.root_order.iter().map(|key| (key.as_str(), self.roots[key], &[][..])),
+            budget,
+        )?;
+        rebuilt.game = self.game.clone();
+        rebuilt.game_lines = self.game_lines.clone();
+        rebuilt.skip_condition = self.skip_condition.clone();
+        rebuilt.rejected_skips = self.rejected_skips.clone();
+        rebuilt.legal_cache = self.legal_cache.clone();
+        Ok(rebuilt)
+    }
+
     fn advance_with_work(
         &mut self,
         cache: &impl Readings,
         budget: &mut Work,
     ) -> Result<Vec<(String, usize)>> {
+        if self.def.skip.is_some()
+            && self.nodes.iter().any(|(key, node)| {
+                node.skipped.is_some()
+                    && self
+                        .reading(cache, key)
+                        .is_some_and(|reading| reading.structural_move().is_none())
+            })
+        {
+            *self = self.restart_expansion(budget)?;
+        }
         if self.finished || self.failed {
             return Ok(Vec::new());
         }
         // 不足の局面のどれにも読みが来ていなければ、全局面を辿り直しても同じ不足になる
         // (状態が変わるのは不足の局面の読みを取り込んだときだけ)。毎周の処理を不足の数に比例させる。
         if !self.waiting.is_empty()
-            && self.waiting.iter().all(|(k, _)| self.reading(cache, k).is_none())
+            && self
+                .waiting
+                .iter()
+                .all(|(k, _)| self.reading(cache, k).is_none() && self.skipped(cache, k).is_none())
         {
             return Ok(self.waiting.clone());
         }
@@ -513,10 +644,11 @@ impl Tree {
                 budget.tick()?;
                 if !self.nodes.contains_key(&key) {
                     if let Some(mv) = self.cached_single_legal_move(&key)? {
-                        self.forced_nodes += 1;
+                        self.structural_nodes += 1;
                         self.nodes.insert(
                             key.clone(),
                             Reading {
+                                skipped: None,
                                 forced_move: Some(mv.clone()),
                                 tag: String::new(),
                                 ply: self.ply[&key],
@@ -532,14 +664,22 @@ impl Tree {
                             },
                         );
                     } else {
-                        let Some(reading) = self.reading(cache, &key) else {
+                        let reading = if let Some(reading) = self.reading(cache, &key) {
+                            reading.clone()
+                        } else if let Some(reading) = self.skipped(cache, &key) {
+                            reading
+                        } else {
                             continue;
                         };
-                        self.reading_conditions.insert(
-                            cache
-                                .condition(&key, self.def.preferred_fingerprint.as_deref())
-                                .map(str::to_owned),
-                        );
+                        if reading.structural_move().is_some() {
+                            self.structural_nodes += 1;
+                        } else {
+                            self.reading_conditions.insert(
+                                cache
+                                    .condition(&key, self.def.preferred_fingerprint.as_deref())
+                                    .map(str::to_owned),
+                            );
+                        }
                         self.nodes.insert(key.clone(), reading.clone());
                     }
                 }
@@ -552,7 +692,7 @@ impl Tree {
                     continue;
                 }
                 self.expanded.insert(key.clone(), (level, ply));
-                if level >= self.def.max_depth() && self.nodes[&key].forced_move.is_none() {
+                if level >= self.def.max_depth() && self.nodes[&key].structural_move().is_none() {
                     continue;
                 }
                 let (pick, extra) = self.picks(&key);
@@ -587,6 +727,24 @@ impl Tree {
             if !missing.is_empty() {
                 self.waiting.clone_from(&missing);
                 return Ok(missing);
+            }
+            if self.def.skip.is_some() && self.nodes.values().any(|node| node.skipped.is_some()) {
+                let values = self.negamax(&self.reach(&self.edge))?;
+                let rejected: Vec<_> = self
+                    .nodes
+                    .iter()
+                    .filter_map(|(key, node)| {
+                        let skipped = node.skipped.as_ref()?;
+                        let value = values.get(key)?.get(&skipped.multipv[0].mv)?;
+                        (*value < skipped.multipv[1].cp).then(|| key.clone())
+                    })
+                    .collect();
+                if !rejected.is_empty() {
+                    let mut rebuilt = self.restart_expansion(budget)?;
+                    rebuilt.rejected_skips.extend(rejected);
+                    *self = rebuilt;
+                    continue;
+                }
             }
             if self.settle_rounds_used == 0
                 && (self.round < self.def.rounds
@@ -653,7 +811,7 @@ impl Tree {
         self.game_lines.clear();
         self.normal_unresolved = None;
         self.nodes.clear();
-        self.forced_nodes = 0;
+        self.structural_nodes = 0;
         self.legal_cache = Default::default();
         self.level.clear();
         self.ply.clear();
@@ -1142,6 +1300,8 @@ impl Tree {
         def.settle_rounds = 0;
         let mut shadow = Self::build_borrowed(def, lines, work)?;
         shadow.legal_cache = self.legal_cache.clone();
+        shadow.skip_condition = self.skip_condition.clone();
+        shadow.rejected_skips = self.rejected_skips.clone();
         for (key, moves) in self.force.iter().chain(predicted.iter()) {
             work.tick()?;
             for mv in moves {
@@ -1271,6 +1431,7 @@ impl Tree {
             .into_iter()
             .filter(|(key, _)| {
                 self.reading(cache, key).is_none()
+                    && self.skipped(cache, key).is_none()
                     && self.cached_single_legal_move(key).ok().flatten().is_none()
             })
             .map(|(key, (level, ply))| PrefetchCandidate { key, level, ply })
@@ -1420,6 +1581,7 @@ pub(super) mod prefetch_tests {
 
     fn reading(key: &str, rows: &[(&str, i32)]) -> Reading {
         Reading {
+            skipped: None,
             forced_move: None,
             tag: "test".into(),
             key: key.into(),
@@ -1443,6 +1605,7 @@ pub(super) mod prefetch_tests {
     }
     fn params() -> TreeParams {
         TreeParams {
+            skip: None,
             out: "unused".into(),
             multipv: None,
             nodes: None,
@@ -2199,6 +2362,7 @@ pub(super) mod prefetch_tests {
                 params: tree.def.clone(),
                 lines: lines.clone(),
                 answers: Arc::new(cache.clone()),
+                structural_overrides: BTreeMap::new(),
                 requested: BTreeSet::new(),
                 fingerprint: "test".into(),
                 priority: 100,
@@ -2214,6 +2378,7 @@ pub(super) mod prefetch_tests {
         unrelated_answer.sec = 1.5;
         let mut extra = Sample {
             params: TreeParams {
+                skip: None,
                 depth: 0,
                 ..tree.def.clone()
             },
@@ -2222,6 +2387,7 @@ pub(super) mod prefetch_tests {
                 (unrelated.clone(), unrelated_answer),
                 (b.clone(), unused_answer),
             ])),
+            structural_overrides: BTreeMap::new(),
             requested: BTreeSet::new(),
             fingerprint: "unrelated".into(),
             priority: 100,
@@ -2293,6 +2459,7 @@ pub(super) mod prefetch_tests {
             params: tree.def,
             lines,
             answers: Arc::new(cache),
+            structural_overrides: BTreeMap::new(),
             requested: BTreeSet::new(),
             fingerprint: "test".into(),
             priority: 0,
@@ -2362,6 +2529,7 @@ pub(super) mod prefetch_tests {
             params: tree.def,
             lines: vec![(ROOT.into(), 1, vec![]), (q.into(), 1, vec![])],
             answers: Arc::new(cache),
+            structural_overrides: BTreeMap::new(),
             requested: BTreeSet::new(),
             fingerprint: "test".into(),
             priority: 0,
@@ -2511,6 +2679,7 @@ pub(super) mod prefetch_tests {
             params: tree.def,
             lines: vec![(ROOT.into(), 1, vec![]), (q.into(), 1, vec![])],
             answers: Arc::new(cache),
+            structural_overrides: BTreeMap::new(),
             requested: BTreeSet::new(),
             fingerprint: "test".into(),
             priority: 0,

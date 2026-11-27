@@ -642,6 +642,7 @@ mod tests {
             n => format!("{n}K{}", 8 - n),
         };
         Reading {
+            skipped: None,
             forced_move: None,
             tag: "fixture".into(),
             ply: 1,
@@ -1775,6 +1776,7 @@ mod tests {
         assert_eq!(settings.computed_fingerprint().unwrap(), settings.fingerprint);
         let json = serde_json::to_string(&Settings {
             engine_version: None,
+            shallow: false,
             ..settings
         })
         .unwrap();

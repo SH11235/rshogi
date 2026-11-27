@@ -128,7 +128,7 @@ fn load_reads(
             }
             let rec = journal::parse_record(&bytes)
                 .with_context(|| format!("{}:{at}", path.display()))?;
-            if !keys.contains(&rec.reading.key) {
+            if rec.reading.is_shallow() || !keys.contains(&rec.reading.key) {
                 continue;
             }
             if !validity.valid(&rec)? {

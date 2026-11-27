@@ -51,6 +51,13 @@ pub(super) struct Settings {
     /// エンジンのソースの版 (`--source-version` の応答)。別マシンの読みを取り込むときの判定にだけ使う。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
+    /// 本読みでは省略し、既存台帳の指紋を保つ。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shallow: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Settings {
@@ -119,6 +126,7 @@ impl Settings {
             multipv: args.multipv,
             hash: args.hash,
             engine_version: None,
+            shallow: false,
         };
         settings.fingerprint = settings.computed_fingerprint()?;
         Ok(settings)
@@ -133,6 +141,14 @@ impl Settings {
         settings.multipv = multipv;
         settings.nodes = nodes;
         settings.options.insert("MultiPV".into(), multipv.to_string());
+        settings.fingerprint = settings.computed_fingerprint()?;
+        Ok(settings)
+    }
+
+    /// 本読みと同じ探索条件でも台帳上の識別子を分ける。
+    pub fn for_shallow(&self, nodes: u64) -> Result<Self> {
+        let mut settings = self.with_overrides(2, nodes)?;
+        settings.shallow = true;
         settings.fingerprint = settings.computed_fingerprint()?;
         Ok(settings)
     }
@@ -189,6 +205,7 @@ pub(super) struct Pv {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(try_from = "ReadingRecord", into = "ReadingRecord")]
 pub(super) struct Reading {
+    pub skipped: Option<Box<Skipped>>,
     /// エンジンの読みを持たない、木の唯一の合法手への接続。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forced_move: Option<String>,
@@ -205,8 +222,16 @@ pub(super) struct Reading {
     pub bestmove: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct Skipped {
+    pub multipv: [Pv; 2],
+    pub gap: i64,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ReadingRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skipped: Option<Box<Skipped>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forced_move: Option<String>,
     tag: String,
@@ -227,7 +252,8 @@ struct ReadingRecord {
 impl From<Reading> for ReadingRecord {
     fn from(reading: Reading) -> Self {
         Self {
-            sec: reading.forced_move.is_none().then_some(reading.sec),
+            sec: reading.structural_move().is_none().then_some(reading.sec),
+            skipped: reading.skipped,
             nodes_limit: reading.nodes_limit,
             forced_move: reading.forced_move,
             tag: reading.tag,
@@ -249,10 +275,11 @@ impl TryFrom<ReadingRecord> for Reading {
     fn try_from(record: ReadingRecord) -> std::result::Result<Self, Self::Error> {
         let sec = match record.sec {
             Some(value) => value,
-            None if record.forced_move.is_some() => 0.0,
+            None if record.forced_move.is_some() || record.skipped.is_some() => 0.0,
             None => return Err("missing field `sec`"),
         };
         Ok(Self {
+            skipped: record.skipped,
             forced_move: record.forced_move,
             tag: record.tag,
             ply: record.ply,
@@ -270,6 +297,18 @@ impl TryFrom<ReadingRecord> for Reading {
 }
 
 impl Reading {
+    /// 本読みの代わりに使わない、明示的に印を付けた短い読み。
+    pub fn is_shallow(&self) -> bool {
+        matches!(self.tag.as_str(), "serve:shallow" | "serve:shallow:mate")
+    }
+
+    /// 子の伝播値で評価する構造行の代表手。
+    pub fn structural_move(&self) -> Option<&str> {
+        self.forced_move
+            .as_deref()
+            .or_else(|| self.skipped.as_ref().map(|s| s.multipv[0].mv.as_str()))
+    }
+
     pub fn lines(&self) -> &[Pv] {
         if self.bestmove == "win" {
             &[]
@@ -279,13 +318,14 @@ impl Reading {
     }
 
     pub fn validate(&self, settings: &Settings) -> Result<()> {
-        if self.forced_move.is_some() {
+        if self.structural_move().is_some() {
             bail!("唯一手の接続は台帳の読みではありません: {}", self.key);
         }
         if self.nodes_limit != settings.nodes
             || self.threads != settings.threads()?
             || self.hash != settings.hash
             || self.draw != settings.draw()
+            || self.is_shallow() != settings.shallow
         {
             bail!("宣言と読みの条件が矛盾します: {}", self.key);
         }
@@ -377,6 +417,9 @@ pub(super) trait Readings {
     fn get(&self, key: &str) -> Option<&Reading>;
     fn get_preferred(&self, key: &str, preferred: Option<&str>) -> Option<&Reading>;
     fn condition(&self, key: &str, preferred: Option<&str>) -> Option<&str>;
+    fn shallow(&self, _key: &str, _fingerprint: &str) -> Option<&Reading> {
+        None
+    }
     fn has_exact(&self, key: &str, fingerprint: &str) -> bool {
         self.condition(key, Some(fingerprint)) == Some(fingerprint)
     }
@@ -384,10 +427,10 @@ pub(super) trait Readings {
 
 impl Readings for BTreeMap<String, Reading> {
     fn get(&self, key: &str) -> Option<&Reading> {
-        self.get(key)
+        self.get(key).filter(|r| !r.is_shallow() || r.skipped.is_some())
     }
     fn get_preferred(&self, key: &str, _: Option<&str>) -> Option<&Reading> {
-        self.get(key)
+        self.get(key).filter(|r| !r.is_shallow() || r.skipped.is_some())
     }
     fn condition(&self, _: &str, _: Option<&str>) -> Option<&str> {
         None
@@ -461,6 +504,9 @@ pub(super) struct Journal {
 }
 
 impl Readings for Journal {
+    fn shallow(&self, key: &str, fingerprint: &str) -> Option<&Reading> {
+        self.get_exact(key, fingerprint).filter(|r| r.is_shallow())
+    }
     fn get(&self, key: &str) -> Option<&Reading> {
         self.get_preferred(key, Some(&self.fingerprint))
     }
@@ -625,7 +671,7 @@ impl Journal {
             self.prefetched.insert(key.clone());
             self.prefetch_conditions.insert((id, key.clone()));
         }
-        if rec.provenance == "engine" && rec.reading.nodes_limit > 0 {
+        if rec.provenance == "engine" && rec.reading.nodes_limit > 0 && !rec.reading.is_shallow() {
             self.durations.push_back(rec.reading.sec / rec.reading.nodes_limit as f64);
             if self.durations.len() > 50 {
                 self.durations.pop_front();
@@ -645,9 +691,9 @@ impl Journal {
         let rows = self.records.get(key)?.as_slice();
         preferred
             .and_then(|fp| self.condition_ids.get(fp))
-            .and_then(|id| rows.iter().find(|(s, _)| s == id))
+            .and_then(|id| rows.iter().find(|(s, r)| s == id && !r.is_shallow()))
             .or_else(|| {
-                rows.iter().max_by(|a, b| {
+                rows.iter().filter(|(_, r)| !r.is_shallow()).max_by(|a, b| {
                     compare_readings(
                         &a.1,
                         &self.conditions[a.0].fingerprint,
@@ -994,6 +1040,9 @@ impl Source {
     pub fn selected(&self, preferred: Option<&str>) -> BTreeMap<&str, (&Reading, &Settings)> {
         let mut selected: BTreeMap<&str, (&Reading, &Settings)> = BTreeMap::new();
         for (reading, settings) in self.readings.iter().zip(&self.reading_settings) {
+            if reading.is_shallow() {
+                continue;
+            }
             let entry = selected.entry(&reading.key).or_insert((reading, settings));
             let rank = |s: &Settings| preferred == Some(s.fingerprint.as_str());
             if rank(settings)
@@ -1225,6 +1274,9 @@ pub(super) fn simulation_readings(
             }
             merge_engine_version(selected, &rec.settings);
             rec.reading.validate(&rec.settings)?;
+            if rec.reading.is_shallow() {
+                return Ok(());
+            }
             if let Some(old) = records.get(&rec.reading.key)
                 && !old.same_values(&rec.reading)
             {
@@ -1534,6 +1586,7 @@ pub(super) fn match_fingerprints(
                 if mark[0] & 4 != 0 {
                     skipped.entry(rec.settings.fingerprint).or_default().conflicting += 1;
                 } else if mark[0] & 2 == 0
+                    && !rec.reading.is_shallow()
                     && let Some(matches) = wanted.get_mut(&signature(&rec.reading))
                 {
                     matches.insert(rec.settings.fingerprint);
@@ -1590,8 +1643,10 @@ mod tests {
             multipv: 1,
             hash: 16,
             engine_version: None,
+            shallow: false,
         };
         let reading = Reading {
+            skipped: None,
             forced_move: None,
             tag: "fixture".into(),
             ply: 1,
@@ -1617,6 +1672,20 @@ mod tests {
     fn write_record(file: &mut File, record: &Record) {
         serde_json::to_writer(&mut *file, record).unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn full_fingerprint_preserves_legacy_serialization() {
+        let full = record("", 0).settings;
+        let mut legacy = serde_json::to_value(full.normalized()).unwrap();
+        assert!(legacy.as_object_mut().unwrap().remove("shallow").is_none());
+        let decoded: Settings = serde_json::from_value(legacy).unwrap();
+        let bytes = br#"{"fingerprint":"","version":"book-tree-v1/newgame-ready/node-calib-last-multipv-v1","engine_sha256":"engine","options":{},"content_sha256":{},"nodes":100,"multipv":1,"hash":16}"#;
+        assert_eq!(serde_json::to_vec(&full.normalized()).unwrap(), bytes);
+        assert_eq!(decoded.computed_fingerprint().unwrap(), format!("{:x}", Sha256::digest(bytes)));
+        let short = full.for_shallow(100).unwrap();
+        assert_ne!(short.fingerprint, full.with_overrides(2, 100).unwrap().fingerprint);
+        assert_eq!(short.fingerprint, short.computed_fingerprint().unwrap());
     }
 
     #[test]
@@ -1986,6 +2055,71 @@ mod tests {
             match_fingerprints(&paths, &trees).unwrap(),
             [vec![None], vec![b.clone()], vec![None, b], vec![]]
         );
+    }
+
+    #[test]
+    fn shallow_rows_are_not_full_readings_or_registration_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut rec = record("", 0);
+        rec.settings = rec.settings.for_shallow(rec.settings.nodes).unwrap();
+        rec.reading.tag = "serve:shallow".into();
+        rec.provenance = "engine".into();
+        let key = rec.reading.key.clone();
+        let fp = rec.settings.fingerprint.clone();
+        write_record(&mut File::create(&path).unwrap(), &rec);
+        let journal = Journal::open(&path, &fp).unwrap();
+        assert!(journal.get(&key).is_none());
+        assert!(journal.get_preferred(&key, Some(&fp)).is_none());
+        assert!(!journal.has_exact(&key, &fp));
+        assert!(journal.shallow(&key, &fp).is_some());
+        assert!(journal.durations.is_empty());
+        assert_eq!(
+            match_fingerprints(std::slice::from_ref(&path), &[vec![rec.reading.clone()]]).unwrap(),
+            vec![vec![None]]
+        );
+        drop(journal);
+        let source = read_source(&path, None, |_| true).unwrap();
+        assert!(source.selected(Some(&fp)).is_empty());
+        let mut imported = Journal::open(&dir.path().join("imported"), &fp).unwrap();
+        imported
+            .merge_all(
+                source.readings.into_iter().map(|r| (r, "journal:source".into())).collect(),
+                &rec.settings,
+                OnConflict::Reject,
+                &mut NoConflictList,
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(imported.get(&key).is_none());
+        assert!(imported.shallow(&key, &fp).is_some());
+    }
+
+    #[test]
+    fn load_rejects_rows_with_mismatched_shallow_settings_and_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut unmarked = record("", 0);
+        unmarked.settings = unmarked.settings.for_shallow(unmarked.settings.nodes).unwrap();
+        unmarked.reading.tag = "serve".into();
+        let mut marked = record("", 1);
+        marked.settings.fingerprint = marked.settings.computed_fingerprint().unwrap();
+        marked.reading.tag = "serve:shallow".into();
+        let mut file = File::create(&path).unwrap();
+        for rec in [&unmarked, &marked] {
+            write_record(&mut file, rec);
+        }
+        drop(file);
+
+        let journal = Journal::open(&path, &marked.settings.fingerprint).unwrap();
+        for rec in [&unmarked, &marked] {
+            let key = &rec.reading.key;
+            let fp = &rec.settings.fingerprint;
+            assert!(journal.get(key).is_none());
+            assert!(journal.get_exact(key, fp).is_none());
+            assert!(journal.shallow(key, fp).is_none());
+            assert_eq!(journal.skipped_rows[fp].invalid, 1);
+        }
     }
 
     #[test]
