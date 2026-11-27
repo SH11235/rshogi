@@ -54,6 +54,7 @@ fn record(reading: Reading) -> Record {
         multipv: reading.multipv.len(),
         hash: 16,
         engine_version: None,
+        shallow: false,
     };
     settings.fingerprint = settings.computed_fingerprint().unwrap();
     Record {
@@ -448,4 +449,24 @@ fn one_way_thirty_diamonds_and_visit_limit() {
     let mut out = Vec::new();
     assert_eq!(intervals(&mut out, &graph, &reads, &args).unwrap(), Some("max-visits"));
     assert!(String::from_utf8(out).unwrap().lines().count() > 1);
+}
+
+#[test]
+fn shallow_readings_are_excluded_even_when_values_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let (args, records) = fixture(dir.path());
+    let full = records[0].clone();
+    let keys = BTreeSet::from([full.reading.key.clone()]);
+    for tag in ["serve:shallow", "serve:shallow:mate"] {
+        let mut probe = full.clone();
+        probe.reading.tag = tag.into();
+        probe.reading.multipv[0].cp += 1;
+        write_records(&args.journal[0], &[probe.clone()]);
+        let mut warnings = Warnings::new();
+        assert!(load_reads(&args.journal, &keys, &mut warnings).unwrap().is_empty());
+        write_records(&args.journal[0], &[probe, full.clone()]);
+        let reads = load_reads(&args.journal, &keys, &mut warnings).unwrap();
+        assert_eq!(reads[&full.reading.key].0, full.reading);
+        assert!(warnings.is_empty());
+    }
 }

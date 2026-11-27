@@ -1776,6 +1776,7 @@ mod tests {
         assert_eq!(settings.computed_fingerprint().unwrap(), settings.fingerprint);
         let json = serde_json::to_string(&Settings {
             engine_version: None,
+            shallow: false,
             ..settings
         })
         .unwrap();

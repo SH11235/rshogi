@@ -51,6 +51,13 @@ pub(super) struct Settings {
     /// エンジンのソースの版 (`--source-version` の応答)。別マシンの読みを取り込むときの判定にだけ使う。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
+    /// 本読みでは省略し、既存台帳の指紋を保つ。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub shallow: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Settings {
@@ -119,6 +126,7 @@ impl Settings {
             multipv: args.multipv,
             hash: args.hash,
             engine_version: None,
+            shallow: false,
         };
         settings.fingerprint = settings.computed_fingerprint()?;
         Ok(settings)
@@ -133,6 +141,14 @@ impl Settings {
         settings.multipv = multipv;
         settings.nodes = nodes;
         settings.options.insert("MultiPV".into(), multipv.to_string());
+        settings.fingerprint = settings.computed_fingerprint()?;
+        Ok(settings)
+    }
+
+    /// 本読みと同じ探索条件でも台帳上の識別子を分ける。
+    pub fn for_shallow(&self, nodes: u64) -> Result<Self> {
+        let mut settings = self.with_overrides(2, nodes)?;
+        settings.shallow = true;
         settings.fingerprint = settings.computed_fingerprint()?;
         Ok(settings)
     }
@@ -1626,6 +1642,7 @@ mod tests {
             multipv: 1,
             hash: 16,
             engine_version: None,
+            shallow: false,
         };
         let reading = Reading {
             skipped: None,
@@ -1654,6 +1671,20 @@ mod tests {
     fn write_record(file: &mut File, record: &Record) {
         serde_json::to_writer(&mut *file, record).unwrap();
         file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn full_fingerprint_preserves_legacy_serialization() {
+        let full = record("", 0).settings;
+        let mut legacy = serde_json::to_value(full.normalized()).unwrap();
+        assert!(legacy.as_object_mut().unwrap().remove("shallow").is_none());
+        let decoded: Settings = serde_json::from_value(legacy).unwrap();
+        let bytes = br#"{"fingerprint":"","version":"book-tree-v1/newgame-ready/node-calib-last-multipv-v1","engine_sha256":"engine","options":{},"content_sha256":{},"nodes":100,"multipv":1,"hash":16}"#;
+        assert_eq!(serde_json::to_vec(&full.normalized()).unwrap(), bytes);
+        assert_eq!(decoded.computed_fingerprint().unwrap(), format!("{:x}", Sha256::digest(bytes)));
+        let short = full.for_shallow(100).unwrap();
+        assert_ne!(short.fingerprint, full.with_overrides(2, 100).unwrap().fingerprint);
+        assert_eq!(short.fingerprint, short.computed_fingerprint().unwrap());
     }
 
     #[test]

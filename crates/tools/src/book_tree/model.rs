@@ -307,9 +307,8 @@ impl Tree {
             .def
             .skip
             .as_ref()
-            .map(|skip| settings.with_overrides(2, skip.nodes))
-            .transpose()?
-            .filter(|condition| condition.fingerprint != settings.fingerprint);
+            .map(|skip| settings.for_shallow(skip.nodes))
+            .transpose()?;
         Ok(())
     }
 
@@ -541,14 +540,11 @@ impl Tree {
 
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
         if let Some(mv) = self.nodes[key].structural_move() {
-            return (
-                BTreeSet::from([mv.to_owned()]),
-                if self.level[key] < self.def.depth && self.settle_rounds_used == 0 {
-                    self.game.get(key).cloned().unwrap_or_default()
-                } else {
-                    BTreeSet::new()
-                },
-            );
+            let mut extra = self.force.get(key).cloned().unwrap_or_default();
+            if self.level[key] < self.def.depth && self.settle_rounds_used == 0 {
+                extra.extend(self.game.get(key).into_iter().flatten().cloned());
+            }
+            return (BTreeSet::from([mv.to_owned()]), extra);
         }
         let mp = self.nodes[key].lines();
         let level = self.level[key];

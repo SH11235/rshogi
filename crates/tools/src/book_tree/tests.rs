@@ -2863,7 +2863,7 @@ pub(super) fn skip_fixture(
     second: i32,
 ) -> (Tree, Journal, Settings, String) {
     let settings = settings();
-    let short = settings.with_overrides(2, 10).unwrap();
+    let short = settings.for_shallow(10).unwrap();
     let mut params = definition(dir, 0).params();
     params.depth = 1;
     params.opp_n = 1;
@@ -2929,7 +2929,7 @@ fn shallow_skip_boundaries_and_full_read_precedence() {
 fn shallow_skip_root_forced_and_incomplete_probe() {
     let dir = tempfile::tempdir().unwrap();
     let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
-    let short = settings.with_overrides(2, 10).unwrap();
+    let short = settings.for_shallow(10).unwrap();
     let mut root = Tree::build(tree.def.clone(), &[(key.clone(), 1, vec![])]).unwrap();
     root.configure_skip(&settings).unwrap();
     assert_eq!(root.requested_fingerprint(&journal, &key), Some(settings.fingerprint.clone()));
@@ -2940,7 +2940,7 @@ fn shallow_skip_root_forced_and_incomplete_probe() {
     assert_eq!(forced.nodes[SINGLE_LEGAL].forced_move.as_deref(), Some("1a1b"));
     assert_eq!(missing[0].0, child(SINGLE_LEGAL, "1a1b").unwrap());
     // 別条件の本読み候補を短い読みの代わりに使わない。
-    tree.skip_condition = Some(settings.with_overrides(2, 11).unwrap());
+    tree.skip_condition = Some(settings.for_shallow(11).unwrap());
     assert_eq!(tree.advance(&journal).unwrap()[0].0, key);
     let mut incomplete = reading(&key, &[("5a4a", 0)], tree.skip_condition.as_ref().unwrap());
     incomplete.tag = "serve:shallow".into();
@@ -3160,4 +3160,102 @@ fn shallow_skip_full_speculation_accepts_existing_probe() {
             .iter()
             .any(|c| c.key == child(&key, "5a4a").unwrap())
     );
+}
+
+#[test]
+fn shallow_and_full_identical_limits_survive_append_import_and_reload() {
+    use super::journal::Readings;
+    for imported in [false, true] {
+        for different_values in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let full = settings().with_overrides(2, 10).unwrap();
+            let short = full.for_shallow(10).unwrap();
+            assert_ne!(full.fingerprint, short.fingerprint);
+            let mut probe = reading(ROOT, &[("5i4i", 0), ("5i6i", -500)], &short);
+            probe.multipv.truncate(2);
+            probe.tag = "serve:shallow".into();
+            let mut main = probe.clone();
+            main.tag = "serve".into();
+            if different_values {
+                main.multipv[0].cp = 100;
+            }
+            let path = dir.path().join("journal.jsonl");
+            let mut journal = Journal::open(&path, &full.fingerprint).unwrap();
+            journal.append(probe.clone(), &short, "engine".into()).unwrap();
+            let mut params = definition(dir.path(), 0).params();
+            params.depth = 0;
+            params.extend = 0;
+            params.extra.clear();
+            let mut tree = Tree::build(params, &[(ROOT.into(), 1, vec![])]).unwrap();
+            tree.set_condition(&full);
+            tree.def.skip = Some(model::Skip {
+                gap: 500,
+                nodes: 10,
+            });
+            tree.configure_skip(&full).unwrap();
+            assert_eq!(tree.skip_condition.as_ref().unwrap().fingerprint, short.fingerprint);
+            tree.def.skip = None;
+            assert_eq!(tree.advance(&journal).unwrap(), [(ROOT.into(), 0)]);
+            if imported {
+                let state = dir.path().join("state");
+                let mut inbox = super::live_import::Inbox::new(&state).unwrap();
+                import_file(&state.join("import/01.jsonl"), &full, &[main.clone()]);
+                assert!(drain_import(&mut inbox, &mut journal).is_empty());
+                assert_eq!(inbox.status()["counts"]["appended"], 1);
+            } else {
+                journal.append(main.clone(), &full, "engine".into()).unwrap();
+            }
+            assert!(tree.advance(&journal).unwrap().is_empty());
+            assert!(tree.finished && !tree.failed);
+            assert!(tree.advance(&journal).unwrap().is_empty());
+            assert_eq!(journal.get(ROOT), Some(&main));
+            assert_eq!(journal.shallow(ROOT, &short.fingerprint), Some(&probe));
+            drop(journal);
+            let journal = Journal::open(&path, &full.fingerprint).unwrap();
+            assert_eq!(journal.get(ROOT), Some(&main));
+            assert_eq!(journal.shallow(ROOT, &short.fingerprint), Some(&probe));
+        }
+    }
+}
+
+#[test]
+fn shallow_skip_settle_expands_forced_game_in_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let (base, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
+    let mut params = base.def;
+    params.extend = 2;
+    params.extend_rounds = 0;
+    params.settle_rounds = 3;
+    let games = vec![(ROOT.into(), 1, vec!["5i4i".into(), "5a6a".into()])];
+    let mut tree = Tree::build(params.clone(), &games).unwrap();
+    tree.configure_skip(&settings).unwrap();
+    let next = child(&key, "5a4a").unwrap();
+    journal
+        .append(
+            reading(&next, &[(&legal(&next)[0], 300)], &settings),
+            &settings,
+            "engine".into(),
+        )
+        .unwrap();
+    let forced = child(&key, "5a6a").unwrap();
+    assert_eq!(tree.advance(&journal).unwrap(), [(forced.clone(), 2)]);
+    assert_eq!(tree.settle_rounds_used, 1);
+    assert!(tree.nodes[&key].skipped.is_some());
+    assert_eq!(tree.edge[&key], BTreeSet::from(["5a4a".into(), "5a6a".into()]));
+    assert_eq!(tree.advance(&journal).unwrap(), [(forced.clone(), 2)]);
+    journal
+        .append(
+            reading(&forced, &[(&legal(&forced)[0], 300)], &settings),
+            &settings,
+            "engine".into(),
+        )
+        .unwrap();
+    assert!(tree.advance(&journal).unwrap().is_empty());
+    assert!(tree.finished && !tree.failed);
+    assert_eq!(tree.settle_rounds_used, 1);
+    assert!(super::lines::unsettled(&tree).unwrap().is_empty());
+    let mut replay = Tree::build(params, &games).unwrap();
+    replay.configure_skip(&settings).unwrap();
+    assert!(replay.advance(&journal).unwrap().is_empty());
+    assert_eq!(replay.edge, tree.edge);
 }
