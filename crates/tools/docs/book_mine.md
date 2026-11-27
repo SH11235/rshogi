@@ -1382,6 +1382,8 @@ book_mine master validate --master moves.tsv --schema schema
 
 ## `master add`: 元データへの行の追加と置換
 
+### 追加表から追加・置換する
+
 ```bash
 book_mine master add --master moves.tsv --add add.tsv
 book_mine master add --master moves.tsv --add add.tsv --apply --schema schema
@@ -1392,7 +1394,7 @@ book_mine master add --master moves.tsv --add replacements.tsv --replace --apply
 role・tier・source に差があれば `skipped conflict: ...` に列ごとの差を出します。
 追加表の中の `(key, move)` の重複は、既存行と一致する場合もエラーです。
 元データと追加後の全体を `master validate` と同じ規則で検査し、検出した誤りをすべて報告します。
-`--schema <dir>` があれば、下記の 3 表で source・cond・lineage の種類も検査します。
+`--schema <dir>` があれば、[schema の 3 表](#元データの-schema)で source・cond・lineage の種類も検査します。
 
 `--replace` は curated の行も全列置き換えます。古い表から作った置き換え表で新しい note や evals を上書きしないよう注意してください。
 既存の `(key, move)` に一致する行が対象です。
@@ -1409,6 +1411,27 @@ stdout には既存行の省略数、新しい局面と手の数、tier・role�
 既定は dry run で `OK (dry run): rows A -> B; no files written` と終わります。
 `--apply` の場合だけ一時ファイルへ全行を書き、元データを置き換えて `applied: rows A -> B` と報告します。
 検査に失敗したら書き換えません。元データと追加表が同じファイルなら、dry run でも拒否します。
+
+### 平手からの手順を追加する
+
+`--line` は、指定区間の手を評価値なしの `main`・`wide` として既存の元データに追加します。
+
+```bash
+book_mine master add --master moves.tsv --schema schema \
+  --line "position startpos moves 7g7f 3c3d 2g2f" --from 2 --to 3 \
+  --source pin --since 20261128-tag --note "固定手順"
+```
+
+例にある引数はすべて必須です。手順の先頭の `position` は省略できます。
+`--from` と `--to` は両端を含む手の番号 (初手は 1) で、`1 ≤ from ≤ to ≤ 手順の長さ` の範囲を指定します。
+`--source` は [schema の 3 表](#元データの-schema)のうち `sources.tsv` から選びます。
+`--since` と `--note` には空文字列・タブ・改行を使えず、`--since` は空白のみも不可です。
+`--line` は `--add`・`--replace` と併用できません。指定区間の外を含めて手順全体の合法性を検査し、追加前後の元データに `master validate` の規則を適用します。
+
+直接キー (手数を除いた SFEN) が一致する行を調べ、行がなければ追加し、同じ手の `main` だけがあれば省きます。
+同じ手でも別の role で登録されていたり、別の手が登録されていたりすれば、手番・手数と既存の手・role・evals を示して全体を中止します。
+同じ直接キーが区間内で再び現れる場合も、先に追加候補とした行を含めて同じ規則で判定します。
+手数・手ごとの判定と追加・省略・中止の件数を表示し、検査に通った追加行があり `--apply` を指定したときだけ保存します。
 
 ## `master hold-early`: 序盤の main の替わりを保留に戻す
 

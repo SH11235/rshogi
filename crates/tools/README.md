@@ -21,7 +21,7 @@
 | 完了した木の延長線と伝播後の最善手の違い、実戦手からの最善手順を調べる | [book_mine tree lines](docs/book_mine.md#tree-lines-延長線と実戦手の打ち切り理由) |
 | 複数のserveの進み・1 engine と全 worker の NPS・NOT_READYの終了件数・世代別の深さ・先後別に重複を除いたDONE実績による残り・idleまでの時間を表示する | [book_mine tree status](docs/book_mine.md#tree-status-複数の台の進みと-idle-までの時間) |
 | 定跡の 13 列の元データ・読み条件・値の由来・schema の語彙・合法手と、main・alt に成れる角・飛・歩の不成が無いことを検査する | [book_mine master validate](docs/book_mine.md#master-validate-元データの全件検査) |
-| 元データに行を追加・置換する（curated の全列置換も対象） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
+| 元データに行を追加・置換する（curated の全列置換と、手順から固定の main を作る `--line` に対応） | [book_mine master add](docs/book_mine.md#master-add-元データへの行の追加と置換) |
 | 序盤の main の替わりを継続手数で hold / replace に分け、指定キーを優先して保留する (`--continuation`・`--hold-keys`・`--deep-opp-freq`・`--deep-min-games`)。hold の継続が足りない枝の途切れた局面の一覧 (`--cuts-out`) と、そこを根にした木のキューの行 (`--cuts-enqueue-out`、既存キューによる除外 `--cuts-exclude-queue`) | [book_mine master hold-early](docs/book_mine.md#master-hold-early-序盤の-main-の替わりを保留に戻す) |
 | 読みのログから整数評価値の追加候補と報告を作る | [book_mine master add-reads](docs/book_mine.md#master-add-reads-読みから追加候補を作る) |
 | 元データから定跡・プリセット・条件と探索深さの注釈を書き出す（取り込みを含む tree 台帳から探索深さを照合し、失敗時は既存出力を復元） | [book_mine master export](docs/book_mine.md#master-export-定跡プリセット注釈の書き出し) |
