@@ -2496,6 +2496,7 @@ book_mine master exit-report --master moves.tsv --walk walk.tsv \
 | `--table <TSV>` / `--markdown <MD>` | なし | 全部の行の表と報告。`--enqueue-out` と合わせていずれか必須 |
 | `--enqueue-out <PATH>` | なし | good を除く未受付の出口を木の計画 (JSON Lines) に書く |
 | `--exclude-queue <PATH>` | なし、繰り返し可 | 既存キューの根と game の途中の局面を受付ありとして除く。hold の行は表示のみ |
+| `--exclude-through <PATH>` | なし、繰り返し可 | 指定の局面を通る出口を積み荷から除く。1 行 1 局面キー (盤・手番・持ち駒) |
 | `--tag <NAME>` | exit-report | id の名前。[A-Za-z0-9_-] の 1〜40 文字 |
 | `--depth <N>` | 6 | 木の段数 (0〜20) |
 | `--opp-n <N>` / `--stop <cp>` / `--rounds <N>` | 省略 | 木の相手の手の数 (1〜8)・打ち切り値 (1〜30000)・読み直し回数 (0〜10) |
@@ -2535,7 +2536,7 @@ bridge・rejoin の表の ply は空でもよく (元データの ply が空の�
 side は RAMU の側、turn は key の局面の手番 (b / w)、move_number は上の何手目 (不明なら `-`) です。moves は初期局面から key の局面までの手順 (USI) で、手順なしの行は `-` (空は初期局面) です。
 queued と Markdown の受付は、同じ根・同じ側の段 1 以上の受付の木 (`id (台, 状態)`、状態は DONE・NOT_READY・failed・hold・rejected・waiting・unknown・read/requested、bw の木は両方の側) を表示します。無ければ「なし」です。根を続きの先へ移す条件を満たす行では、`--enqueue-out` の有無にかかわらず、出口と続きの先の両方の根を照合し、続きの先の一致には「(続きの先)」を添えます。rejoin の行は、局面・RAMU の手の後の dig の局面・戻った先の局面を根にした木です。`--exclude-queue` の一致も id を表示します。
 path は、初期局面から積み荷の根に着く直前まで、指す前の各局面を元データの直接キー (盤・手番・持ち駒) で照合した結果です。相手の手番も局面の行を確認し、side の手番では指した手の main または alt の行も確認します。出口から続きの根へ移す手と、rejoin で dig に入る 1 手も含めます。根の行は不要です。全部あれば `ok`、欠けた局面や手は手順の順に `pos:21,move:35` のように列挙します。手順なしは `-` です。good や受付で除いた出口についても、同じ規則で出口または作れる続きの根までを照合します。
-enqueue は、出力した積み荷の id、`good`、照合で除いた場合の `covered:<id>(<台>,<状態>)`、根の手数を決められない `no-move-number` のいずれかです。`--exclude-queue` の一致は `covered:<id>(exclude-queue,listed)` です。`--enqueue-out` を省略した場合は good を `good`、その他を `not-requested` と表示します。
+enqueue は、出力した積み荷の id、`good`、照合で除いた場合の `covered:<id>(<台>,<状態>)`、指定の局面を通った `excluded-through`、根の手数を決められない `no-move-number` のいずれかです。`--exclude-queue` の一致は `covered:<id>(exclude-queue,listed)` です。`--enqueue-out` を省略した場合は good を `good`、通過局面で除外する行を `excluded-through`、その他を `not-requested` と表示します。
 
 extra は class ごとの欄 (walk は stop、gap は main・plain_black と、gap が `--gap-line` 以上なら best・best_value_black、rejoin は move・expected_black・rejoin_move・rejoin_main・rejoin (戻った先の局面)) です。
 stop が out・rare・max の行には `settle_plies` (出口から辿った手数)、`settle_black` (末端の値、先手から見た値。値なしは空欄)、`settle_end` (止まった理由。辿れる手が無い `missing`、千日手の筋 `repetition`、詰み `mate`、手数上限 `max`) も出します。
@@ -2552,13 +2553,19 @@ book_mine master exit-report --master moves.tsv --walk walk.tsv \
   --rejoin rejoin.tsv --bridge bridge.tsv --bridge-audit bridge_audit.tsv \
   --box box-a=/path/to/box-a --markdown exits.md \
   --enqueue-out exits.jsonl --tag edition --depth 6 --opp-n 3 \
-  --exclude-queue already_planned.jsonl
+  --exclude-queue already_planned.jsonl --exclude-through fixed.keys
 book_mine tree enqueue --state /path/to/state --from exits.jsonl
 ```
 
 出す行は一次の案です。積む前に定跡の判断で直してください。`--exclude-queue`・`--tag`・`--depth`・読み条件・priority 関連引数の明示指定には `--enqueue-out` が必要です。
 
 対象は報告に載った unsettled・bad・gap・rejoin・shallow・weak の行です。own は常に報告の side (RAMU の側) です。
+
+`--exclude-through fixed.keys` を使うには、固定したい区間の局面キーを元データの `key` 列と同じ形で 1 行ずつ書きます。手数は付けず、空行と `#` から始まる行は読み飛ばします。不正なキーがあればエラーで止まります。
+初期局面から表の `moves` を辿って出口自身までを直接キーで照合します。手順不明なら出口自身を照合し、反転キーや出口から先の手順は照合に使いません。
+該当の出口は TSV と Markdown に残り、積み荷から外れます。受付にも一致する場合は、積み荷を作るときの `covered` 判定が優先です。
+この引数を指定すると、Markdown に `enqueue` 欄と除外件数を、標準出力に `excluded_through` を出します。
+`--enqueue-out` を省くと受付照合前の除外件数を表示するため、受付ありの `covered` が優先される積み荷の作成時とは件数が異なることがあります。
 
 | 分類 | 根 | 根の手数 | game |
 | --- | --- | --- | --- |
@@ -2589,7 +2596,7 @@ memo の末尾の `path=[分類@何手目=照合結果; ...]` は、同じ根に
 id は `master walk` と同じ `queue_id(tag, 根の手数, 根の key, own)` で、`<tag>_<手数>_<key の SHA-256 先頭16桁>_<own>` です。
 出力は代表の分類順、同じ分類では重みの大きい順 (同じ重みは入力順) です。
 
-全行を `tree enqueue` と同じ検査に通してから一時ファイル経由で書きます。出力先どうし、および master・walk・rejoin・bridge・bridge-audit・schema・box の入力・exclude-queue と出力先が同じファイルなら拒否します。
+全行を `tree enqueue` と同じ検査に通してから一時ファイル経由で書きます。出力先どうし、および master・walk・rejoin・bridge・bridge-audit・schema・box の入力・exclude-queue・exclude-through と出力先が同じファイルなら拒否します。
 標準出力には出した行数・照合で除いた元の行数・手数不明で出せなかった行数・統合で減った行数・続きの先に根を移した元の行数 (照合・統合の前に集計) を 1 行で追加します。`path_not_ok` は、`ok` 以外の出口が 1 件以上寄与した出力 JSONL の行数です。`master_sha256` と `enqueue_sha256` は読み込んだ元データと書き出した JSONL の SHA-256 です。
 
 `master audit --bridge-enqueue-out` は伝播の切れ目から計画を作り、gap の計画は重なります。版ごとの出口の報告から good 以外をまとめて積むときは `exit-report --enqueue-out` を使います。

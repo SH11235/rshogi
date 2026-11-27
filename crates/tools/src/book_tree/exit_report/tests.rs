@@ -1210,6 +1210,153 @@ fn enqueue_continuations_merge_and_match_receipts_at_the_new_root() {
 }
 
 #[test]
+fn enqueue_exclude_through_filters_only_the_exit_path() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let keys = d.path().join("fixed.keys");
+    let reverse = d.path().join("reverse.keys");
+    let terminal = ["7g7f", "3c3d", "2g2f"];
+    let beyond = ["7g7f", "3c3d", "2g2f", "8c8d", "2f2e"];
+    let continued_root = format!("sfen {} 6", key_after(&beyond));
+    let other = ["2g2f"];
+    let walk = [
+        walk_line("b", "out", 0.04, &beyond[..4]),
+        walk_line("w", "own", 0.03, &terminal),
+        walk_line("b", "out", 0.02, &other),
+        walk_line("b", "out", 0.01, &terminal[..1]),
+    ];
+    let rows = [
+        master_row(&[], "7g7f", "60", "tree:3"),
+        master_row(&terminal[..1], "3c3d", "40", "tree:2"),
+        master_row(&terminal[..2], "2g2f", "40", "tree:2"),
+        master_row(&terminal, "8c8d", "-90", "single"),
+        master_row(&beyond[..4], "2f2e", "40", "single"),
+    ];
+    let out_arg = ["--enqueue-out", out.to_str().unwrap()];
+    let (baseline_stdout, baseline_table, baseline_md) =
+        run_report_with_rows(&d, &walk, &out_arg, &rows);
+    let baseline_queue = read_queue(&out);
+    let baseline_bytes = std::fs::read(&out).unwrap();
+    assert_eq!(baseline_queue.len(), 3);
+    let continued: Vec<_> =
+        baseline_queue.iter().filter(|line| line.root == continued_root).collect();
+    assert_eq!(continued.len(), 1);
+    let memo = continued[0].memo.as_deref().unwrap();
+    assert!(memo.contains("bad@5=ok"), "{memo}");
+    assert!(memo.contains("unsettled@2=ok"), "{memo}");
+    assert!(baseline_stdout.contains("まとめた行=1"));
+    assert!(!baseline_stdout.contains("excluded_through="));
+    assert!(!baseline_md.contains("excluded-through"));
+
+    let key = key_after(&terminal);
+    let flipped = rshogi_book::flipped_key(&format!("{key} 4")).unwrap();
+    std::fs::write(&keys, format!("\n  # 固定する区間\n  {key}  \n \t\n")).unwrap();
+    std::fs::write(&reverse, format!("{}\n", strip_ply(&flipped))).unwrap();
+    let reverse_arg = ["--exclude-through", reverse.to_str().unwrap()];
+    let (stdout, table, md) =
+        run_report_with_rows(&d, &walk, &[out_arg, reverse_arg].concat(), &rows);
+    assert_eq!(table, baseline_table);
+    assert_eq!(std::fs::read(&out).unwrap(), baseline_bytes);
+    assert_eq!(stdout, format!("{} excluded_through=0\n", baseline_stdout.trim_end()));
+    let summary = "通過局面で除外した行 (excluded-through) は 0 件です。\n\n";
+    assert_eq!(md.matches(summary).count(), 1);
+    let md_without_summary = md.replacen(summary, "", 1);
+    assert_eq!(md_without_summary.lines().count(), baseline_md.lines().count());
+    for (actual, baseline) in md_without_summary.lines().zip(baseline_md.lines()) {
+        if baseline.starts_with('|') {
+            let (body, enqueue) = actual.strip_suffix('|').unwrap().rsplit_once('|').unwrap();
+            assert_eq!(format!("{body}|"), baseline);
+            assert_ne!(enqueue.trim(), "excluded-through");
+        } else {
+            assert_eq!(actual, baseline);
+        }
+    }
+
+    let fixed_arg = ["--exclude-through", keys.to_str().unwrap()];
+    let (stdout, table, md) =
+        run_report_with_rows(&d, &walk, &[out_arg, reverse_arg, fixed_arg].concat(), &rows);
+    // 続きで初めて固定局面を通る出口は残り、同じ根に統合される別の出口だけが外れる。
+    let queue = read_queue(&out);
+    assert_eq!(queue.len(), 2);
+    let continued = queue.iter().find(|line| line.root == continued_root).unwrap();
+    let memo = continued.memo.as_deref().unwrap();
+    assert!(memo.ends_with(" path=[unsettled@2=ok]"), "{memo}");
+    assert!(queue.iter().any(|line| line.root == format!("sfen {} 2", key_after(&other))));
+    assert_eq!(baseline_table.lines().count(), table.lines().count());
+    for (before, after) in baseline_table.lines().zip(table.lines()).skip(1) {
+        let before = before.rsplit_once('\t').unwrap().0;
+        let (after, disposition) = after.rsplit_once('\t').unwrap();
+        assert_eq!(before, after);
+        let moves = after.split('\t').nth(10).unwrap();
+        assert_eq!(
+            disposition == "excluded-through",
+            matches!(moves, "7g7f 3c3d 2g2f" | "7g7f 3c3d 2g2f 8c8d")
+        );
+    }
+    assert!(stdout.ends_with(" excluded_through=2\n"));
+    assert!(md.contains("通過局面で除外した行 (excluded-through) は 2 件です。"));
+    assert_eq!(md.matches("| excluded-through |").count(), 2);
+
+    let (stdout, table, md) = run_report_with_rows(&d, &walk, &fixed_arg, &rows);
+    assert!(stdout.ends_with("\nexcluded_through=2\n"));
+    assert_eq!(table.matches("\texcluded-through\n").count(), 2);
+    assert_eq!(md.matches("| excluded-through |").count(), 2);
+
+    let queue_path = d.path().join("existing.jsonl");
+    let existing = serde_json::json!({
+        "id": "existing", "root": format!("sfen {key} 4"), "own": "w", "depth": 2
+    });
+    std::fs::write(&queue_path, format!("{existing}\n")).unwrap();
+    let (stdout, table, _) = run_report_with_rows(
+        &d,
+        &walk,
+        &[
+            out_arg,
+            fixed_arg,
+            ["--exclude-queue", queue_path.to_str().unwrap()],
+        ]
+        .concat(),
+        &rows,
+    );
+    assert!(stdout.contains("照合除外=1 "));
+    assert!(stdout.ends_with(" excluded_through=1\n"));
+    assert!(table.contains("\tcovered:existing(exclude-queue,listed)\n"));
+    assert_eq!(table.matches("\texcluded-through\n").count(), 1);
+}
+
+#[test]
+fn exclude_through_rejects_invalid_keys_before_writing_outputs() {
+    let d = TempDir::new().unwrap();
+    let out = d.path().join("plan.jsonl");
+    let keys = d.path().join("fixed.keys");
+    let table_dir = d.path().join("new-output");
+    let table = table_dir.join("report.tsv");
+    let md = d.path().join("report.md");
+    let mut args = enqueue_args(&out);
+    args.master = d.path().join("moves.tsv");
+    args.walk = d.path().join("walk.tsv");
+    args.table = Some(table.clone());
+    args.markdown = Some(md.clone());
+    args.exclude_through.push(keys.clone());
+    for bad in [
+        format!("{HIRATE_KEY} 1"),
+        "not-sfen b -".to_owned(),
+        HIRATE_KEY.replace(" b ", " x "),
+        HIRATE_KEY.replace(" -", " 2"),
+    ] {
+        std::fs::write(&keys, format!("# 固定する局面\n\n{bad}\n")).unwrap();
+        let err = excluded_through_keys(&args.exclude_through).unwrap_err();
+        assert!(err.to_string().contains(&format!("{}:3", keys.display())));
+    }
+    let mut stdout = Vec::new();
+    let err = run_to(args, &mut stdout).unwrap_err();
+    assert!(err.to_string().contains(&format!("{}:3", keys.display())));
+    assert!(stdout.is_empty());
+    assert!([table, md, out].iter().all(|path| !path.exists()));
+    assert!(!table_dir.exists());
+}
+
+#[test]
 fn enqueue_walk_classes_use_exit_roots_and_three_priority_levels() {
     let d = TempDir::new().unwrap();
     let out = d.path().join("plan.jsonl");
@@ -1432,7 +1579,7 @@ fn enqueue_merge_keeps_earlier_class_heavier_representative_and_minimum_priority
         lines,
         counts,
         dispositions,
-    } = queue_lines(&items, &paths, &args, &[], &Excluded::new(), &BTreeSet::new()).unwrap();
+    } = queue_lines(&items, &paths, &args, &[], &Excluded::new(), &BTreeSet::new(), &[]).unwrap();
     assert!(dispositions.iter().all(|id| id == &lines[0].id));
     assert_eq!(counts.path_not_ok, 1);
     assert_eq!(lines.len(), 1);
@@ -1542,6 +1689,7 @@ fn enqueue_rejects_input_output_collisions_and_invalid_options() {
         "bridge",
         "bridge-audit",
         "exclude-queue",
+        "exclude-through",
         "table",
         "markdown",
     ] {
@@ -1553,6 +1701,7 @@ fn enqueue_rejects_input_output_collisions_and_invalid_options() {
             "bridge" => args.bridge = Some(out.clone()),
             "bridge-audit" => args.bridge_audit = Some(out.clone()),
             "exclude-queue" => args.exclude_queue.push(out.clone()),
+            "exclude-through" => args.exclude_through.push(out.clone()),
             "table" => args.table = Some(out.clone()),
             "markdown" => args.markdown = Some(out.clone()),
             _ => unreachable!(),
