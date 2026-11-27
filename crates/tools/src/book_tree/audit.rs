@@ -1139,6 +1139,7 @@ fn known_moves(
     positions: &[(&str, &MasterPosition)],
     graph: &Graph,
     retain_cycles: bool,
+    deferred_caps: &BTreeMap<String, i32>,
 ) -> Result<Vec<Vec<bool>>> {
     let cyclic = retain_cycles.then(|| graph.cyclic_positions());
     let skip_flipped = graph.options.skip_flipped_children;
@@ -1152,7 +1153,7 @@ fn known_moves(
     let mut node_known = vec![false; graph.len()];
     // (子局面, 親の局面の番号, 手の番号)。子局面の値が分かったら親の手も分かる。
     let mut waiting: Vec<(usize, usize, usize)> = Vec::new();
-    for (index, &(_, position)) in positions.iter().enumerate() {
+    for (index, &(key, position)) in positions.iter().enumerate() {
         let node = node_of[index];
         let moves: Vec<_> = graph.moves(node).collect();
         ensure!(moves.len() == position.moves.len(), "内部エラー: 手の数が合いません");
@@ -1179,7 +1180,8 @@ fn known_moves(
                 }
             }
         }
-        node_known[node] = row.iter().any(|&k| k);
+        // 上限を保留した局面にも、全応手の値か、不明な応手に置く上限の値が付く。
+        node_known[node] = row.iter().any(|&k| k) || deferred_caps.contains_key(key);
         known.push(row);
     }
     waiting.sort_unstable();
@@ -1463,6 +1465,11 @@ fn reply_positions(
     Ok(replies.into_iter().flatten().collect())
 }
 
+enum RecordCap {
+    Fixed(BookMove),
+    IfUnknownReply(i32),
+}
+
 /// main・alt の無い相手の局面に着く手のうち、手を指す側に最も悪い読みの値を残す。
 /// 読みの値が無ければキーを返さず、合法手に上限を割り当てられなければ `None` を返す。
 fn record_caps(
@@ -1470,7 +1477,7 @@ fn record_caps(
     records: &BTreeMap<String, MasterPosition>,
     joins: Option<&Joins>,
     opponent: &str,
-) -> Result<BTreeMap<String, Option<BookMove>>> {
+) -> Result<BTreeMap<String, Option<RecordCap>>> {
     let added = |key: &str| {
         key.split_whitespace().nth(1) == Some(opponent)
             && (records.contains_key(key) || joins.is_some_and(|j| j.contains_key(key)))
@@ -1512,13 +1519,12 @@ fn record_caps(
             {
                 continue;
             }
-            // 合流手の局面では、未収録の応手を表す手を固定の葉にする。補完の行き先に
-            // なり得る合法手も使えるため、上限が不要なのは全応手を覆う場合だけ。
+            // 合流手の局面では上限を固定の葉にするので、補完の行き先に着く手も使える。
             if joined.is_some() {
-                cap = Some(BookMove {
+                cap = Some(RecordCap::Fixed(BookMove {
                     mv: usi,
                     eval: Some(-eval),
-                });
+                }));
                 break;
             }
             pos.do_move(reply, pos.gives_check(reply));
@@ -1537,14 +1543,14 @@ fn record_caps(
             };
             pos.undo_move(reply);
             if leaf {
-                cap = Some(BookMove {
+                cap = Some(RecordCap::Fixed(BookMove {
                     mv: usi,
                     eval: Some(-eval),
-                });
+                }));
                 break;
             }
         }
-        caps.insert(key, cap);
+        caps.insert(key, cap.or_else(|| joined.map(|_| RecordCap::IfUnknownReply(eval))));
     }
     Ok(caps)
 }
@@ -1590,6 +1596,12 @@ pub(super) fn add_opponent_reply(
 
 type Joins = BTreeMap<String, MasterPosition>;
 type FixedLeaves = BTreeMap<String, usize>;
+
+#[derive(Default)]
+struct JoinCaps {
+    fixed: FixedLeaves,
+    deferred: BTreeMap<String, i32>,
+}
 
 fn remember_unplayed(unplayed: &mut BTreeMap<String, String>, row: &Row) {
     if !unplayed.contains_key(row.get("key")) {
@@ -1712,12 +1724,12 @@ fn propagate_opponent(
             moves: Vec::new(),
         });
         position.moves.extend(record.moves.iter().cloned());
-        if !joined && let Some(Some(cap)) = caps.get(key) {
+        if !joined && let Some(Some(RecordCap::Fixed(cap))) = caps.get(key) {
             position.moves.push(cap.clone());
             capped.insert(key.clone());
         }
     }
-    let mut fixed_leaves = FixedLeaves::new();
+    let mut join_caps = JoinCaps::default();
     for (key, joined) in replies.joins.into_iter().flatten() {
         if super::model::side(key) != opponent {
             continue;
@@ -1728,10 +1740,15 @@ fn propagate_opponent(
             moves: Vec::new(),
         });
         position.moves.extend(joined.moves.iter().cloned());
-        if let Some(Some(cap)) = caps.get(key) {
-            fixed_leaves.insert(key.clone(), position.moves.len());
-            position.moves.push(cap.clone());
-            capped.insert(key.clone());
+        match caps.get(key) {
+            Some(Some(RecordCap::Fixed(cap))) => {
+                join_caps.fixed.insert(key.clone(), position.moves.len());
+                position.moves.push(cap.clone());
+            }
+            Some(Some(RecordCap::IfUnknownReply(eval))) => {
+                join_caps.deferred.insert(key.clone(), *eval);
+            }
+            _ => {}
         }
     }
     // 反転先の相手専用の手を自分の手として使わないよう、直接の辺だけを張る。
@@ -1742,9 +1759,10 @@ fn propagate_opponent(
         Flips::Skip,
         None,
         replies.joins.map(|_| opponent == "w"),
-        &fixed_leaves,
+        &mut join_caps,
     )?;
     result.capped.extend(capped);
+    result.capped.extend(join_caps.fixed.keys().cloned());
     let mut usage = OpponentUsage::default();
     let mut illegal_records = 0;
     let mut known = Vec::with_capacity(positions.len());
@@ -1765,17 +1783,23 @@ fn propagate_opponent(
         if let Some(joins) = joins(key) {
             let first = playable + added;
             let range = first..first + joins.moves.len();
-            let used = mask[range.clone()].iter().filter(|&&k| k).count();
+            let cap_index = join_caps.fixed.get(key).copied();
+            let is_join = |i| range.contains(&i) && cap_index != Some(i);
+            let used = range.clone().filter(|&i| mask[i] && is_join(i)).count();
             usage.joins.moves[usize::from(opponent == "w")] += used;
             if used > 0 {
                 usage.joins.positions += 1;
                 let node =
                     result.graph.find(key).context("内部エラー: 合流手の局面がありません")?;
-                let indices = mask.iter().enumerate().filter_map(|(i, &k)| k.then_some(i));
+                let indices = mask
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &k)| (k && cap_index != Some(i)).then_some(i))
+                    .chain(cap_index.filter(|&i| mask[i]));
                 let mut listed_best = None;
                 let mut join_best = None;
                 for (i, m) in indices.zip(result.graph.moves(node)) {
-                    if !range.contains(&i) {
+                    if !is_join(i) {
                         listed_best = listed_best.max(Some(m.new));
                         continue;
                     }
@@ -1906,7 +1930,7 @@ fn propagate_entries(
     flips: Flips,
     cache: Option<&MoveCache>,
     own_black: Option<bool>,
-    fixed_leaves: &FixedLeaves,
+    join_caps: &mut JoinCaps,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
     let options = BackpropOptions {
         skip_flipped_children: flips == Flips::Skip,
@@ -1921,11 +1945,28 @@ fn propagate_entries(
         cache,
     )?;
     let illegal_moves = graph.illegal_moves;
-    for (key, &index) in fixed_leaves {
-        graph.fix_leaf(key, index)?;
+    for (key, &index) in &join_caps.fixed {
+        graph.fix_leaf(key, index, None)?;
     }
-    let known = known_moves(all, &graph, own_black.is_some())?;
+    let mut known = known_moves(all, &graph, own_black.is_some(), &join_caps.deferred)?;
+    let mut moved_caps = Vec::new();
+    for (key, &eval) in &join_caps.deferred {
+        let node = graph.find(key).context("内部エラー: 上限の局面がありません")?;
+        // 全合法手を列挙できても、行き先の値が分からない応手は伝播から落ちる。
+        let unknown = graph.moves(node).zip(&known[node]).position(|(m, &k)| m.usable && !k);
+        if let Some(index) = unknown {
+            let cap = eval.checked_neg().context("上限の値が i32 の範囲を超えています")?;
+            graph.fix_leaf(key, index, Some(cap))?;
+            join_caps.fixed.insert(key.clone(), index);
+            known[node][index] = true;
+            known[node][index..].rotate_left(1);
+            moved_caps.push((node, index));
+        }
+    }
     retain_known(&mut graph, &known)?;
+    for (node, index) in moved_caps {
+        known[node][index..].rotate_right(1);
+    }
     let stats = match own_black {
         Some(black) => propagate_for_side(&mut graph, draws, black)?,
         None => propagate_values(&mut graph, draws, MergeMode::Replace)?,
@@ -1942,7 +1983,7 @@ fn propagate_with(
     flips: Flips,
     cache: Option<&MoveCache>,
 ) -> Result<Propagated> {
-    propagate_with_side(positions, draws, fill, flips, cache, None, &FixedLeaves::new())
+    propagate_with_side(positions, draws, fill, flips, cache, None, &mut JoinCaps::default())
 }
 
 fn propagate_with_side(
@@ -1952,7 +1993,7 @@ fn propagate_with_side(
     flips: Flips,
     cache: Option<&MoveCache>,
     own_black: Option<bool>,
-    fixed_leaves: &FixedLeaves,
+    join_caps: &mut JoinCaps,
 ) -> Result<Propagated> {
     let keys: Vec<&String> = positions.keys().collect();
     // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
@@ -1976,7 +2017,7 @@ fn propagate_with_side(
     let replies = if fill == Fill::Off {
         BTreeMap::new()
     } else {
-        reply_positions(positions, fill, fixed_leaves)?
+        reply_positions(positions, fill, &join_caps.fixed)?
     };
     // 読みの値を残した局面は、元データの局面に着かない手 (値のある行) を持つ。
     let capped: BTreeSet<String> = replies
@@ -1990,7 +2031,7 @@ fn propagate_with_side(
     // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
     all.sort_unstable_by(|a, b| a.0.cmp(b.0));
     let (graph, known_all, illegal_moves, stats) =
-        propagate_entries(&all, draws, flips, cache, own_black, fixed_leaves)?;
+        propagate_entries(&all, draws, flips, cache, own_black, join_caps)?;
     let known = all
         .iter()
         .zip(known_all)
@@ -3087,15 +3128,19 @@ mod tests {
 
     #[test]
     fn opponent_joins_caps_unplayed_only_positions_unless_all_replies_join() {
+        let all_replies = &["5a5b", "5a4a", "5a6a", "5a4b", "5a6b"][..];
         for role in ["bench", "record"] {
-            for (replies, value) in [
-                (&["5a5b"][..], 50),
-                (&["5a5b", "5a4a", "5a6a", "5a4b", "5a6b"][..], 100),
+            for (replies, unread, value, capped) in [
+                (&["5a5b"][..], false, 50, true),
+                (all_replies, false, 100, false),
+                (all_replies, true, 50, true),
             ] {
                 let mut rows = vec![(ROOT, "5i4h", "main", "50"), (A, "5a5b", role, "")];
                 let children: Vec<_> =
                     replies.iter().map(|mv| super::super::model::child(A, mv).unwrap()).collect();
-                rows.extend(children.iter().map(|key| (key.as_str(), "4h3h", "main", "100")));
+                rows.extend(children.iter().enumerate().map(|(i, key)| {
+                    (key.as_str(), "4h3h", "main", if unread && i == 0 { "" } else { "100" })
+                }));
                 let text = master(&rows);
                 for apply in [false, true] {
                     let dir = tempfile::tempdir().unwrap();
@@ -3123,27 +3168,55 @@ mod tests {
                     let graph = book.graph_for(ROOT);
                     let joined = graph.find(A).unwrap();
                     let caps: Vec<_> = graph.moves(joined).filter(|m| m.edge.is_none()).collect();
-                    assert_eq!(summary.opponent_joins.moves, [0, replies.len()]);
+                    assert_eq!(
+                        summary.opponent_joins.moves,
+                        [0, replies.len() - usize::from(unread)]
+                    );
                     if fill == Fill::Off {
                         assert_eq!(summary.reply_positions, 0);
                     }
-                    assert_eq!(book.capped.contains(A), replies.len() == 1);
+                    assert_eq!(book.capped.contains(A), capped);
                     let main = graph.moves(graph.find(ROOT).unwrap()).next().unwrap();
-                    assert_eq!(
-                        from_child(graph, |key| book.capped.contains(key), &main),
-                        replies.len() > 1
-                    );
+                    assert_eq!(from_child(graph, |key| book.capped.contains(key), &main), !capped);
                     assert_eq!(
                         caps.iter().map(|m| m.new).collect::<Vec<_>>(),
-                        if replies.len() == 1 {
-                            vec![-50]
-                        } else {
-                            vec![]
-                        }
+                        if capped { vec![-50] } else { vec![] }
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn opponent_joins_can_use_a_reply_whose_value_depends_on_another_cap() {
+        let other_parent = "9/4k4/9/9/9/9/9/7K1/9 b -";
+        let other_opponent = super::super::model::child(other_parent, "2h3h").unwrap();
+        let children: Vec<_> = ["5a4a", "5a6a", "5a4b", "5a6b"]
+            .iter()
+            .map(|mv| super::super::model::child(A, mv).unwrap())
+            .collect();
+        let other_children: Vec<_> = [
+            "5b5a", "5b4a", "5b6a", "5b4b", "5b6b", "5b5c", "5b4c", "5b6c",
+        ]
+        .iter()
+        .map(|mv| super::super::model::child(&other_opponent, mv).unwrap())
+        .collect();
+        let mut rows = vec![
+            (ROOT, "5i4h", "main", "50"),
+            (A, "5a5b", "record", ""),
+            (B, "4h3h", "main", ""),
+            (other_parent, "2h3h", "main", "70"),
+            (&other_opponent, "5b5a", "record", ""),
+        ];
+        rows.extend(children.iter().map(|key| (key.as_str(), "4h3h", "main", "100")));
+        rows.extend(other_children.iter().map(|key| (key.as_str(), "3h2h", "main", "")));
+        let rows = parse_master(&master(&rows)).unwrap();
+        let (summary, book) = inspect_joins(&rows, DrawValues::both(0), Fill::Off, &[]);
+        assert_eq!(summary.opponent_joins.moves, [0, 5]);
+        assert!(book.capped.contains(&other_opponent));
+        assert!(!book.capped.contains(A));
+        let graph = book.graph_for(ROOT);
+        assert_eq!(graph.moves(graph.find(ROOT).unwrap()).next().unwrap().new, 70);
     }
 
     #[test]
@@ -3185,7 +3258,7 @@ mod tests {
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
         let roles = ["record", "bench"];
         let records = opponent_replies(&rows, &roles).unwrap();
-        assert_eq!(record_caps(&parsed.0, &records, None, "w").unwrap()[A], None);
+        assert!(record_caps(&parsed.0, &records, None, "w").unwrap()[A].is_none());
         for fill in [Fill::Off, Fill::Bridge] {
             let (summary, book) = inspect_joins(&rows, DrawValues::both(0), fill, &roles);
             let graph = book.graph_for(ROOT);
@@ -4328,7 +4401,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             let all = read_graph(&all_path, BackpropOptions::default()).unwrap();
             let entries: Vec<(&str, &MasterPosition)> =
                 positions.iter().map(|(key, p)| (key.as_str(), p)).collect();
-            let known = known_moves(&entries, &all, false).unwrap();
+            let known = known_moves(&entries, &all, false, &BTreeMap::new()).unwrap();
             let known_path = dir.path().join("known.db");
             std::fs::write(&known_path, text_db(Some(&known))).unwrap();
             let mut rebuilt = read_graph(
@@ -4340,9 +4413,15 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             )
             .unwrap();
             propagate_values(&mut rebuilt, draws, MergeMode::Replace).unwrap();
-            let (memory, actual_known, illegal, _) =
-                propagate_entries(&entries, draws, Flips::Shared, None, None, &FixedLeaves::new())
-                    .unwrap();
+            let (memory, actual_known, illegal, _) = propagate_entries(
+                &entries,
+                draws,
+                Flips::Shared,
+                None,
+                None,
+                &mut JoinCaps::default(),
+            )
+            .unwrap();
             assert_eq!(known, actual_known, "mask {mask}");
             assert_eq!(all.illegal_moves, illegal, "mask {mask}");
             assert_eq!(rebuilt.len(), memory.len(), "mask {mask}");
@@ -4493,7 +4572,9 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         let parsed = parse_master_rows(text.as_bytes()).unwrap();
         let records = opponent_replies(&parse_master(&text).unwrap(), &["record"]).unwrap();
         let caps = record_caps(&parsed.0, &records, None, "w").unwrap();
-        let cap = caps[A].as_ref().unwrap();
+        let Some(RecordCap::Fixed(cap)) = &caps[A] else {
+            panic!("上限の手がありません");
+        };
         assert_ne!(cap.mv, x);
         let (_, _, book) = audit_with_records(
             &parsed,
@@ -4531,12 +4612,15 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             let records = opponent_replies(&parse_master(&text).unwrap(), &["record"]).unwrap();
             let caps = record_caps(&parsed.0, &records, None, "w").unwrap();
             match &caps[A] {
-                Some(cap) => {
+                Some(RecordCap::Fixed(cap)) => {
                     assert_eq!(recorded.len(), 3);
                     assert!(!records[A].moves.iter().any(|m| m.mv == cap.mv));
                     assert_eq!(cap.eval, Some(-50));
                 }
                 None => assert_eq!(recorded.len(), 5),
+                Some(RecordCap::IfUnknownReply(_)) => {
+                    panic!("合流手の無い局面に上限が保留されました")
+                }
             }
             for fill in [Fill::Off, Fill::Bridge] {
                 let (_, _, book) = audit_with_records(

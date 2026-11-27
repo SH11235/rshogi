@@ -222,11 +222,22 @@ impl Graph {
     }
 
     /// 上限の値を表す手は、行き先が補完されても固定の葉として扱う。
-    pub(crate) fn fix_leaf(&mut self, key: &str, index: usize) -> Result<()> {
+    /// 既存の応手を上限に使う場合は値を置き換え、局面の最後の手にする。
+    pub(crate) fn fix_leaf(&mut self, key: &str, index: usize, value: Option<i32>) -> Result<()> {
         let node = self.find(key).context("内部エラー: 上限の局面がありません")?;
-        let row = self.rows(node).nth(index).context("内部エラー: 上限の手がありません")?;
+        let rows = self.rows(node);
+        let row = rows.clone().nth(index).context("内部エラー: 上限の手がありません")?;
         ensure!(self.row_flags[row] & ROW_FLIP == 0, "内部エラー: 上限の手に反転の辺があります");
         self.to[row] = NONE;
+        if let Some(value) = value {
+            self.old[row] = value;
+            self.new[row] = value;
+            let tail = row..rows.end;
+            self.old[tail.clone()].rotate_left(1);
+            self.new[tail.clone()].rotate_left(1);
+            self.to[tail.clone()].rotate_left(1);
+            self.row_flags[tail].rotate_left(1);
+        }
         Ok(())
     }
 

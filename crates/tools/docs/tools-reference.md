@@ -5,7 +5,7 @@
 全オプションは `cargo run --release -p tools --bin <名前> -- --help` で確認できます。
 `book_mine master rejoin` の応手集約とメモリの扱いは[詳細](book_mine.md#master-rejoin-相手の手で定跡に戻ると値が下がる局面)を参照してください。
 
-[`book_mine master audit --opp-joins`](book_mine.md#相手の合流手) は、元データの局面へ直接着く相手の合法手を伝播に加えます。
+[`book_mine master audit --opp-joins`](book_mine.md#相手の合流手) は、元データの局面へ直接着く相手の合法手のうち、行き先の値が分かる手を伝播に加えます。
 
 対局の手順にある元データの局面・手の抜けと受付の被覆は [`book_mine master game-gaps`](book_mine.md#master-game-gaps-対局の手順と元データの抜け) で一覧にできます。`--line` では抜けの有無によらず、勝った側の stop・負けた側の崩れまで実戦の線に両側の根を置きます。追加の根だけでは被覆にせず、CSA の同じ行の読み筋コメントも出口判定に使います。負けた局の崩れと伝播後の実戦手の値を照合し、そこまでの抜けをつなぐ木を出すには、pair JSON Lines 専用の [`book_mine master game-pave`](book_mine.md#master-game-pave-負けた局の崩れまでを定跡につなぐ) を使います。受付行の memo に局名と根の手数を残します。棋譜と audit DB の照合は外部ソートを使い、全局の ID・局面キー・audit の値をメモリに保持しません。
 
