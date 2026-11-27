@@ -227,6 +227,7 @@ pub(super) fn side(key: &str) -> &str {
 #[derive(Debug)]
 pub(super) struct Tree {
     pub skip_condition: Option<Settings>,
+    rejected_skips: BTreeSet<String>,
     pub def: TreeParams,
     pub roots: BTreeMap<String, u32>,
     pub root_order: Vec<String>,
@@ -294,9 +295,7 @@ impl Tree {
 
     fn reading<'a>(&self, cache: &'a impl Readings, key: &str) -> Option<&'a Reading> {
         let preferred = self.def.preferred_fingerprint.as_deref();
-        if (self.def.require_condition || self.def.skip.is_some())
-            && preferred.is_some_and(|fp| !cache.has_exact(key, fp))
-        {
+        if self.def.require_condition && preferred.is_some_and(|fp| !cache.has_exact(key, fp)) {
             return None;
         }
         cache.get_preferred(key, preferred)
@@ -309,7 +308,8 @@ impl Tree {
             .skip
             .as_ref()
             .map(|skip| settings.with_overrides(2, skip.nodes))
-            .transpose()?;
+            .transpose()?
+            .filter(|condition| condition.fingerprint != settings.fingerprint);
         Ok(())
     }
 
@@ -324,7 +324,7 @@ impl Tree {
         if self.reading(cache, key).is_none()
             && self.can_probe(key)
             && let Some(cond) = &self.skip_condition
-            && !cache.has_exact(key, &cond.fingerprint)
+            && cache.shallow(key, &cond.fingerprint).is_none()
         {
             return Some(cond.fingerprint.clone());
         }
@@ -333,20 +333,20 @@ impl Tree {
 
     fn shallow<'a>(&self, cache: &'a impl Readings, key: &str) -> Option<&'a Reading> {
         let cond = self.skip_condition.as_ref()?;
-        cache
-            .has_exact(key, &cond.fingerprint)
-            .then(|| cache.get_preferred(key, Some(&cond.fingerprint)))
-            .flatten()
+        cache.shallow(key, &cond.fingerprint)
     }
 
     /// 短い読みだけで接続できる局面の構造行を返す。
     pub fn skipped(&self, cache: &impl Readings, key: &str) -> Option<Reading> {
         let skip = self.def.skip.as_ref()?;
         let reading = self.shallow(cache, key)?;
-        if !self.can_probe(key) {
+        if !self.can_probe(key)
+            || self.rejected_skips.contains(key)
+            || self.reading(cache, key).is_some()
+        {
             return None;
         }
-        if reading.tag == "serve:mate" {
+        if reading.tag == "serve:shallow:mate" {
             return None;
         }
         let [first, second] = reading.lines() else {
@@ -464,6 +464,7 @@ impl Tree {
             settle_rounds_used: 0,
             normal_unresolved: None,
             skip_condition: None,
+            rejected_skips: BTreeSet::new(),
             game_lines,
             round_reports: Vec::new(),
             finished: false,
@@ -542,7 +543,11 @@ impl Tree {
         if let Some(mv) = self.nodes[key].structural_move() {
             return (
                 BTreeSet::from([mv.to_owned()]),
-                self.game.get(key).cloned().unwrap_or_default(),
+                if self.level[key] < self.def.depth && self.settle_rounds_used == 0 {
+                    self.game.get(key).cloned().unwrap_or_default()
+                } else {
+                    BTreeSet::new()
+                },
             );
         }
         let mp = self.nodes[key].lines();
@@ -594,11 +599,35 @@ impl Tree {
         self.advance_with_work(cache, &mut Work { remaining: None })
     }
 
+    fn restart_expansion(&self, budget: &mut Work) -> Result<Self> {
+        let mut rebuilt = Self::build_borrowed(
+            self.def.clone(),
+            self.root_order.iter().map(|key| (key.as_str(), self.roots[key], &[][..])),
+            budget,
+        )?;
+        rebuilt.game = self.game.clone();
+        rebuilt.game_lines = self.game_lines.clone();
+        rebuilt.skip_condition = self.skip_condition.clone();
+        rebuilt.rejected_skips = self.rejected_skips.clone();
+        rebuilt.legal_cache = self.legal_cache.clone();
+        Ok(rebuilt)
+    }
+
     fn advance_with_work(
         &mut self,
         cache: &impl Readings,
         budget: &mut Work,
     ) -> Result<Vec<(String, usize)>> {
+        if self.def.skip.is_some()
+            && self.nodes.iter().any(|(key, node)| {
+                node.skipped.is_some()
+                    && self
+                        .reading(cache, key)
+                        .is_some_and(|reading| reading.structural_move().is_none())
+            })
+        {
+            *self = self.restart_expansion(budget)?;
+        }
         if self.finished || self.failed {
             return Ok(Vec::new());
         }
@@ -702,6 +731,24 @@ impl Tree {
             if !missing.is_empty() {
                 self.waiting.clone_from(&missing);
                 return Ok(missing);
+            }
+            if self.def.skip.is_some() && self.nodes.values().any(|node| node.skipped.is_some()) {
+                let values = self.negamax(&self.reach(&self.edge))?;
+                let rejected: Vec<_> = self
+                    .nodes
+                    .iter()
+                    .filter_map(|(key, node)| {
+                        let skipped = node.skipped.as_ref()?;
+                        let value = values.get(key)?.get(&skipped.multipv[0].mv)?;
+                        (*value < skipped.multipv[1].cp).then(|| key.clone())
+                    })
+                    .collect();
+                if !rejected.is_empty() {
+                    let mut rebuilt = self.restart_expansion(budget)?;
+                    rebuilt.rejected_skips.extend(rejected);
+                    *self = rebuilt;
+                    continue;
+                }
             }
             if self.settle_rounds_used == 0
                 && (self.round < self.def.rounds
@@ -1258,6 +1305,7 @@ impl Tree {
         let mut shadow = Self::build_borrowed(def, lines, work)?;
         shadow.legal_cache = self.legal_cache.clone();
         shadow.skip_condition = self.skip_condition.clone();
+        shadow.rejected_skips = self.rejected_skips.clone();
         for (key, moves) in self.force.iter().chain(predicted.iter()) {
             work.tick()?;
             for mv in moves {

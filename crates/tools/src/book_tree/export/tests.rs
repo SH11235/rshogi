@@ -798,3 +798,22 @@ fn export_parallel_journal_failure_keeps_outputs() {
         }
     }
 }
+
+#[test]
+fn journal_depths_exclude_marked_shallow_readings() {
+    use crate::book_tree::reply_graph::HIRATE_KEY;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal.jsonl");
+    let mut record = journal_record(30);
+    record["reading"]["tag"] = serde_json::json!("serve:shallow");
+    std::fs::write(&path, format!("{record}\n")).unwrap();
+    let depths = journal_depths::load(
+        &[path],
+        &BTreeSet::from([HIRATE_KEY]),
+        &super::super::reply_graph::thread_pool(2).unwrap(),
+    )
+    .unwrap();
+    let mut r = row(HIRATE_KEY, "7g7f", "main", "wide", "10");
+    r.set("cond", record["settings"]["fingerprint"].as_str().unwrap()[..8].into());
+    assert_eq!(depths.depths(&Schema::default(), &r).unwrap(), None);
+}

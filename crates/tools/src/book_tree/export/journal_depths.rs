@@ -238,6 +238,9 @@ pub(super) fn load(
     let mut visit_record = |rec: ValidatedReading| {
         let fp = rec.fingerprint;
         let reading = rec.reading;
+        if reading.is_shallow() {
+            return;
+        }
         let key = reading.key.clone();
         result.fingerprints.insert(fp.clone());
         if !keys.contains(key.as_str()) {

@@ -2883,6 +2883,7 @@ pub(super) fn skip_fixture(
     root.multipv.truncate(1);
     journal.append(root, &settings, "engine".into()).unwrap();
     let mut probe = reading(&key, &[("5a4a", first), ("5a6a", second)], &short);
+    probe.tag = "serve:shallow".into();
     probe.multipv.truncate(2);
     journal.append(probe, &short, "engine".into()).unwrap();
     (tree, journal, settings, key)
@@ -2942,6 +2943,7 @@ fn shallow_skip_root_forced_and_incomplete_probe() {
     tree.skip_condition = Some(settings.with_overrides(2, 11).unwrap());
     assert_eq!(tree.advance(&journal).unwrap()[0].0, key);
     let mut incomplete = reading(&key, &[("5a4a", 0)], tree.skip_condition.as_ref().unwrap());
+    incomplete.tag = "serve:shallow".into();
     incomplete.multipv.truncate(1);
     journal
         .append(incomplete, tree.skip_condition.as_ref().unwrap(), "engine".into())
@@ -2955,6 +2957,7 @@ fn shallow_skip_root_forced_and_incomplete_probe() {
 fn shallow_skip_output_propagation_game_and_replay() {
     let dir = tempfile::tempdir().unwrap();
     let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
+    tree.def.depth = 2;
     tree.game.insert(key.clone(), BTreeSet::from(["5a6a".into()]));
     for (mv, cp) in [("5a4a", 456), ("5a6a", 700)] {
         let next = child(&key, mv).unwrap();
@@ -3046,6 +3049,7 @@ fn shallow_skip_keeps_declaration_positions_for_engine() {
     let moves = legal(key);
     let short = tree.skip_condition.as_ref().unwrap();
     let mut probe = reading(key, &[(&moves[0], 0), (&moves[1], -500)], short);
+    probe.tag = "serve:shallow".into();
     probe.multipv.truncate(2);
     journal.append(probe, short, "engine".into()).unwrap();
     assert!(tree.skipped(&journal, key).is_none());
@@ -3063,7 +3067,7 @@ fn shallow_skip_speculation_does_not_request_full_for_qualified_probe() {
             Journal::open(&dir.path().join("short-only.jsonl"), &settings.fingerprint).unwrap();
         cache
             .append(
-                journal.get_preferred(&key, Some(&short.fingerprint)).unwrap().clone(),
+                journal.shallow(&key, &short.fingerprint).unwrap().clone(),
                 short,
                 "engine".into(),
             )
@@ -3072,4 +3076,88 @@ fn shallow_skip_speculation_does_not_request_full_for_qualified_probe() {
         let candidates = tree.speculate(&tops, &cache, 100);
         assert_eq!(candidates.iter().any(|c| c.key == key), gap == 499);
     }
+}
+
+#[test]
+fn shallow_skip_rejects_deteriorated_child_and_uses_full_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
+    let next = child(&key, "5a4a").unwrap();
+    journal
+        .append(
+            reading(&next, &[(&legal(&next)[0], 501)], &settings),
+            &settings,
+            "engine".into(),
+        )
+        .unwrap();
+    assert_eq!(tree.advance(&journal).unwrap(), vec![(key.clone(), 1)]);
+    assert!(tree.skipped(&journal, &key).is_none());
+    assert_eq!(tree.requested_fingerprint(&journal, &key), Some(settings.fingerprint.clone()));
+    journal
+        .append(reading(&key, &[("5a6a", 0)], &settings), &settings, "engine".into())
+        .unwrap();
+    assert!(tree.advance(&journal).unwrap().is_empty());
+    assert!(tree.nodes[&key].skipped.is_none());
+}
+
+#[test]
+fn shallow_skip_extension_does_not_add_game() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
+    tree.game.insert(key.clone(), BTreeSet::from(["5a6a".into()]));
+    let next = child(&key, "5a4a").unwrap();
+    journal
+        .append(
+            reading(&next, &[(&legal(&next)[0], 500)], &settings),
+            &settings,
+            "engine".into(),
+        )
+        .unwrap();
+    assert!(tree.advance(&journal).unwrap().is_empty());
+    assert_eq!(tree.edge[&key], BTreeSet::from(["5a4a".into()]));
+    journal
+        .append(reading(&key, &[("5a6a", 0)], &settings), &settings, "engine".into())
+        .unwrap();
+    assert!(tree.advance(&journal).unwrap().is_empty());
+    assert!(tree.nodes[&key].skipped.is_none());
+}
+
+#[test]
+fn shallow_skip_without_skip_is_missing_and_fallback_preserves_full_reads() {
+    use super::journal::Readings;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
+    assert!(journal.get(&key).is_none());
+    assert!(
+        journal
+            .get_preferred(&key, Some(&tree.skip_condition.as_ref().unwrap().fingerprint))
+            .is_none()
+    );
+    assert_eq!(journal.durations.len(), 1);
+    tree.def.skip = None;
+    assert_eq!(tree.advance(&journal).unwrap(), vec![(key.clone(), 1)]);
+    let other = settings.with_overrides(3, settings.nodes + 1).unwrap();
+    journal
+        .append(reading(&key, &[("5a6a", 0)], &other), &other, "engine".into())
+        .unwrap();
+    tree.def.skip = Some(model::Skip {
+        gap: 500,
+        nodes: 10,
+    });
+    assert!(tree.advance(&journal).unwrap().is_empty());
+    assert!(tree.nodes[&key].skipped.is_none());
+}
+
+#[test]
+fn shallow_skip_full_speculation_accepts_existing_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut tree, journal, settings, key) = skip_fixture(dir.path(), 0, -499);
+    tree.def.depth = 3;
+    tree.advance(&journal).unwrap();
+    let tops = BTreeMap::from([(key.clone(), (vec!["5a4a".into()], 0, settings.multipv))]);
+    assert!(
+        tree.speculate(&tops, &journal, 100)
+            .iter()
+            .any(|c| c.key == child(&key, "5a4a").unwrap())
+    );
 }

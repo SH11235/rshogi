@@ -11,7 +11,7 @@
 
 [`book_mine tree serve`](book_mine.md#常駐) の `--threads` で、worker ごとのエンジンの探索スレッド数を指定できます。唯一手の先に合法手がない場合はエンジンで読みます。この版以降の木の出力は、この版以降の `book_mine` で読んでください。木の合法手が唯一の局面は原則読まず、段数・STOP の上限を越えてその手を伸ばし、子の伝播値を使います。
 
-`book_mine tree serve --skip-gap <cp>` は、短い MultiPV 2 の読みで差が明確な局面の本読みを省略します (`--skip-nodes`、既定 1000000)。省略した局面は子の値を伝播する `skipped` 構造行として記録します。詳細は [tree の展開規則](book_mine.md#tree-台帳を共有する独立した木) を参照してください。
+`book_mine tree serve --skip-gap <cp>` は、短い MultiPV 2 の読みで差が明確な局面の本読みを省略します (`--skip-nodes`、既定 1000000)。省略した局面は子の値を伝播する `skipped` 構造行として記録します。短い読みは専用タグで本読みと区別し、伝播値が短い読みの 2 位を下回れば本読みを求めます。詳細は [tree の展開規則](book_mine.md#tree-台帳を共有する独立した木) を参照してください。
 
 定跡の書き出しは [`book_mine master export`](book_mine.md#master-export-定跡プリセット注釈の書き出し) の `--threads` で台帳の読み込み・検証と応手グラフ構築を並列化できます (台帳の採用順とバッファ上限を維持)。
 

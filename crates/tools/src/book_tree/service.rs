@@ -193,7 +193,7 @@ enum Event {
     ),
     Info(usize, u64, u32),
     /// 読みが `--speculate-at` を越えた局面の、その時点の上位の手と 1 位の値。
-    Speculate(String, Vec<String>, i32, usize),
+    Speculate(String, Vec<String>, i32, usize, String),
     Alert(String),
 }
 struct Worker {
@@ -682,7 +682,14 @@ fn spawn_worker(
                         let reading = Reading {
                             skipped: None,
                             forced_move: None,
-                            tag: if mate { "serve:mate" } else { "serve" }.into(),
+                            tag: if mate {
+                                "serve:shallow:mate"
+                            } else if job.shallow {
+                                "serve:shallow"
+                            } else {
+                                "serve"
+                            }
+                            .into(),
                             ply: job.ply,
                             key: job.key.clone(),
                             nodes_limit: cond.nodes,
@@ -748,6 +755,7 @@ fn spawn_worker(
                         }
                     }
                     if searching
+                        && !job.shallow
                         && !speculated
                         && speculate_nodes.is_some_and(|at| high_nodes >= at)
                         && let Some(group) = &tops.complete
@@ -758,6 +766,7 @@ fn spawn_worker(
                             group.iter().map(|pv| pv.mv.clone()).collect(),
                             group[0].cp,
                             cond.multipv,
+                            cond.fingerprint.clone(),
                         ));
                     }
                 }
@@ -814,7 +823,7 @@ fn tree_has_reading(tree: &Tree, cache: &impl Readings, key: &str) -> bool {
     {
         return true;
     }
-    if tree.def.require_condition || tree.def.skip.is_some() {
+    if tree.def.require_condition {
         tree.def
             .preferred_fingerprint
             .as_deref()
@@ -968,8 +977,7 @@ impl Live {
                             generation: target.generation,
                             predicted,
                             fingerprint: self.tree.requested_fingerprint(journal, key),
-                            require_condition: self.tree.def.require_condition
-                                || self.tree.def.skip.is_some(),
+                            require_condition: self.tree.def.require_condition,
                         });
                     }
                 }
@@ -1562,9 +1570,9 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             while let Ok(event) = events_rx.try_recv() {
                 match event {
                     Event::Alert(message) => alerts.push(&message),
-                    Event::Speculate(key, moves, best, multipv) => {
+                    Event::Speculate(key, moves, best, multipv, fingerprint) => {
                         // 読み直し (RESTART など) で同じ局面がまた出しても、最初の 1 回だけを使う。
-                        if journal.get(&key).is_none() && !tops.contains_key(&key) {
+                        if !journal.has_exact(&key, &fingerprint) && !tops.contains_key(&key) {
                             tops.insert(key, (moves, best, multipv));
                             stats.speculation_sources += 1;
                             stats_dirty = true;
@@ -2149,12 +2157,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 )?
                             },
                         );
-                        let shallow = lives.iter().any(|live| {
-                            live.tree
-                                .skip_condition
-                                .as_ref()
-                                .is_some_and(|short| short.fingerprint == cond.fingerprint)
-                        });
+                        let shallow =
+                            live.tree.skip_condition.as_ref().is_some_and(|short| {
+                                requested.as_deref() == Some(&short.fingerprint)
+                            });
                         worker.cond = Some(cond.clone());
                         *worker.restart.lock().unwrap_or_else(|error| error.into_inner()) =
                             Restart {

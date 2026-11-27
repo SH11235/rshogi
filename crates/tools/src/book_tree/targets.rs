@@ -294,7 +294,7 @@ impl Line {
             depth: self.depth,
             multipv: self.opts.multipv,
             nodes: self.opts.nodes,
-            require_condition: self.opts.require_condition || defaults.skip.is_some(),
+            require_condition: self.opts.require_condition,
             opp_n: self.opts.opp_n.unwrap_or(defaults.opp_n),
             stop: self.opts.stop.unwrap_or(defaults.stop),
             rounds: self.opts.rounds.unwrap_or(defaults.rounds),

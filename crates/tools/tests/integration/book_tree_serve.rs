@@ -2842,7 +2842,7 @@ fn shallow_skip_uses_two_pv_journal_and_resumes_without_searches() {
     std::fs::write(&replay, format!("paths='{}'\nout='{}'\ndepth=1\nopp_n=1\nstop=300\nown='w'\nrounds=0\nskip={{gap=500,nodes=10}}\nfingerprint='{full_fp}'\n", output.join("paths.record.tsv").display(), state.join("replayed").display())).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
         .args(["tree", "replay", "--tree"])
-        .arg(replay)
+        .arg(&replay)
         .arg("--journal")
         .arg(state.join("journal.jsonl"))
         .output()
@@ -2859,13 +2859,37 @@ fn shallow_skip_uses_two_pv_journal_and_resumes_without_searches() {
         .unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
 
+    let without_skip = std::fs::read_to_string(&replay)
+        .unwrap()
+        .replace("skip={gap=500,nodes=10}\n", "");
+    std::fs::write(&replay, &without_skip).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--tree"])
+        .arg(&replay)
+        .arg("--journal")
+        .arg(state.join("journal.jsonl"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("skipped"));
+    let fresh = without_skip.replace("replayed", "without-skip");
+    std::fs::write(&replay, fresh).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--tree"])
+        .arg(&replay)
+        .arg("--journal")
+        .arg(state.join("journal.jsonl"))
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("読みが足りない"));
+
     enqueue(
         &state,
         json!({"id":"batch","root":format!("sfen {next} 1"),"own":"w","depth":0}),
     );
     std::fs::remove_file(state.join("stop")).unwrap();
     let mut command = serve_command(&state, &config, 0, 3, dir.path());
-    command.args(["--skip-gap", "500", "--skip-nodes", "10"]);
     let mut server = Server(command.spawn().unwrap());
     wait_for(|| status(&out(&state, "batch", "w")) == "DONE\n");
     stop(&state, &mut server);
@@ -2907,7 +2931,7 @@ fn shallow_skip_mate_outside_numeric_band_still_requires_full_read() {
     let rows = journal_rows(&state);
     assert_eq!(rows.len(), 3);
     let probe = rows.iter().find(|r| r["settings"]["nodes"] == 10).unwrap();
-    assert_eq!(probe["reading"]["tag"], "serve:mate");
+    assert_eq!(probe["reading"]["tag"], "serve:shallow:mate");
     assert_eq!(probe["reading"]["multipv"][1]["cp"], -29700);
     let raw = std::fs::read_to_string(out(&state, "mate", "w").join("d1.jsonl")).unwrap();
     let row: Value = serde_json::from_str(raw.trim()).unwrap();

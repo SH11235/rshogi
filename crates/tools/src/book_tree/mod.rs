@@ -298,6 +298,12 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
             paths::reject_collisions(&args.journal, None, &[&definition])?;
+            if definition.skip.is_none()
+                && definition.out.is_dir()
+                && register::tree_readings(&definition.out)?.iter().any(|r| r.skipped.is_some())
+            {
+                anyhow::bail!("出力に skipped 構造行があります。replay 定義に skip が必要です");
+            }
             // tree.lock を先に取る。後から起動した serve はこの dir を用意する前に tree.lock を見る。
             let output_lock = journal::LockedFile::open(&definition.out.join("tree.lock"))?;
             let root_locks = paths::lock_serve_roots(&definition.out)?;
