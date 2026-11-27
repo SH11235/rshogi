@@ -9,7 +9,7 @@ use super::reply_graph::HIRATE_KEY;
 use super::schema::Schema;
 use super::targets::{Line, MAX_DEPTH, MAX_PRIORITY, Opts};
 use super::walk::{Excluded, check_tag, queue_id, queue_positions};
-use crate::book_db::{child_position_after_move, strip_ply};
+use crate::book_db::{child_position_after_move, position_from_sfen, strip_ply};
 use crate::kif::usi_moves_to_short_kif;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -78,6 +78,9 @@ pub(super) struct ExitReportArgs {
     /// 既に積んだ木のキュー (繰り返し可)
     #[arg(long, requires = "enqueue_out")]
     exclude_queue: Vec<PathBuf>,
+    /// 指定局面を通る出口を積み荷から除く (1 行 1 局面キー、繰り返し可)
+    #[arg(long, value_name = "PATH")]
+    exclude_through: Vec<PathBuf>,
     /// 木の段数
     #[arg(long, default_value_t = 6, requires = "enqueue_out")]
     depth: usize,
@@ -258,6 +261,9 @@ impl ExitReportArgs {
         for path in &self.exclude_queue {
             inputs.push(("--exclude-queue", path.as_path()));
         }
+        for path in &self.exclude_through {
+            inputs.push(("--exclude-through", path.as_path()));
+        }
         let schema_paths: Vec<_> =
             self.schema.iter().flat_map(|dir| super::schema::paths(dir)).collect();
         for path in &schema_paths {
@@ -276,6 +282,45 @@ impl ExitReportArgs {
         }
         Ok(())
     }
+}
+
+const EXCLUDED_THROUGH: &str = "excluded-through";
+
+fn excluded_through_keys(paths: &[PathBuf]) -> Result<BTreeSet<String>> {
+    let mut keys = BTreeSet::new();
+    for path in paths {
+        let file = File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
+        for (n, line) in BufReader::new(file).lines().enumerate() {
+            let at = || format!("{}:{}", path.display(), n + 1);
+            let line = line.with_context(at)?;
+            let key = line.trim();
+            if key.is_empty() || key.starts_with('#') {
+                continue;
+            }
+            ensure!(
+                key.split_whitespace().count() == 3,
+                "{}: 局面キーは盤・手番・持ち駒の 3 フィールドです: {key}",
+                at()
+            );
+            let position = position_from_sfen(key).with_context(at)?;
+            keys.insert(strip_ply(&position.to_sfen()).to_owned());
+        }
+    }
+    Ok(keys)
+}
+
+fn passes_excluded_key(item: &Item, excluded_keys: &BTreeSet<String>) -> Result<bool> {
+    if item.class == Class::Good {
+        return Ok(false);
+    }
+    if excluded_keys.contains(&item.key) {
+        return Ok(true);
+    }
+    let Some(moves) = &item.moves else {
+        return Ok(false);
+    };
+    let (keys, _) = walk_keys(moves)?;
+    Ok(keys.iter().any(|key| excluded_keys.contains(key)))
 }
 
 /// 手順を辿り、指す前の各局面のキーと最後の局面のキーを返す。
@@ -529,6 +574,7 @@ pub(super) fn run(args: ExitReportArgs) -> Result<()> {
 
 fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     args.check()?;
+    let excluded_keys = excluded_through_keys(&args.exclude_through)?;
     let (states, box_inputs) = tree_states(&args.box_specs, &args.queue_box_specs)?;
     for output in [&args.table, &args.markdown, &args.enqueue_out].into_iter().flatten() {
         let inputs: Vec<_> =
@@ -715,6 +761,14 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     }
     // 同じ重みは入力の表の順のまま (安定な並べ替え)。
     items.sort_by(|a, b| a.class.cmp(&b.class).then_with(|| b.weight.total_cmp(&a.weight)));
+    let excluded_through = if excluded_keys.is_empty() {
+        Vec::new()
+    } else {
+        items
+            .iter()
+            .map(|item| passes_excluded_key(item, &excluded_keys))
+            .collect::<Result<Vec<_>>>()?
+    };
     let queued = |item: &Item| -> Result<String> {
         let rejoin = item.extra.iter().find(|(k, v)| *k == "rejoin" && !v.is_empty());
         let dig = (item.class == Class::Rejoin).then(|| dig_root(item)).transpose()?;
@@ -749,8 +803,21 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
     let enqueue = args
         .enqueue_out
         .as_ref()
-        .map(|_| queue_lines(&items, &paths, &args, &states, &excluded, &held))
+        .map(|_| queue_lines(&items, &paths, &args, &states, &excluded, &held, &excluded_through))
         .transpose()?;
+    let disposition = |i: usize, item: &Item| match &enqueue {
+        Some(plan) => plan.dispositions[i].as_str(),
+        None if item.class == Class::Good => "good",
+        None if excluded_through.get(i) == Some(&true) => EXCLUDED_THROUGH,
+        None => "not-requested",
+    };
+    let excluded_through_count = (!args.exclude_through.is_empty()).then(|| {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(i, item)| disposition(*i, item) == EXCLUDED_THROUGH)
+            .count()
+    });
     let mut counts = BTreeMap::new();
     for item in &items {
         *counts.entry(item.class).or_insert(0usize) += 1;
@@ -804,20 +871,17 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
                 item.moves.as_ref().map_or_else(|| UNKNOWN.to_owned(), |m| m.join(" ")),
                 extra,
                 path,
-                enqueue.as_ref().map_or(
-                    if item.class == Class::Good {
-                        "good"
-                    } else {
-                        "not-requested"
-                    },
-                    |plan| plan.dispositions[i].as_str(),
-                )
+                disposition(i, item),
             )?;
         }
         write_atomic(path, &bytes)?;
     }
     if let Some(path) = &args.markdown {
-        let bytes = markdown(&args, &items, &queued)?;
+        let enqueue_column = excluded_through_count.map(|count| {
+            let cells = items.iter().enumerate().map(|(i, item)| disposition(i, item)).collect();
+            (cells, count)
+        });
+        let bytes = markdown(&args, &items, &queued, enqueue_column)?;
         write_atomic(path, &bytes)?;
     }
     if let (Some(path), Some(plan)) = (&args.enqueue_out, enqueue) {
@@ -825,9 +889,11 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
         let enqueue_sha256 = Sha256::digest(bytes.as_bytes());
         crate::common::io::write_atomic(path, &bytes)?;
         let counts = plan.counts;
+        let through_summary = excluded_through_count
+            .map_or_else(String::new, |count| format!(" excluded_through={count}"));
         writeln!(
             stdout,
-            "積み荷: 出力={} 照合除外={} 手数なし={} まとめた行={} 続きへ移した行={} path_not_ok={} master_sha256={} enqueue_sha256={:x}",
+            "積み荷: 出力={} 照合除外={} 手数なし={} まとめた行={} 続きへ移した行={} path_not_ok={} master_sha256={} enqueue_sha256={:x}{through_summary}",
             plan.lines.len(),
             counts.excluded,
             counts.no_number,
@@ -837,6 +903,8 @@ fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
             master_sha256,
             enqueue_sha256,
         )?;
+    } else if let Some(count) = excluded_through_count {
+        writeln!(stdout, "excluded_through={count}")?;
     }
     Ok(())
 }
@@ -944,6 +1012,7 @@ fn queue_lines(
     states: &[TreeState],
     excluded: &Excluded,
     held: &BTreeSet<String>,
+    excluded_through: &[bool],
 ) -> Result<EnqueuePlan> {
     let mut picked: Vec<_> =
         items.iter().enumerate().filter(|(_, i)| i.class != Class::Good).collect();
@@ -974,6 +1043,10 @@ fn queue_lines(
         if let Some(reason) = covering_tree(states, excluded, held, &key, own, true) {
             counts.excluded += 1;
             dispositions[i] = reason;
+            continue;
+        }
+        if excluded_through.get(i) == Some(&true) {
+            dispositions[i] = EXCLUDED_THROUGH.into();
             continue;
         }
         match positions.get(&(key.clone(), own.clone())) {
@@ -1184,6 +1257,7 @@ fn markdown(
     args: &ExitReportArgs,
     items: &[Item],
     queued: &dyn Fn(&Item) -> Result<String>,
+    enqueue_column: Option<(Vec<&str>, usize)>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let title = if args.title.is_empty() {
@@ -1197,28 +1271,43 @@ fn markdown(
         "重み = その出口に来る割合。何手目 = その局面で次に指す手の番号 (先手は奇数、後手は偶数)。出口の局面 = 止まった局面の手番と何手目で、かっこの中は手番が RAMU か相手か (own の止まりは RAMU の手番、out・rare は相手の手番、max は辿りの上限の手数による)。値 = RAMU が最後に指した定跡の手の値 (プラス = 先手良し)、出所 = 元データの value_kind。目標: 先手 {:+} 以上・後手 {:+} 未満。受付 = 同じ根・同じ側の段 1 以上の木 (id、台、状態)。根を移す行は出口と続きの先の両方を照合し、続きの先の一致には「(続きの先)」を添えます。\n",
         args.target_black, args.target_white
     )?;
+    let (heading, separator) = if let Some((_, count)) = &enqueue_column {
+        writeln!(out, "通過局面で除外した行 (excluded-through) は {count} 件です。\n")?;
+        (" enqueue |", "---|")
+    } else {
+        ("", "")
+    };
+    let write_enqueue = |out: &mut Vec<u8>, i: usize| -> Result<()> {
+        if let Some((cells, _)) = &enqueue_column {
+            write!(out, " {} |", cells[i])?;
+        }
+        Ok(())
+    };
     let exits = |out: &mut Vec<u8>, title: &str, note: &str, class: Class| -> Result<()> {
         writeln!(out, "## {title}\n")?;
         if !note.is_empty() {
             writeln!(out, "{note}\n")?;
         }
         for side in ["b", "w"] {
-            let rows: Vec<_> =
-                items.iter().filter(|i| i.class == class && i.side == side).collect();
+            let rows: Vec<_> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| i.class == class && i.side == side)
+                .collect();
             if rows.is_empty() {
                 continue;
             }
             writeln!(out, "### RAMU が{}\n", side_name(side))?;
-            let (heading, separator) = if class == Class::Shallow {
+            let (settle_heading, settle_separator) = if class == Class::Shallow {
                 ("", "")
             } else {
                 (" 元データの続き (手数 / 末端の先手値 / 理由) |", "---|")
             };
             writeln!(
                 out,
-                "| 出口の局面 | 重み | 値 | 出所 | 目標 | 受付 | 手順 |{heading}\n|---|---:|---:|---|---|---|---|{separator}"
+                "| 出口の局面 | 重み | 値 | 出所 | 目標 | 受付 | 手順 |{settle_heading}{heading}\n|---|---:|---:|---|---|---|---|{settle_separator}{separator}"
             )?;
-            for r in rows {
+            for (i, r) in rows {
                 write!(
                     out,
                     "| {} ({}) | {:.3} | {} | {} | {} | {} | {} |",
@@ -1240,6 +1329,7 @@ fn markdown(
                         line.value_black.map_or_else(|| "不明".to_owned(), |v| fmt_value(Some(v)));
                     write!(out, " {} 手 / {value} / {} |", line.moves.len(), line.end.name())?;
                 }
+                write_enqueue(out, i)?;
                 writeln!(out)?;
             }
             writeln!(out)?;
@@ -1272,9 +1362,9 @@ fn markdown(
         )?;
         writeln!(
             out,
-            "| RAMU の側 / 局面 | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|---|"
+            "| RAMU の側 / 局面 | 重み | main | 補わない → 補う | 1 位 (補ったとき) | 受付 | その局面までの手順 |{heading}\n|---|---:|---|---|---|---|---|{separator}"
         )?;
-        for r in items.iter().filter(|i| i.class == Class::Gap) {
+        for (i, r) in items.iter().enumerate().filter(|(_, r)| r.class == Class::Gap) {
             let get =
                 |name: &str| r.extra.iter().find(|(k, _)| *k == name).map(|(_, v)| v.as_str());
             let path = r.moves.as_deref().unwrap_or_default();
@@ -1284,7 +1374,7 @@ fn markdown(
                 }
                 _ => String::new(),
             };
-            writeln!(
+            write!(
                 out,
                 "| RAMU が{} / {} | {:.3} | {} | {} → {} | {best} | {} | {} |",
                 side_name(&r.side),
@@ -1296,6 +1386,8 @@ fn markdown(
                 queued(r)?,
                 moves_text(r)?
             )?;
+            write_enqueue(&mut out, i)?;
+            writeln!(out)?;
         }
         writeln!(out)?;
     }
@@ -1311,9 +1403,9 @@ fn markdown(
         )?;
         writeln!(
             out,
-            "| 局面 (RAMU の手番) | 来る割合 | RAMU の手 (期待) | 相手の手 → 戻った先の main (値) | 受付 | その局面までの手順 |\n|---|---:|---|---|---|---|"
+            "| 局面 (RAMU の手番) | 来る割合 | RAMU の手 (期待) | 相手の手 → 戻った先の main (値) | 受付 | その局面までの手順 |{heading}\n|---|---:|---|---|---|---|{separator}"
         )?;
-        for r in items.iter().filter(|i| i.class == Class::Rejoin) {
+        for (i, r) in items.iter().enumerate().filter(|(_, r)| r.class == Class::Rejoin) {
             let get = |name: &str| {
                 r.extra
                     .iter()
@@ -1335,7 +1427,7 @@ fn markdown(
                 None => usi.iter().map(|mv| format!("`{mv}`")).collect(),
             };
             let at = |i: usize| shown.get(i).map(String::as_str).unwrap_or_default();
-            writeln!(
+            write!(
                 out,
                 "| {} | {:.4} | {} ({}) | {} → {} ({}) | {} | {} |",
                 position_text(r),
@@ -1348,6 +1440,8 @@ fn markdown(
                 queued(r)?,
                 moves_text(r)?
             )?;
+            write_enqueue(&mut out, i)?;
+            writeln!(out)?;
         }
         writeln!(out)?;
     }
