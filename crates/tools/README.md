@@ -42,7 +42,7 @@
 | LayerStacks の FT と L1 の列を並べ替える | [permute_nnue_ft](docs/permute_nnue_ft.md) |
 | その他のツールを探す | [目的別の全ツール一覧](docs/tools-reference.md) |
 
-`master audit --opp-joins` は、元データの局面へ直接着く未収録の相手の合法手を伝播に加えます。詳細は [audit の相手の合流手](docs/book_mine.md#相手の合流手) を参照してください。
+`master audit --opp-joins` は、元データの局面へ直接着く相手の合法手を伝播に加えます。詳細は [audit の相手の合流手](docs/book_mine.md#相手の合流手) を参照してください。
 
 `master audit --deep-plies N`（N は 1 以上）は、両方の手の先で元データの main が N 手以上続けば線未満も対象にします。直接のキーが無いときは反転キーでも続きを辿ります。
 `master audit` と `tree register` の `--switch-rule propagated` は線を使わず、main と 1 位の値がどちらも手の先の局面から来ていれば差が 1 でも main を替え、片方が 1 回の読みなら替えずに、その手を伸ばす木の行を `--single-enqueue-out` に出します (`--exclude-queue` で既に積んだ木を除く)。

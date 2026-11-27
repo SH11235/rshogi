@@ -221,6 +221,15 @@ impl Graph {
         self.row_start[node] as usize..self.row_start[node + 1] as usize
     }
 
+    /// 上限の値を表す手は、行き先が補完されても固定の葉として扱う。
+    pub(crate) fn fix_leaf(&mut self, key: &str, index: usize) -> Result<()> {
+        let node = self.find(key).context("内部エラー: 上限の局面がありません")?;
+        let row = self.rows(node).nth(index).context("内部エラー: 上限の手がありません")?;
+        ensure!(self.row_flags[row] & ROW_FLIP == 0, "内部エラー: 上限の手に反転の辺があります");
+        self.to[row] = NONE;
+        Ok(())
+    }
+
     fn blocks(&self, node: usize) -> &[u64] {
         &self.blocks[self.block_start[node] as usize..self.block_start[node + 1] as usize]
     }
