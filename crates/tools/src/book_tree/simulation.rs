@@ -1,4 +1,4 @@
-use super::journal::{Reading, simulation_readings};
+use super::journal::{Reading, Readings, simulation_readings};
 use super::model::{GameLine, Tree, TreeParams};
 use super::service::{Demand, reading_queue};
 use super::targets::{CHECKPOINT, Checkpoint, QUEUE, STATUS_FILE, StatusFile};
@@ -15,6 +15,7 @@ pub(super) struct Sample {
     pub params: TreeParams,
     pub lines: Vec<GameLine>,
     pub answers: Arc<BTreeMap<String, Reading>>,
+    pub structural_overrides: BTreeMap<String, Reading>,
     pub requested: BTreeSet<String>,
     pub fingerprint: String,
     pub priority: u32,
@@ -22,12 +23,30 @@ pub(super) struct Sample {
 }
 
 impl Sample {
+    fn answer(&self, key: &str) -> Option<&Reading> {
+        self.structural_overrides.get(key).or_else(|| self.answers.get(key))
+    }
+
     fn tree(&self) -> Result<Tree> {
         let mut params = self.params.clone();
         // 条件別台帳から確定した構造を再生し、構造行を engine の読みとして配布しない。
         params.skip = None;
         params.require_condition = false;
         Tree::build(params, &self.lines)
+    }
+}
+
+impl Readings for Sample {
+    fn get(&self, key: &str) -> Option<&Reading> {
+        self.answer(key).filter(|r| !r.is_shallow() || r.skipped.is_some())
+    }
+
+    fn get_preferred(&self, key: &str, _: Option<&str>) -> Option<&Reading> {
+        self.get(key)
+    }
+
+    fn condition(&self, _: &str, _: Option<&str>) -> Option<&str> {
+        None
     }
 }
 
@@ -51,8 +70,7 @@ pub(super) fn simulate(samples: &[&Sample], workers: usize, timing: Timing) -> R
     let mut durations = BTreeMap::<String, f64>::new();
     for sample in samples {
         for key in &sample.requested {
-            let reading =
-                sample.answers.get(key).with_context(|| format!("読みが足りない: {key}"))?;
+            let reading = sample.answer(key).with_context(|| format!("読みが足りない: {key}"))?;
             ensure!(reading.sec.is_finite() && reading.sec >= 0.0, "読み時間が不正: {key}");
             durations
                 .entry(key.clone())
@@ -71,17 +89,8 @@ pub(super) fn simulate(samples: &[&Sample], workers: usize, timing: Timing) -> R
         }
     }
     let mut trees = samples.iter().map(|s| s.tree()).collect::<Result<Vec<_>>>()?;
-    let mut delivered: Vec<BTreeMap<String, Reading>> = samples
-        .iter()
-        .map(|sample| {
-            sample
-                .answers
-                .iter()
-                .filter(|(_, reading)| reading.structural_move().is_some())
-                .map(|(key, reading)| (key.clone(), reading.clone()))
-                .collect()
-        })
-        .collect();
+    let mut delivered: Vec<_> =
+        samples.iter().map(|sample| sample.structural_overrides.clone()).collect();
     let mut completed = BTreeSet::new();
     let mut running = BTreeMap::<String, f64>::new();
     let mut requested = BTreeMap::<String, BTreeSet<&str>>::new();
@@ -97,7 +106,7 @@ pub(super) fn simulate(samples: &[&Sample], workers: usize, timing: Timing) -> R
             let missing = tree.advance(cache)?;
             for (key, _) in &missing {
                 ensure!(
-                    sample.answers.contains_key(key),
+                    sample.answer(key).is_some(),
                     "木 {} の読みが足りない: {key}",
                     sample.order
                 );
@@ -139,7 +148,7 @@ pub(super) fn simulate(samples: &[&Sample], workers: usize, timing: Timing) -> R
             running.remove(&key);
             completed.insert(key.clone());
             for (sample, cache) in samples.iter().zip(&mut delivered) {
-                if let Some(answer) = sample.answers.get(&key) {
+                if let Some(answer) = sample.answer(&key) {
                     cache.insert(key.clone(), answer.clone());
                 }
             }
@@ -371,7 +380,7 @@ pub(super) fn simulate_prefetch(
     let mut durations = BTreeMap::<String, f64>::new();
     for sample in samples {
         for key in &sample.requested {
-            let answer = sample.answers.get(key).context("要求の読みがありません")?;
+            let answer = sample.answer(key).context("要求の読みがありません")?;
             ensure!(answer.sec.is_finite() && answer.sec >= 0.0, "読み時間が不正");
             durations
                 .entry(key.clone())
@@ -384,17 +393,8 @@ pub(super) fn simulate_prefetch(
         Timing::Maximum => durations.values().copied().fold(0.0, f64::max),
     };
     let mut trees = samples.iter().map(|s| s.tree()).collect::<Result<Vec<_>>>()?;
-    let mut delivered: Vec<BTreeMap<String, Reading>> = samples
-        .iter()
-        .map(|sample| {
-            sample
-                .answers
-                .iter()
-                .filter(|(_, reading)| reading.structural_move().is_some())
-                .map(|(key, reading)| (key.clone(), reading.clone()))
-                .collect()
-        })
-        .collect();
+    let mut delivered: Vec<_> =
+        samples.iter().map(|sample| sample.structural_overrides.clone()).collect();
     let mut shadows: Vec<_> = samples
         .iter()
         .map(|_| ShadowCache {
@@ -440,7 +440,7 @@ pub(super) fn simulate_prefetch(
             shadows[i].dirty |= tree.nodes.len() != before;
             for (key, _) in &pending {
                 ensure!(
-                    samples[i].answers.contains_key(key),
+                    samples[i].answer(key).is_some(),
                     "木 {} の読みが足りない: {key}",
                     samples[i].order
                 );
@@ -614,11 +614,7 @@ pub(super) fn simulate_prefetch(
             }
             for (key, rank) in candidates.into_iter().take(slots) {
                 let duration = durations.get(&key).copied().or_else(|| {
-                    samples
-                        .iter()
-                        .filter_map(|s| s.answers.get(&key))
-                        .map(|r| r.sec)
-                        .reduce(f64::max)
+                    samples.iter().filter_map(|s| s.answer(&key)).map(|r| r.sec).reduce(f64::max)
                 });
                 let duration = if let Some(sec) = duration {
                     ensure!(sec.is_finite() && sec >= 0.0, "先読み時間が不正");
@@ -675,7 +671,7 @@ pub(super) fn simulate_prefetch(
             recent.push(job.duration);
             completed.insert(key.clone());
             for (i, sample) in samples.iter().enumerate() {
-                if let Some(answer) = sample.answers.get(&key) {
+                if let Some(answer) = sample.answer(&key) {
                     delivered[i].insert(key.clone(), answer.clone());
                     shadows[i].dirty |= shadows[i].candidates.iter().any(|c| c.key == key);
                 }
@@ -723,7 +719,7 @@ pub(super) fn simulate_prefetch(
 
 pub(super) fn preflight(sample: &mut Sample) -> Result<()> {
     let mut tree = sample.tree()?;
-    let missing = tree.advance(sample.answers.as_ref())?;
+    let missing = tree.advance(sample)?;
     ensure!(
         tree.finished,
         "読みが足りない: {} (不足 {} 局面)",
@@ -789,18 +785,19 @@ fn load_sample(
         .checked_mul(1u64 << 32)
         .context("state 数が範囲外")?;
     ensure!(target.order < 1u64 << 32, "受付順が範囲外");
-    let mut answers = sources[&source_key].clone();
+    let mut structural_overrides = BTreeMap::new();
     if target.definition.skip.is_some() {
         for reading in super::register::tree_readings(&target.out)? {
             if reading.skipped.is_some() {
-                Arc::make_mut(&mut answers).insert(reading.key.clone(), reading);
+                structural_overrides.insert(reading.key.clone(), reading);
             }
         }
     }
     Ok(Sample {
         params: target.definition.params(&target.own, &target.out),
         lines: target.definition.lines(),
-        answers,
+        answers: Arc::clone(&sources[&source_key]),
+        structural_overrides,
         requested: BTreeSet::new(),
         fingerprint: checkpoint.fingerprint,
         priority: target.priority,
@@ -808,7 +805,7 @@ fn load_sample(
     })
 }
 
-fn load_samples(input: &Path) -> Result<Vec<Sample>> {
+pub(super) fn load_samples(input: &Path) -> Result<Vec<Sample>> {
     let mut sources = BTreeMap::new();
     let mut samples = Vec::new();
     let mut states = BTreeMap::new();
@@ -1018,7 +1015,7 @@ fn preemption_simulation() -> Result<()> {
                     )?;
                     for (tree, sample) in result.trees.iter().zip(&samples) {
                         let mut expected = sample.tree()?;
-                        expected.advance(sample.answers.as_ref())?;
+                        expected.advance(sample)?;
                         ensure!(
                             tree.nodes == expected.nodes
                                 && tree.force == expected.force

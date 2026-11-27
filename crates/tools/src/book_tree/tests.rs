@@ -1336,6 +1336,7 @@ fn simulation_serial_bound_and_completion_order_preserve_tree() {
             params: def.params(),
             lines: lines.clone(),
             answers: Arc::new(answers),
+            structural_overrides: BTreeMap::new(),
             requested: BTreeSet::new(),
             fingerprint: "condition-a".into(),
             priority: 100,
@@ -1401,6 +1402,7 @@ fn simulation_shared_keys_use_each_trees_answers_and_maximum_duration() {
                 params: params.clone(),
                 lines: vec![(ROOT.into(), 1, vec![])],
                 answers: Arc::new(BTreeMap::from([(ROOT.into(), answer)])),
+                structural_overrides: BTreeMap::new(),
                 requested: BTreeSet::new(),
                 fingerprint: format!("condition-{i}"),
                 priority: 100,
@@ -1463,6 +1465,7 @@ fn simulation_later_demand_waits_for_busy_key_and_ignores_unused_answers() {
             (ROOT.into(), unused_root),
             (unused_key.clone(), unused_answer),
         ])),
+        structural_overrides: BTreeMap::new(),
         requested: BTreeSet::new(),
         fingerprint: "first".into(),
         priority: 100,
@@ -1477,6 +1480,7 @@ fn simulation_later_demand_waits_for_busy_key_and_ignores_unused_answers() {
             (ROOT.into(), root_answer),
             (shared.clone(), shared_answer),
         ])),
+        structural_overrides: BTreeMap::new(),
         requested: BTreeSet::new(),
         fingerprint: "second".into(),
         priority: 100,
@@ -2720,6 +2724,7 @@ fn single_legal_simulations_count_only_engine_reads() {
             params: single_legal_tree(dir.path(), 0, 0).def,
             lines: vec![(SINGLE_LEGAL.into(), 1, vec![])],
             answers: answers.clone(),
+            structural_overrides: BTreeMap::new(),
             requested: BTreeSet::new(),
             fingerprint: format!("condition-{order}"),
             priority: 100,
@@ -3006,34 +3011,107 @@ fn shallow_skip_output_propagation_game_and_replay() {
 }
 
 #[test]
-fn shallow_skip_simulation_replays_structure_without_counting_it() {
-    use super::simulation::{
-        PrefetchOptions, Sample, Timing, preflight, simulate, simulate_prefetch,
+fn shallow_skip_simulation_shares_journal_and_replays_tree_overrides() -> anyhow::Result<()> {
+    use super::simulation::{PrefetchOptions, Timing, load_samples, simulate, simulate_prefetch};
+    use super::targets::{CHECKPOINT, Checkpoint, Defaults, QUEUE, STATUS_FILE, StatusFile};
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir()?;
+    let state = dir.path();
+    let (fixture, mut journal, settings, key) = skip_fixture(state, 0, -500);
+    let end = child(&key, "5a4a")?;
+    journal.append(
+        reading(&end, &[(&legal(&end)[0], 456)], &settings),
+        &settings,
+        "engine".into(),
+    )?;
+
+    let defaults = Defaults {
+        skip: fixture.def.skip,
+        multipv: settings.multipv,
+        nodes: settings.nodes,
+        opp_n: 1,
+        stop: 300,
+        rounds: 0,
+        extend: 0,
+        extend_rounds: 1,
+        settle_rounds: 0,
+        draw: 17,
     };
-    let dir = tempfile::tempdir().unwrap();
-    let (mut tree, mut journal, settings, key) = skip_fixture(dir.path(), 0, -500);
-    let end = child(&key, "5a4a").unwrap();
-    journal
-        .append(reading(&end, &[(&legal(&end)[0], 456)], &settings), &settings, "engine".into())
-        .unwrap();
-    tree.advance(&journal).unwrap();
-    let mut sample = Sample {
-        params: tree.def.clone(),
-        lines: vec![(ROOT.into(), 1, vec![])],
-        answers: std::sync::Arc::new(tree.nodes.clone()),
-        requested: BTreeSet::new(),
-        fingerprint: settings.fingerprint,
-        priority: 100,
-        order: 0,
-    };
-    preflight(&mut sample).unwrap();
-    assert_eq!(sample.requested.len(), 2);
-    let result = simulate(&[&sample], 1, Timing::Maximum).unwrap();
-    assert_eq!(result.count, 2);
-    assert_eq!(result.elapsed, 0.2);
-    let result = simulate_prefetch(&[&sample], 1, PrefetchOptions::default()).unwrap();
-    assert_eq!(result.wait_count, 2);
-    assert_eq!(result.trees_done, 0.2);
+    let ids = ["skip-a", "skip-b", "full"];
+    let mut queue = Vec::new();
+    for (id, root, depth) in [
+        (ids[0], ROOT, 1),
+        (ids[1], ROOT, 1),
+        (ids[2], key.as_str(), 0),
+    ] {
+        serde_json::to_writer(
+            &mut queue,
+            &serde_json::json!({
+                "id": id, "root": format!("sfen {root} 1"), "own": "w", "depth": depth,
+            }),
+        )?;
+        queue.push(b'\n');
+    }
+    let checkpoint = Checkpoint::new(state.join("trees"), settings.fingerprint.clone());
+    let (checkpoint, trees) = checkpoint.apply(&queue, &defaults, &Sha256::new(), &[]);
+    assert_eq!(trees.len(), ids.len(), "{:?}", checkpoint.rejected);
+    for (_, mut tree) in trees.into_iter().filter(|(index, _)| *index < 2) {
+        tree.set_condition(&settings);
+        tree.configure_skip(&settings)?;
+        assert!(tree.advance(&journal)?.is_empty());
+        assert!(tree.nodes[&key].skipped.is_some());
+        tree.write_outputs()?;
+    }
+
+    // 後から台帳に本読みが入り、先に完成した木だけが短い読みの接続を使う。
+    let full = reading(&key, &[("5a6a", 400)], &settings);
+    journal.append(full.clone(), &settings, "engine".into())?;
+
+    let mut status = StatusFile::resuming("simulation", &checkpoint);
+    for target in &mut status.targets {
+        target.state = "DONE".into();
+    }
+    std::fs::write(state.join(QUEUE), queue)?;
+    std::fs::write(state.join(CHECKPOINT), serde_json::to_vec(&checkpoint)?)?;
+    std::fs::write(state.join(STATUS_FILE), serde_json::to_vec(&status)?)?;
+    let journal_path = state.join("skip-journal.jsonl");
+    let input = state.join("samples.tsv");
+    let tsv: String = ids
+        .iter()
+        .map(|id| format!("{}\t{}\t{id}\n", state.display(), journal_path.display()))
+        .collect();
+    std::fs::write(&input, tsv)?;
+
+    let samples = load_samples(&input)?;
+    assert_eq!(samples.len(), ids.len());
+    for sample in &samples {
+        assert!(Arc::ptr_eq(&samples[0].answers, &sample.answers));
+        assert_eq!(sample.answers[&key], full);
+    }
+    for sample in &samples[..2] {
+        assert_eq!(sample.requested, BTreeSet::from([ROOT.into(), end.clone()]));
+    }
+    assert_eq!(samples[2].requested, BTreeSet::from([key.clone()]));
+
+    let selected = samples.iter().collect::<Vec<_>>();
+    let result = simulate(&selected, 1, Timing::Maximum)?;
+    assert_eq!(result.count, 3);
+    assert!((result.elapsed - 0.3).abs() < 1e-9);
+    let prefetched = simulate_prefetch(&selected, 1, PrefetchOptions::default())?;
+    assert_eq!(prefetched.wait_count, 3);
+    assert_eq!(prefetched.trees_done, result.elapsed);
+    for (tree, prefetched) in result.trees.iter().zip(&prefetched.trees) {
+        assert_eq!(tree.nodes, prefetched.nodes);
+        assert_eq!(tree.edge, prefetched.edge);
+    }
+    for tree in &result.trees[..2] {
+        assert_eq!(tree.nodes[&key].structural_move(), Some("5a4a"));
+        assert!(tree.nodes.contains_key(&end));
+    }
+    assert_eq!(result.trees[2].nodes[&key], full);
+    Ok(())
 }
 
 #[test]
