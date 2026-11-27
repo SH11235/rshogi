@@ -363,20 +363,32 @@ fn master_add_line_reports_all_conflicting_positions_and_keeps_master() {
 #[test]
 fn master_add_line_uses_direct_keys_and_classifies_repeated_positions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut flipped = row("3c3d", "main");
-    let flipped_key = rshogi_book::flipped_key(SFEN_HIRATE).unwrap();
+    let mut flipped = row("7g7f", "main");
+    let after_7g7f = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+    let flipped_key = rshogi_book::flipped_key(after_7g7f).unwrap();
     flipped.set("key", strip_ply(&flipped_key).into());
     let original = line_master(dir.path(), &[flipped]);
-    for (last_move, expected) in [
-        ("5i5h", "line: add=4, skip=1, blocked=0"),
-        ("7g7f", "line: add=4, skip=0, blocked=1"),
+    for (line, to, fails, expected) in [
+        ("startpos moves 7g7f 3c3d", "2", false, "line: add=1, skip=0, blocked=0"),
+        (
+            "startpos moves 5i5h 5a5b 5h5i 5b5a 5i5h",
+            "5",
+            false,
+            "line: add=4, skip=1, blocked=0",
+        ),
+        (
+            "startpos moves 5i5h 5a5b 5h5i 5b5a 7g7f",
+            "5",
+            true,
+            "line: add=4, skip=0, blocked=1",
+        ),
     ] {
-        let line = format!("startpos moves 5i5h 5a5b 5h5i 5b5a {last_move}");
-        let mut args = line_args(dir.path(), &line, "1", "5", "pin", "test", "理由");
-        args.apply = last_move == "7g7f";
+        let from = if to == "2" { "2" } else { "1" };
+        let mut args = line_args(dir.path(), line, from, to, "pin", "test", "理由");
+        args.apply = fails;
         let mut out = Vec::new();
-        assert_eq!(run_to(args, &mut out).is_err(), last_move == "7g7f");
-        assert!(String::from_utf8(out).unwrap().contains(expected));
+        assert_eq!(run_to(args, &mut out).is_err(), fails);
+        assert!(String::from_utf8(out).unwrap().contains(expected), "{line}");
         assert_eq!(std::fs::read_to_string(dir.path().join("master.tsv")).unwrap(), original);
     }
 }
