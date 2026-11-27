@@ -573,8 +573,8 @@ pub(super) fn run(args: ExitReportArgs) -> Result<()> {
 }
 
 fn run_to(args: ExitReportArgs, stdout: &mut impl Write) -> Result<()> {
-    args.check()?;
     let excluded_keys = excluded_through_keys(&args.exclude_through)?;
+    args.check()?;
     let (states, box_inputs) = tree_states(&args.box_specs, &args.queue_box_specs)?;
     for output in [&args.table, &args.markdown, &args.enqueue_out].into_iter().flatten() {
         let inputs: Vec<_> =

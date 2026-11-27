@@ -1238,7 +1238,12 @@ fn enqueue_exclude_through_filters_only_the_exit_path() {
     let baseline_queue = read_queue(&out);
     let baseline_bytes = std::fs::read(&out).unwrap();
     assert_eq!(baseline_queue.len(), 3);
-    assert_eq!(baseline_queue.iter().filter(|line| line.root == continued_root).count(), 1);
+    let continued: Vec<_> =
+        baseline_queue.iter().filter(|line| line.root == continued_root).collect();
+    assert_eq!(continued.len(), 1);
+    let memo = continued[0].memo.as_deref().unwrap();
+    assert!(memo.contains("bad@5=ok"), "{memo}");
+    assert!(memo.contains("unsettled@2=ok"), "{memo}");
     assert!(baseline_stdout.contains("まとめた行=1"));
     assert!(!baseline_stdout.contains("excluded_through="));
     assert!(!baseline_md.contains("excluded-through"));
@@ -1248,11 +1253,24 @@ fn enqueue_exclude_through_filters_only_the_exit_path() {
     std::fs::write(&keys, format!("\n  # 固定する区間\n  {key}  \n \t\n")).unwrap();
     std::fs::write(&reverse, format!("{}\n", strip_ply(&flipped))).unwrap();
     let reverse_arg = ["--exclude-through", reverse.to_str().unwrap()];
-    let (stdout, table, _) =
+    let (stdout, table, md) =
         run_report_with_rows(&d, &walk, &[out_arg, reverse_arg].concat(), &rows);
     assert_eq!(table, baseline_table);
     assert_eq!(std::fs::read(&out).unwrap(), baseline_bytes);
     assert_eq!(stdout, format!("{} excluded_through=0\n", baseline_stdout.trim_end()));
+    let summary = "通過局面で除外した行 (excluded-through) は 0 件です。\n\n";
+    assert_eq!(md.matches(summary).count(), 1);
+    let md_without_summary = md.replacen(summary, "", 1);
+    assert_eq!(md_without_summary.lines().count(), baseline_md.lines().count());
+    for (actual, baseline) in md_without_summary.lines().zip(baseline_md.lines()) {
+        if baseline.starts_with('|') {
+            let (body, enqueue) = actual.strip_suffix('|').unwrap().rsplit_once('|').unwrap();
+            assert_eq!(format!("{body}|"), baseline);
+            assert_ne!(enqueue.trim(), "excluded-through");
+        } else {
+            assert_eq!(actual, baseline);
+        }
+    }
 
     let fixed_arg = ["--exclude-through", keys.to_str().unwrap()];
     let (stdout, table, md) =
@@ -1260,7 +1278,9 @@ fn enqueue_exclude_through_filters_only_the_exit_path() {
     // 続きで初めて固定局面を通る出口は残り、同じ根に統合される別の出口だけが外れる。
     let queue = read_queue(&out);
     assert_eq!(queue.len(), 2);
-    assert!(queue.iter().any(|line| line.root == continued_root));
+    let continued = queue.iter().find(|line| line.root == continued_root).unwrap();
+    let memo = continued.memo.as_deref().unwrap();
+    assert!(memo.ends_with(" path=[unsettled@2=ok]"), "{memo}");
     assert!(queue.iter().any(|line| line.root == format!("sfen {} 2", key_after(&other))));
     assert_eq!(baseline_table.lines().count(), table.lines().count());
     for (before, after) in baseline_table.lines().zip(table.lines()).skip(1) {
@@ -1309,7 +1329,8 @@ fn exclude_through_rejects_invalid_keys_before_writing_outputs() {
     let d = TempDir::new().unwrap();
     let out = d.path().join("plan.jsonl");
     let keys = d.path().join("fixed.keys");
-    let table = d.path().join("report.tsv");
+    let table_dir = d.path().join("new-output");
+    let table = table_dir.join("report.tsv");
     let md = d.path().join("report.md");
     let mut args = enqueue_args(&out);
     args.master = d.path().join("moves.tsv");
@@ -1332,6 +1353,7 @@ fn exclude_through_rejects_invalid_keys_before_writing_outputs() {
     assert!(err.to_string().contains(&format!("{}:3", keys.display())));
     assert!(stdout.is_empty());
     assert!([table, md, out].iter().all(|path| !path.exists()));
+    assert!(!table_dir.exists());
 }
 
 #[test]

@@ -2565,6 +2565,7 @@ book_mine tree enqueue --state /path/to/state --from exits.jsonl
 初期局面から表の `moves` を辿って出口自身までを直接キーで照合します。手順不明なら出口自身を照合し、反転キーや出口から先の手順は照合に使いません。
 該当の出口は TSV と Markdown に残り、積み荷から外れます。受付にも一致する場合は、積み荷を作るときの `covered` 判定が優先です。
 この引数を指定すると、Markdown に `enqueue` 欄と除外件数を、標準出力に `excluded_through` を出します。
+`--enqueue-out` を省くと受付照合前の除外件数を表示するため、受付ありの `covered` が優先される積み荷の作成時とは件数が異なることがあります。
 
 | 分類 | 根 | 根の手数 | game |
 | --- | --- | --- | --- |
