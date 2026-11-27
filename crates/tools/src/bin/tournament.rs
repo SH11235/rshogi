@@ -1062,7 +1062,7 @@ fn worker_main(
     };
     let mut engines: Vec<Option<EngineProcess>> = (0..engine_configs.len()).map(|_| None).collect();
     let mut live_oldest_first = Vec::new();
-    if max_live_engines == 0 || engines.len() == 2 {
+    if !uses_lazy_spawn(engines.len(), max_live_engines) {
         for (i, slot) in engines.iter_mut().enumerate() {
             let Some(engine) = spawn(i) else {
                 return;
@@ -1105,7 +1105,7 @@ fn worker_main(
         // usinewgame/isready が失敗した EngineProcess は同期状態を保証できない。
         // error 結果を 1 件返して worker ごと退役し、再試行は新しいプロセスへ渡す。
         if let Err(e) = black.new_game().and_then(|_| white.new_game()) {
-            eprintln!("worker: new game error: {e}; retiring worker");
+            eprintln!("worker {id}: new game error: {e}; retiring worker");
             let _ = tx.send(MatchResult {
                 ticket,
                 outcome: GameOutcome::Draw,
@@ -1332,6 +1332,10 @@ fn reserve_output_directory(path: &Path) -> Result<File> {
     // 検査と lock 取得の間に先行 run が出力して終了した場合も上書きしない。
     check_output_directory(path)?;
     Ok(lock)
+}
+
+fn uses_lazy_spawn(engine_count: usize, max_live_engines: usize) -> bool {
+    max_live_engines != 0 && engine_count > max_live_engines
 }
 
 fn main() -> Result<()> {
@@ -1699,7 +1703,12 @@ fn main() -> Result<()> {
         None => (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))).collect(),
     };
 
-    if cli.max_live_engines_per_worker != 0 {
+    if uses_lazy_spawn(n, cli.max_live_engines_per_worker) {
+        if cli.concurrency / 2 >= cli.games as usize {
+            eprintln!(
+                "warning: --concurrency is at least 2 × --games; workers may reload engines almost every game as they switch matchups"
+            );
+        }
         let cpus = cpu_slots.as_ref().map(|slots| slots.sets[0].as_slice());
         for (cfg, label) in engine_configs.iter().zip(&engine_labels) {
             anyhow::ensure!(!shutdown.load(Ordering::Relaxed), "engine preflight interrupted");

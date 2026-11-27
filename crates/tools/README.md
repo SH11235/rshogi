@@ -143,7 +143,7 @@ Fischer 時計の NPS による補正（`--nps-scaling`）と Linux の NUMA 固
 engine ごとの相手手番思考は `--ponder 0:true 1:false` で指定できます。
 的中時は PV の先頭と bestmove の一致を確認して評価値を採用し、厳密な主 PV は個別に検査します。
 詳しくは [ponder の設定と CPU 割り当て](docs/tournament.md#相手手番の思考ponder)を参照してください。
-3 本以上で対局する場合、各 worker のエンジン常駐数は既定で 2 本です。
+3 本以上で対局する場合、各 worker のエンジン常駐数は既定で最大 2 本です。
 変更するには [`--max-live-engines-per-worker`](docs/tournament.md#エンジンの常駐数とメモリ)を使います。
 中断・動的な局数変更・SPRT は [tournament](docs/tournament.md)、
 不完全入力の扱いは [analyze_selfplay](docs/analyze_selfplay.md) を参照してください。

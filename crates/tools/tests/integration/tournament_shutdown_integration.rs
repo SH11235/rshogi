@@ -24,7 +24,7 @@ fn run_case(mode: &str, concurrency: u32) -> (tempfile::TempDir, serde_json::Val
 while IFS= read -r line; do
   case "$line" in
     usi)
-      if [ "$MODE" = "fail" ] && [ -d "$GATE/preflight" ]; then exit 1; fi
+      if [ "$MODE" = "fail" ]; then exit 1; fi
       printf 'id name shutdown-mock
 usiok
 ' ;;
@@ -49,15 +49,7 @@ usiok
       fi
       printf 'bestmove resign
 ' ;;
-    quit)
-      if [ "$MODE" = "fail" ]; then
-        if [ -d "$GATE/first-ready" ]; then
-          mkdir "$GATE/preflight"
-        else
-          mkdir "$GATE/first-ready"
-        fi
-      fi
-      break ;;
+    quit) break ;;
   esac
 done
 "#,
@@ -167,7 +159,9 @@ fn preflight_failure_exits_before_creating_game_outputs() {
         .arg(&engine)
         .args(["--engine-label", "a", "--engine"])
         .arg(&engine)
-        .args(["--engine-label", "b", "--nodes", "1", "--out-dir"])
+        .args(["--engine-label", "b", "--engine"])
+        .arg(&engine)
+        .args(["--engine-label", "c", "--nodes", "1", "--out-dir"])
         .arg(&out_dir)
         .output()
         .unwrap();
