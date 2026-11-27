@@ -1,5 +1,6 @@
 #![cfg(unix)]
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::Path;
@@ -9,8 +10,8 @@ fn engine(path: &Path) {
     fs::write(
         path,
         r#"#!/bin/sh
-printf 'launch
-' >> "$LAUNCH_LOG"
+printf 'launch %s\n' "$$" >> "$LAUNCH_LOG"
+trap 'printf "exit %s\n" "$$" >> "$LAUNCH_LOG"' EXIT
 while IFS= read -r line; do
   case "$line" in
     usi) printf 'id name output-mock
@@ -29,7 +30,7 @@ done
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-fn run(engine: &Path, output: &Path, labels: &[&str], launches: &Path) -> std::process::Output {
+fn tournament_command(engine: &Path, output: &Path, labels: &[&str], launches: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tournament"));
     for label in labels {
         cmd.arg("--engine").arg(engine).arg(format!("--engine-label={label}"));
@@ -44,9 +45,93 @@ fn run(engine: &Path, output: &Path, labels: &[&str], launches: &Path) -> std::p
         "--out-dir",
     ])
     .arg(output)
-    .env("LAUNCH_LOG", launches)
-    .output()
-    .unwrap()
+    .env("LAUNCH_LOG", launches);
+    cmd
+}
+
+fn run(engine: &Path, output: &Path, labels: &[&str], launches: &Path) -> std::process::Output {
+    tournament_command(engine, output, labels, launches).output().unwrap()
+}
+
+#[test]
+fn base_vs_n_preserves_colors_and_limits_live_engines() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = dir.path().join("engine.sh");
+    engine(&mock);
+    let output = dir.path().join("run");
+    let launches = dir.path().join("launches");
+    let result = tournament_command(&mock, &output, &["base", "a", "b"], &launches)
+        .args(["--base-label", "base"])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert!(stdout.lines().any(|line| line == "Engine swaps: 1"), "{stdout}");
+
+    for (index, opponent) in [(1, "a"), (2, "b")] {
+        let jsonl =
+            fs::read_to_string(output.join(format!("pair-0-{index}__base-vs-{opponent}.jsonl")))
+                .unwrap();
+        let rows: Vec<Value> =
+            jsonl.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let [meta, first_move, first_result, second_move, second_result] = rows.as_slice() else {
+            panic!("unexpected JSONL rows: {jsonl}");
+        };
+        assert_eq!(meta["engine_cmd"]["label_black"], "base");
+        assert_eq!(meta["engine_cmd"]["label_white"], opponent);
+        for (slot, ((played, result), (black, white))) in
+            [(first_move, first_result), (second_move, second_result)]
+                .into_iter()
+                .zip([("base", opponent), (opponent, "base")])
+                .enumerate()
+        {
+            assert_eq!(played["type"], "move");
+            assert_eq!(played["engine"], black);
+            assert_eq!(result["type"], "result");
+            assert_eq!(result["pair_slot"], slot);
+            assert_eq!(result["reason"], "resign");
+            assert_eq!(result["winner"], white);
+        }
+    }
+
+    let events = fs::read_to_string(launches).unwrap();
+    let mut live = HashSet::new();
+    let mut peak = 0;
+    let mut launch_count = 0;
+    for line in events.lines() {
+        let (event, pid) = line.split_once(' ').unwrap();
+        match event {
+            "launch" => {
+                assert!(live.insert(pid), "{events}");
+                peak = peak.max(live.len());
+                launch_count += 1;
+            }
+            "exit" => assert!(live.remove(pid), "{events}"),
+            _ => panic!("unknown engine event: {line}"),
+        }
+    }
+    assert!(live.is_empty(), "{events}");
+    assert_eq!(peak, 2, "{events}");
+    assert_eq!(launch_count, 6, "{events}");
+}
+
+#[test]
+fn live_engine_limit_of_one_is_rejected_before_spawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = dir.path().join("engine.sh");
+    engine(&mock);
+    let launches = dir.path().join("launches");
+    let result = tournament_command(&mock, &dir.path().join("run"), &["a", "b"], &launches)
+        .args(["--max-live-engines-per-worker", "1"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("--max-live-engines-per-worker must be 0 or at least 2"),
+        "{stderr}"
+    );
+    assert!(!launches.exists());
 }
 
 #[test]

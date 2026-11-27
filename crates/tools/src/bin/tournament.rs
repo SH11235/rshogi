@@ -42,7 +42,7 @@
 ///
 /// - `target_games`: 各方向・各ペアあたりの目標対局数（CLI `--games` と同じ単位）。
 ///   増やすと既存ペアに追加チケットを供給し、減らすと in-flight を drain して停止する。
-/// - `concurrency`: ワーカー数。増やすと即座に追加 spawn（NNUE ロード相当のコストあり）、
+/// - `concurrency`: ワーカー数。増やすとワーカーを追加し、必要なエンジンを起動する。
 ///   減らすと対象ワーカーが現局面完了後に退役する。
 ///
 /// 変更は `<out-dir>/control_history.jsonl` に追記され、`pair_index` 整合は維持されるため
@@ -52,7 +52,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -113,6 +113,10 @@ struct Cli {
     /// Number of concurrent workers
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
+
+    /// ワーカーごとに同時起動するエンジンの上限（0 は全エンジンを常駐、1 は不可）
+    #[arg(long, default_value_t = 2)]
+    max_live_engines_per_worker: usize,
 
     /// Byoyomi time per move in milliseconds (mutually exclusive with --btime/--binc/--wtime/--winc)
     #[arg(long, default_value_t = 0)]
@@ -857,12 +861,11 @@ impl PairWriter {
 // ---------------------------------------------------------------------------
 
 struct WorkerConfig {
-    engine_paths: Vec<PathBuf>,
+    id: usize,
+    engine_configs: Arc<[EngineConfig]>,
     engine_labels: Vec<String>,
-    engine_usi_options: Vec<Vec<String>>,
-    engine_ponder: Vec<bool>,
-    threads: usize,
-    hash_mb: u32,
+    max_live_engines: usize,
+    engine_swaps: Arc<AtomicUsize>,
     max_moves: u32,
     preserve_start_history: bool,
     adjudicate_resign: Option<ResignRule>,
@@ -872,7 +875,7 @@ struct WorkerConfig {
     timeout_margin_ms: u64,
     time_control: TimeControl,
     go_depth: Option<u32>,
-    /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
+    /// エンジン index ごとの固定ノード数。
     go_nodes: Vec<Option<u64>>,
     start_positions: Vec<ParsedPosition>,
     cpu_slots: Option<Arc<CpuSlots>>,
@@ -918,6 +921,35 @@ fn spawn_engine(
     let mut engine = EngineProcess::spawn_uninitialized_with_cpu_affinity(cfg, label, cpus)?;
     engine.initialize(cfg)?;
     Ok(engine)
+}
+
+fn spawn_match_engine(
+    cfg: &EngineConfig,
+    label: &str,
+    cpus: Option<&[usize]>,
+) -> Result<EngineProcess> {
+    let mut engine = spawn_engine(cfg, label.to_owned(), cpus)?;
+    engine.enable_tournament_ponder(cfg.ponder)?;
+    Ok(engine)
+}
+
+fn plan_engine_changes(
+    live_oldest_first: &[usize],
+    required: [usize; 2],
+    max_live: usize,
+) -> (Vec<usize>, Vec<usize>) {
+    let start: Vec<_> = required.into_iter().filter(|i| !live_oldest_first.contains(i)).collect();
+    let stop = if max_live == 0 {
+        Vec::new()
+    } else {
+        live_oldest_first
+            .iter()
+            .copied()
+            .filter(|i| !required.contains(i))
+            .take((live_oldest_first.len() + start.len()).saturating_sub(max_live))
+            .collect()
+    };
+    (stop, start)
 }
 
 /// `--cpu-affinity numa` の CPU 群。worker は起動時に空いている群を 1 つ取り、終了時に返す。
@@ -989,12 +1021,11 @@ fn worker_main(
     worker_failed: Arc<AtomicBool>,
 ) {
     let WorkerConfig {
-        engine_paths,
+        id,
+        engine_configs,
         engine_labels,
-        engine_usi_options,
-        engine_ponder,
-        threads,
-        hash_mb,
+        max_live_engines,
+        engine_swaps,
         max_moves,
         preserve_start_history,
         adjudicate_resign,
@@ -1017,25 +1048,27 @@ fn worker_main(
         None => None,
     };
     let cpu_affinity = cpu_slot.as_ref().map(CpuSlotGuard::cpus);
-    // ワーカー内で全エンジンを起動
-    let mut engines: Vec<EngineProcess> = Vec::new();
-    for (i, path) in engine_paths.iter().enumerate() {
-        let label = engine_labels[i].clone();
-        let mut cfg = engine_config(path, &engine_usi_options[i], threads, hash_mb);
-        cfg.ponder = engine_ponder[i];
-        match spawn_engine(&cfg, label, cpu_affinity).and_then(|mut engine| {
-            engine.enable_tournament_ponder(engine_ponder[i])?;
-            Ok(engine)
-        }) {
-            Ok(ep) => {
-                engines.push(ep);
-            }
+    let spawn = |i: usize| {
+        let cfg = &engine_configs[i];
+        match spawn_match_engine(cfg, &engine_labels[i], cpu_affinity) {
+            Ok(engine) => Some(engine),
             Err(e) => {
-                eprintln!("worker: failed to spawn engine {i} ({}): {e}", path.display());
+                eprintln!("worker {id}: failed to spawn engine {i} ({}): {e}", cfg.path.display());
                 worker_failed.store(true, Ordering::Relaxed);
                 shutdown.store(true, Ordering::Relaxed);
-                return;
+                None
             }
+        }
+    };
+    let mut engines: Vec<Option<EngineProcess>> = (0..engine_configs.len()).map(|_| None).collect();
+    let mut live_oldest_first = Vec::new();
+    if !uses_lazy_spawn(engines.len(), max_live_engines) {
+        for (i, slot) in engines.iter_mut().enumerate() {
+            let Some(engine) = spawn(i) else {
+                return;
+            };
+            *slot = Some(engine);
+            live_oldest_first.push(i);
         }
     }
 
@@ -1044,19 +1077,35 @@ fn worker_main(
             break;
         }
 
-        // 2つの異なるインデックスへの同時可変借用のため split_at_mut を使用
-        let (black, white) = if ticket.black_idx < ticket.white_idx {
-            let (left, right) = engines.split_at_mut(ticket.white_idx);
-            (&mut left[ticket.black_idx], &mut right[0])
-        } else {
-            let (left, right) = engines.split_at_mut(ticket.black_idx);
-            (&mut right[0], &mut left[ticket.white_idx])
-        };
+        let required = [ticket.black_idx, ticket.white_idx];
+        let (stop, start) = plan_engine_changes(&live_oldest_first, required, max_live_engines);
+        for &i in &stop {
+            drop(engines[i].take());
+        }
+        for (replacement, i) in start.into_iter().enumerate() {
+            let Some(engine) = spawn(i) else {
+                return;
+            };
+            engines[i] = Some(engine);
+            if let Some(&stopped) = stop.get(replacement) {
+                eprintln!(
+                    "worker {id}: engine swap: stopped {:?}, started {:?}",
+                    engine_labels[stopped], engine_labels[i]
+                );
+                engine_swaps.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        live_oldest_first.retain(|i| engines[*i].is_some() && !required.contains(i));
+        live_oldest_first.extend(required);
+
+        let [black, white] = engines.get_disjoint_mut(required).expect("invalid ticket pair");
+        let black = black.as_mut().expect("black engine was not spawned");
+        let white = white.as_mut().expect("white engine was not spawned");
 
         // usinewgame/isready が失敗した EngineProcess は同期状態を保証できない。
         // error 結果を 1 件返して worker ごと退役し、再試行は新しいプロセスへ渡す。
         if let Err(e) = black.new_game().and_then(|_| white.new_game()) {
-            eprintln!("worker: new game error: {e}; retiring worker");
+            eprintln!("worker {id}: new game error: {e}; retiring worker");
             let _ = tx.send(MatchResult {
                 ticket,
                 outcome: GameOutcome::Draw,
@@ -1173,12 +1222,10 @@ fn worker_main(
 /// これにより、終了処理でチャネル送信元を自由に drop してチャネルを閉じられる
 /// （送信元を握り続ける長命なローカルが無いため、借用が終端まで残らない）。
 struct SpawnCtx<'a> {
-    engine_paths: &'a [PathBuf],
+    engine_configs: &'a Arc<[EngineConfig]>,
     engine_labels: &'a [String],
-    engine_usi_options: &'a [Vec<String>],
-    engine_ponder: &'a [bool],
-    threads: usize,
-    hash_mb: u32,
+    max_live_engines: usize,
+    engine_swaps: &'a Arc<AtomicUsize>,
     max_moves: u32,
     preserve_start_history: bool,
     adjudicate_resign: Option<ResignRule>,
@@ -1188,7 +1235,7 @@ struct SpawnCtx<'a> {
     timeout_margin_ms: u64,
     time_control: TimeControl,
     go_depth: Option<u32>,
-    /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
+    /// エンジン index ごとの固定ノード数。
     go_nodes: &'a [Option<u64>],
     start_defs: &'a [ParsedPosition],
     cpu_slots: Option<&'a Arc<CpuSlots>>,
@@ -1204,12 +1251,11 @@ fn spawn_worker(
     handles: &mut Vec<thread::JoinHandle<()>>,
 ) {
     let cfg = WorkerConfig {
-        engine_paths: ctx.engine_paths.to_vec(),
+        id: handles.len() + 1,
+        engine_configs: ctx.engine_configs.clone(),
         engine_labels: ctx.engine_labels.to_vec(),
-        engine_usi_options: ctx.engine_usi_options.to_vec(),
-        engine_ponder: ctx.engine_ponder.to_vec(),
-        threads: ctx.threads,
-        hash_mb: ctx.hash_mb,
+        max_live_engines: ctx.max_live_engines,
+        engine_swaps: ctx.engine_swaps.clone(),
         max_moves: ctx.max_moves,
         preserve_start_history: ctx.preserve_start_history,
         adjudicate_resign: ctx.adjudicate_resign,
@@ -1288,6 +1334,10 @@ fn reserve_output_directory(path: &Path) -> Result<File> {
     Ok(lock)
 }
 
+fn uses_lazy_spawn(engine_count: usize, max_live_engines: usize) -> bool {
+    max_live_engines != 0 && engine_count > max_live_engines
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let seed = cli.seed.unwrap_or_else(|| rand::rng().random());
@@ -1298,6 +1348,9 @@ fn main() -> Result<()> {
     }
     if cli.concurrency == 0 {
         bail!("--concurrency must be at least 1");
+    }
+    if cli.max_live_engines_per_worker == 1 {
+        bail!("--max-live-engines-per-worker must be 0 or at least 2");
     }
 
     if cli.single_game {
@@ -1538,6 +1591,14 @@ fn main() -> Result<()> {
     // run 全体の出力先を排他的に確保する。既存成果物や同時起動 run を上書きしない。
     let output_guard = reserve_output_directory(&cli.out_dir)?;
 
+    let engine_configs: Arc<[EngineConfig]> = (0..n)
+        .map(|i| {
+            let mut cfg =
+                engine_config(&cli.engines[i], &engine_usi_options[i], cli.threads, cli.hash_mb);
+            cfg.ponder = engine_ponder[i];
+            cfg
+        })
+        .collect();
     let nps_scaling = match bench_idx {
         Some(idx) => Some(calibrate_nps_scaling(
             &cli,
@@ -1587,12 +1648,6 @@ fn main() -> Result<()> {
         sprt_stopped_at: None,
         nps_scaling: nps_scaling.clone(),
     };
-    // meta.json 書き出し
-    {
-        let meta_file = File::create_new(cli.out_dir.join("meta.json"))?;
-        serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
-    }
-
     // SPRT 有効化時のラベル解決（ticket 生成前に検証しておきたい）
     let mut sprt_state: Option<SprtState> = None;
     if cli.sprt {
@@ -1647,6 +1702,26 @@ fn main() -> Result<()> {
             .collect(),
         None => (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))).collect(),
     };
+
+    if uses_lazy_spawn(n, cli.max_live_engines_per_worker) {
+        if cli.concurrency / 2 >= cli.games as usize {
+            eprintln!(
+                "warning: --concurrency is at least 2 × --games; workers may reload engines almost every game as they switch matchups"
+            );
+        }
+        let cpus = cpu_slots.as_ref().map(|slots| slots.sets[0].as_slice());
+        for (cfg, label) in engine_configs.iter().zip(&engine_labels) {
+            anyhow::ensure!(!shutdown.load(Ordering::Relaxed), "engine preflight interrupted");
+            drop(spawn_match_engine(cfg, label, cpus).with_context(|| {
+                format!("engine preflight failed for {label} ({})", cfg.path.display())
+            })?);
+        }
+        anyhow::ensure!(!shutdown.load(Ordering::Relaxed), "engine preflight interrupted");
+    }
+    {
+        let meta_file = File::create_new(cli.out_dir.join("meta.json"))?;
+        serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
+    }
 
     // チケットは事前生成せず、共有 atomic な目標値を参照する TicketSource から逐次発行する。
     // これにより実行中に control.json で target_games を増減でき、対局境界で追従する。
@@ -1744,13 +1819,12 @@ fn main() -> Result<()> {
     // ワーカー spawn 用の不変設定（チャネル送受信は持たない）。
     // チャネルを保持しないことで、終了時に送信元を drop してチャネルを閉じ、
     // ワーカー数を数えずに安全に全ワーカーを退役させられる。
+    let engine_swaps = Arc::new(AtomicUsize::new(0));
     let spawn_ctx = SpawnCtx {
-        engine_paths: &cli.engines,
+        engine_configs: &engine_configs,
         engine_labels: &engine_labels,
-        engine_usi_options: &engine_usi_options,
-        engine_ponder: &engine_ponder,
-        threads: cli.threads,
-        hash_mb: cli.hash_mb,
+        max_live_engines: cli.max_live_engines_per_worker,
+        engine_swaps: &engine_swaps,
         max_moves: cli.max_moves,
         preserve_start_history: cli.preserve_start_history,
         adjudicate_resign: cli.adjudicate_resign,
@@ -2024,6 +2098,7 @@ fn main() -> Result<()> {
         }
     );
     println!("Total: {} games in {:.1}s", completed, start_time.elapsed().as_secs_f64());
+    println!("Engine swaps: {}", engine_swaps.load(Ordering::Relaxed));
     if !cli.single_game {
         print_final_table(&pair_stats, &engine_labels);
     }
@@ -2968,7 +3043,7 @@ fn nps_bench_engine_index(cli: &Cli, engine_labels: &[String]) -> Result<usize> 
 }
 
 /// 全 slot (`--concurrency` 本) で同時に bench を走らせ、基準の時計に掛ける倍率を決める。
-/// slot には対局の worker と同じく全 engine を常駐させ、探索は bench engine だけが行う。
+/// slot には全 engine を常駐させ、探索は bench engine だけが行う。
 fn calibrate_nps_scaling(
     cli: &Cli,
     bench_idx: usize,
@@ -3087,6 +3162,39 @@ fn resolve_time_control(cli: &Cli, engine_nodes: &[Option<u64>]) -> Result<TimeC
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    use super::plan_engine_changes;
+
+    #[test]
+    fn base_vs_n_replaces_only_the_previous_challenger() {
+        assert_eq!(plan_engine_changes(&[0, 1], [0, 2], 2), (vec![1], vec![2]));
+        assert_eq!(plan_engine_changes(&[0, 2], [0, 3], 2), (vec![2], vec![3]));
+    }
+
+    #[test]
+    fn eviction_uses_lru_order_and_keeps_required_engines() {
+        assert_eq!(plan_engine_changes(&[3, 2, 0], [3, 1], 3), (vec![2], vec![1]));
+        assert_eq!(plan_engine_changes(&[3, 2, 0], [1, 4], 3), (vec![3, 2], vec![1, 4]));
+        assert_eq!(plan_engine_changes(&[0, 1], [0, 2], 3), (vec![], vec![2]));
+    }
+
+    #[test]
+    fn unlimited_engines_are_never_evicted() {
+        assert_eq!(plan_engine_changes(&[0, 1], [0, 2], 0), (vec![], vec![2]));
+    }
+
+    #[test]
+    fn same_pair_reuses_engines_in_either_direction() {
+        assert_eq!(plan_engine_changes(&[0, 1], [0, 1], 2), (vec![], vec![]));
+        assert_eq!(plan_engine_changes(&[0, 1], [1, 0], 2), (vec![], vec![]));
+    }
+
+    #[test]
+    fn three_engine_round_robin_swaps_once_at_each_boundary() {
+        assert_eq!(plan_engine_changes(&[], [0, 1], 2), (vec![], vec![0, 1]));
+        assert_eq!(plan_engine_changes(&[0, 1], [0, 2], 2), (vec![1], vec![2]));
+        assert_eq!(plan_engine_changes(&[0, 2], [1, 2], 2), (vec![0], vec![1]));
+    }
 
     fn clock_cli(args: &[&str]) -> super::Cli {
         super::Cli::try_parse_from(
@@ -3469,12 +3577,10 @@ mod tests {
     #[test]
     fn worker_panic_notifies_shutdown_before_main_join() {
         let ctx = super::SpawnCtx {
-            engine_paths: &[],
+            engine_configs: &Arc::from([]),
             engine_labels: &[],
-            engine_usi_options: &[],
-            engine_ponder: &[],
-            threads: 1,
-            hash_mb: 1,
+            max_live_engines: 2,
+            engine_swaps: &Arc::new(super::AtomicUsize::new(0)),
             max_moves: 1,
             preserve_start_history: false,
             adjudicate_resign: None,

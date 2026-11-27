@@ -125,6 +125,7 @@ H0=0、H1=+5 nElo、名目 α=β=0.05 の SPRT を行う例:
 | `--adjudicate-draw "movenumber=34,movecount=8,score=20"` | off | 両側を通じた均衡評価の連続による引分裁定。手数は開始局面からの対局内 ply（`--max-moves` と異なり開始局面までの手数は含まない） |
 | `--adjudicate-agreement "movecount=3,score=800"` | off | 両側の自己視点の評価が勝ち側 +score 以上・負け側 -score 以下で一致した状態の連続による勝敗の裁定 |
 | `--concurrency N` | 1 | 並列対局数。1 局あたり通常は約 Threads スレッド、ponder 時は最大 2×Threads スレッドが同時に探索する |
+| `--max-live-engines-per-worker N` | 2 | worker ごとのエンジン常駐数の上限。0 なら全エンジンを worker 起動時に常駐させる。1 はエラー |
 | `--ponder INDEX:true/false` | 全 engine false | engine index（0 始まり）ごとの相手手番思考。複数指定可 |
 | `--report-interval N` | 10 | N 局ごとに進捗を表示 |
 
@@ -150,6 +151,25 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 
 この変更は探索条件を変えるため、旧 driver の対局結果と混ぜず、実験記録に driver の
 コミットを残す。共有対局ループを使う `spsa` にも適用する。
+
+### エンジンの常駐数とメモリ
+
+エンジン数が常駐上限を超える場合、対局の発行前に全エンジンを 1 本ずつ起動し、`isready` まで確認して終了する。
+初期化に失敗した場合は対局を始めずに終了する。
+
+エンジン数が上限以下の場合や上限に 0 を指定した場合は、全エンジンを worker 起動時に立ち上げて
+対局間で再利用する。エンジン数が上限を超える場合は、worker が受け取った対局に必要なエンジンを
+起動する。空きが足りない場合は、その対局に使わない
+エンジンを最後に使った時点が古い順に終了させてから起動する。既定では各 worker が同時に
+保持する NNUE やハッシュなどのメモリは最大 2 本分になる。常駐数を増やすと、メモリ消費と
+引き換えに、以前使ったエンジンを再利用しやすくなる。
+
+通常、入れ替えは worker が次のカードに移るときに起きる。再試行が割り込んだときや、
+`target_games` の増加で前のカードの発行が再開したときにも追加で起きることがある。
+エンジン数が常駐上限を超え、`--concurrency` が `2 × --games` 以上の場合は、各カードの対局が多くの worker に分散してほぼ毎局エンジンを読み込み直すことがあるため、起動時に警告する。
+入れ替えごとに worker 番号・終了したエンジン・起動したエンジンを標準エラーに出し、
+終了サマリの `Engine swaps` に合計を出す。標準出力と標準エラーを
+`> tournament.log 2>&1` で保存すると両方を確認できる。
 
 ### ルールによる自動終局
 
@@ -280,7 +300,7 @@ tournament   --engine /path/to/rshogi-usi --engine-label base   --engine /path/t
 ```
 
 - bench は spsa と共通の `spsa-bench-v1`（既定 4 局面を depth 12 で warmup した後 depth 16 で 1 周）。
-  slot 数は `--concurrency` で、全 slot を同時に走らせる。各 slot には対局の worker と同じく全エンジンを
+  slot 数は `--concurrency` で、全 slot を同時に走らせる。時計補正中は各 slot で全エンジンを
   `--threads`・`--hash-mb`・USI オプション・`--cpu-affinity` の割り当てで起動し、探索は bench エンジンだけが行う。
   NPS は `nodes ÷ 時間 ÷ Threads` の slot 間平均。
 - bench エンジンは SPRT の base（`--sprt-base-label`、省略時 `--base-label`）。SPRT でなければ `--base-label` が必須。

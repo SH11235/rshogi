@@ -148,6 +148,30 @@ fn initialization_failure_exits_without_waiting_for_ticket_and_records_failure()
 }
 
 #[test]
+fn preflight_failure_exits_before_creating_game_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = dir.path().join("engine.sh");
+    fs::write(&engine, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let out_dir = dir.path().join("out");
+    let output = Command::new(env!("CARGO_BIN_EXE_tournament"))
+        .arg("--engine")
+        .arg(&engine)
+        .args(["--engine-label", "a", "--engine"])
+        .arg(&engine)
+        .args(["--engine-label", "b", "--engine"])
+        .arg(&engine)
+        .args(["--engine-label", "c", "--nodes", "1", "--out-dir"])
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("engine preflight failed for a"));
+    assert!(!out_dir.join("meta.json").exists());
+    assert!(!out_dir.join("pair-0-1__a-vs-b.jsonl").exists());
+}
+
+#[test]
 fn normal_completion_remains_valid() {
     let (_, meta, output) = run_case("complete", 1);
     assert_eq!(meta["run_status"], "completed");
