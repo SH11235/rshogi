@@ -7,7 +7,7 @@ use super::master_table::{
 };
 use super::refutation::{self, RefutationOutputs, SideWeights};
 use super::rejoin::WeightArgs;
-use super::reply_graph::apply_usi;
+use super::reply_graph::{BookIndex, apply_usi};
 use super::schema::Schema;
 use super::switch::{self, SingleQueueArgs, SingleRead, SwitchRule, from_child};
 use super::targets::{
@@ -16,8 +16,8 @@ use super::targets::{
 use super::unpromotion;
 use crate::book_backprop::{
     BackpropOptions, DrawValues, Graph, MergeMode, MoveCache, MoveValue, PropagationStats,
-    delta_buckets, evaluate_edges, graph_from_entries, parse_row, percentile, propagate_values,
-    retain_known, write_book_atomic,
+    delta_buckets, evaluate_edges, graph_from_entries, parse_row, percentile, propagate_for_side,
+    propagate_values, retain_known, write_book_atomic,
 };
 use crate::book_db::{position_from_sfen, static_position_from_sfen, strip_ply};
 use crate::common::io::write_atomic;
@@ -130,6 +130,9 @@ pub(super) struct AuditArgs {
     /// 相手の手番では、読みの値のある bench (控え) も伝播に使う。規則は --opp-records の record と同じ
     #[arg(long)]
     opp_bench: bool,
+    /// 相手の手番では、元データの局面へ直接合流する未収録の合法手も伝播に使う
+    #[arg(long)]
+    opp_joins: bool,
     /// --bridge-replies で main の値が補わないときより --line 以上悪くなった局面の表 (TSV) の出力先
     #[arg(long, requires = "bridge_replies")]
     bridge_table: Option<PathBuf>,
@@ -214,6 +217,7 @@ pub(super) struct Finding {
     pub source: String,
     pub main: AuditedMove,
     pub best: AuditedMove,
+    cycle_exit: bool,
 }
 
 impl Finding {
@@ -235,6 +239,8 @@ pub(super) struct AuditSummary {
     pub opponent_record_moves: usize,
     /// 相手の手として使った行の役割 (要約の見出し)。空なら record。
     pub opponent_roles: String,
+    opponent_joins: JoinUsage,
+    cycle_exits: usize,
     /// 値の分かる手の数。
     pub known_moves: usize,
     pub illegal_moves: usize,
@@ -382,6 +388,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
         .into_iter()
         .filter_map(|(on, role)| on.then_some(role))
         .collect();
+    let mut unplayed = BTreeMap::<String, BTreeSet<String>>::new();
     let full_rows = args.apply || args.demote_alts || args.revive_bench;
     let (original, mut rows, positions, curated_records) = if full_rows {
         let original = std::fs::read(&args.master)?;
@@ -411,9 +418,13 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
                 || opponent_roles.contains(&row.get("role"))
             {
                 rows.push(row.clone());
-            } else if row.get("tier") == "curated" {
-                // 指さない行 (record・bench) の列を保持せず、置換を保護する局面だけを覚える。
-                curated_records.insert(row.get("key").to_owned());
+            } else {
+                if row.get("tier") == "curated" {
+                    curated_records.insert(row.get("key").to_owned());
+                }
+                if args.opp_joins {
+                    remember_unplayed(&mut unplayed, &row);
+                }
             }
             Ok((at, row))
         }))?;
@@ -448,6 +459,21 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     let records = (!opponent_roles.is_empty())
         .then(|| opponent_replies(&rows, &opponent_roles))
         .transpose()?;
+    let joins = if args.opp_joins {
+        for row in &rows {
+            if master_table::is_unplayed(row.get("role")) {
+                remember_unplayed(&mut unplayed, row);
+            }
+        }
+        find_opponent_joins(&positions.0, records.as_ref(), &unplayed)?
+    } else {
+        BTreeMap::new()
+    };
+    drop(unplayed);
+    let opponent = Opponent {
+        records: records.as_ref(),
+        joins: (!joins.is_empty()).then_some(&joins),
+    };
     let (findings, mut summary, book) = audit_select(
         &positions,
         draws,
@@ -458,7 +484,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
             deep_freq: deep_freq.as_ref(),
         },
         fill,
-        records.as_ref(),
+        opponent,
     )?;
     summary.opponent_roles = opponent_roles.join("・");
     let (changes, replacements) = plan_replacements_with(
@@ -481,7 +507,7 @@ fn run_in_pool(args: AuditArgs) -> Result<Revivals> {
     };
     // 除外キューの読み込みや行の検査で失敗したときに表だけが更新されないよう、bridge の出力は書く前に全部作る。
     let bridge = if bridge_output {
-        let mut worse = bridge_findings(&positions.0, draws, &book, args.line, records.as_ref())?;
+        let mut worse = bridge_findings(&positions.0, draws, &book, args.line, opponent)?;
         weight_bridge_findings(&mut worse, weights.as_ref(), args.weight.min_weight);
         let table = args.bridge_table.as_ref().map(|_| format_bridge_table(&worse));
         let queue = match &args.bridge_enqueue_out {
@@ -617,6 +643,7 @@ type Changes = BTreeMap<(String, String), Row>;
 fn single_reads(findings: &[Finding]) -> Vec<SingleRead> {
     findings
         .iter()
+        .filter(|f| !f.cycle_exit)
         .filter_map(|f| {
             let moves: Vec<String> = [&f.main, &f.best]
                 .into_iter()
@@ -679,11 +706,12 @@ fn plan_replacements_with(
         ..ReplacementSummary::default()
     };
     for f in findings {
-        if f.best.origin == Origin::Eval {
+        if !f.cycle_exit && f.best.origin == Origin::Eval {
             summary.eval += 1;
             continue;
         }
         if let Some(count) = summary.main_eval.as_mut()
+            && !f.cycle_exit
             && f.main.origin == Origin::Eval
         {
             *count += 1;
@@ -1105,7 +1133,12 @@ fn write_audited_db(
 }
 
 /// 値の分かる手を求める。読みの値のある合法手と、book 内の子局面に値の分かる手がある手。
-fn known_moves(positions: &[(&str, &MasterPosition)], graph: &Graph) -> Result<Vec<Vec<bool>>> {
+fn known_moves(
+    positions: &[(&str, &MasterPosition)],
+    graph: &Graph,
+    retain_cycles: bool,
+) -> Result<Vec<Vec<bool>>> {
+    let cyclic = retain_cycles.then(|| graph.cyclic_positions());
     let skip_flipped = graph.options.skip_flipped_children;
     let node_of: Vec<usize> = positions
         .iter()
@@ -1124,7 +1157,12 @@ fn known_moves(positions: &[(&str, &MasterPosition)], graph: &Graph) -> Result<V
         let row: Vec<bool> = moves
             .iter()
             .zip(&position.moves)
-            .map(|(m, b)| m.usable && b.eval.is_some())
+            .map(|(m, b)| {
+                m.usable
+                    && (b.eval.is_some()
+                        || m.edge
+                            .is_some_and(|e| cyclic.as_ref().is_some_and(|cyclic| cyclic[e.to])))
+            })
             .collect();
         for (i, m) in moves.iter().enumerate() {
             if let (false, true, Some(edge)) = (row[i], m.usable, m.edge) {
@@ -1521,22 +1559,99 @@ pub(super) fn add_opponent_reply(
     Ok(())
 }
 
-#[derive(Default)]
-struct RecordUsage {
+type Joins = BTreeMap<String, Vec<BookMove>>;
+
+fn remember_unplayed(unplayed: &mut BTreeMap<String, BTreeSet<String>>, row: &Row) {
+    unplayed
+        .entry(row.get("key").to_owned())
+        .or_default()
+        .insert(row.get("move").to_owned());
+}
+
+fn find_opponent_joins(
+    positions: &BTreeMap<String, MasterPosition>,
+    records: Option<&BTreeMap<String, MasterPosition>>,
+    unplayed: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<Joins> {
+    let index = BookIndex::new(positions)?;
+    let keys: Vec<_> = positions
+        .keys()
+        .chain(
+            records
+                .into_iter()
+                .flat_map(|records| records.keys().filter(|key| !positions.contains_key(*key))),
+        )
+        .collect();
+    let mut joins = Joins::new();
+    for chunk in keys.chunks(1 << 14) {
+        let part: Vec<Result<_>> = chunk
+            .par_iter()
+            .map(|&key| -> Result<_> {
+                let mut pos = position_from_sfen(&format!("{key} 1"))?;
+                let position = positions.get(key);
+                let unplayed = unplayed.get(key);
+                let mut moves = Vec::new();
+                index.visit_joins(&mut pos, |mv| {
+                    let mv = mv.to_usi();
+                    if !position.is_some_and(|p| p.moves.iter().any(|m| m.mv == mv))
+                        && !unplayed.is_some_and(|m| m.contains(&mv))
+                    {
+                        moves.push(BookMove { mv, eval: None });
+                    }
+                });
+                Ok((key, moves))
+            })
+            .collect();
+        for entry in part {
+            let (key, moves) = entry?;
+            if !moves.is_empty() {
+                joins.insert(key.clone(), moves);
+            }
+        }
+    }
+    Ok(joins)
+}
+
+#[derive(Clone, Copy, Default)]
+struct Opponent<'a> {
+    records: Option<&'a BTreeMap<String, MasterPosition>>,
+    joins: Option<&'a Joins>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct JoinUsage {
+    moves: BySide,
     positions: usize,
-    moves: usize,
+    best: usize,
+}
+
+#[derive(Default)]
+struct OpponentUsage {
+    record_positions: usize,
+    record_moves: usize,
+    joins: JoinUsage,
+    cycle_mains: BTreeMap<String, bool>,
 }
 
 fn propagate_opponent(
     positions: &BTreeMap<String, MasterPosition>,
-    records: &BTreeMap<String, MasterPosition>,
+    replies: Opponent<'_>,
     draws: DrawValues,
     fill: Fill,
     opponent: &str,
     mut visit: impl FnMut(&str, &MasterPosition, &[bool]),
-) -> Result<(Propagated, RecordUsage)> {
+) -> Result<(Propagated, OpponentUsage)> {
+    let empty = BTreeMap::new();
+    let records = replies.records.unwrap_or(&empty);
     let mut expanded = positions.clone();
-    let caps = record_caps(positions, records, opponent)?;
+    let caps = if records
+        .keys()
+        .any(|key| super::model::side(key) == opponent && !positions.contains_key(key))
+    {
+        record_caps(positions, records, opponent)?
+    } else {
+        BTreeMap::new()
+    };
     let mut capped = BTreeSet::new();
     for (key, record) in records {
         if key.split_whitespace().nth(1) != Some(opponent) {
@@ -1558,28 +1673,94 @@ fn propagate_opponent(
         }
         expanded.insert(key.clone(), position);
     }
-    // 反転した局面へ合流すると、足した record が反転先で手番の側自身の手として数えられるので辺を張らない。
-    let mut result = propagate_with(&expanded, draws, fill, Flips::Skip, None)?;
+    let joins = |key: &str| {
+        replies
+            .joins
+            .filter(|_| super::model::side(key) == opponent)
+            .and_then(|j| j.get(key))
+    };
+    for (key, moves) in replies.joins.into_iter().flatten() {
+        if super::model::side(key) == opponent
+            && let Some(position) = expanded.get_mut(key)
+        {
+            position.moves.extend(moves.iter().cloned());
+        }
+    }
+    // 反転先の相手専用の手を自分の手として使わないよう、直接の辺だけを張る。
+    let mut result = propagate_with_side(
+        &expanded,
+        draws,
+        fill,
+        Flips::Skip,
+        None,
+        replies.joins.map(|_| opponent == "w"),
+    )?;
     result.capped.extend(capped);
-    // 追加した record は相手の応手専用なので、点検との対応には元の手だけを残す。
-    let mut usage = RecordUsage::default();
+    let mut usage = OpponentUsage::default();
     let mut illegal_records = 0;
     let mut known = Vec::with_capacity(positions.len());
+    let mut joined_components = BTreeSet::new();
+    let component = |node| result.graph.cycle_component(node);
     for ((key, position), mask) in expanded.iter().zip(&result.known) {
         visit(key, position, mask);
         let playable = positions.get(key).map_or(0, |p| p.moves.len());
-        // 足した上限の手は record ではないので、record の手の分だけを数える。
-        let added = match records.get(key) {
-            Some(r) if key.split_whitespace().nth(1) == Some(opponent) => r.moves.len(),
-            _ => 0,
-        };
+        let added = records
+            .get(key)
+            .filter(|_| super::model::side(key) == opponent)
+            .map_or(0, |r| r.moves.len());
         let record_mask = || mask.iter().skip(playable).take(added);
         illegal_records += record_mask().filter(|&&k| !k).count();
         let used = record_mask().filter(|&&k| k).count();
-        usage.moves += used;
-        usage.positions += usize::from(used > 0);
+        usage.record_moves += used;
+        usage.record_positions += usize::from(used > 0);
+        if let Some(joins) = joins(key) {
+            let used = mask[mask.len() - joins.len()..].iter().filter(|&&k| k).count();
+            usage.joins.moves[usize::from(opponent == "w")] += used;
+            if used > 0 {
+                usage.joins.positions += 1;
+                let node =
+                    result.graph.find(key).context("内部エラー: 合流手の局面がありません")?;
+                let original = mask.iter().filter(|&&k| k).count() - used;
+                let mut moves = result.graph.moves(node);
+                let listed_best = moves.by_ref().take(original).map(|m| m.new).max();
+                let mut join_best = None;
+                for m in moves {
+                    join_best = join_best.max(Some(m.new));
+                    if let Some(c) = component(node)
+                        && m.edge.is_some_and(|edge| component(edge.to) == Some(c))
+                    {
+                        joined_components.insert(c);
+                    }
+                }
+                usage.joins.best += usize::from(join_best >= listed_best);
+            }
+        }
         if positions.contains_key(key) {
             known.push(mask[..playable].to_vec());
+        }
+    }
+    if !joined_components.is_empty() {
+        let in_join_cycle = |node| component(node).is_some_and(|c| joined_components.contains(&c));
+        let mut mains = BTreeMap::new();
+        for ((key, _), mask) in positions.iter().zip(&known) {
+            if super::model::side(key) == opponent || !mask[0] {
+                continue;
+            }
+            let node = result.graph.find(key).context("内部エラー: main の局面がありません")?;
+            if in_join_cycle(node)
+                && let Some(edge) = result.graph.moves(node).next().and_then(|m| m.edge)
+                && component(edge.to) == component(node)
+            {
+                mains.insert(node, (key, edge.to));
+            }
+        }
+        let checking =
+            result.graph.checking_components(opponent == "w", in_join_cycle, |node, to| {
+                mains.get(&node).is_some_and(|&(_, child)| child == to)
+            });
+        for (node, (key, child)) in mains {
+            let perpetual = result.graph.checked(child) && checking[child] == checking[node];
+            usage.cycle_mains.insert(key.clone(), perpetual);
         }
     }
     result.known = known;
@@ -1589,22 +1770,38 @@ fn propagate_opponent(
 
 fn propagate_for_sides(
     positions: &BTreeMap<String, MasterPosition>,
-    records: Option<&BTreeMap<String, MasterPosition>>,
+    opponent_replies: Opponent<'_>,
     draws: DrawValues,
     fill: Fill,
     flips: Flips,
-) -> Result<(Propagated, Option<Graph>, RecordUsage)> {
-    let Some(records) = records else {
+) -> Result<(Propagated, Option<Graph>, OpponentUsage)> {
+    if opponent_replies.records.is_none() && opponent_replies.joins.is_none() {
         return Ok((
             propagate_with(positions, draws, fill, flips, None)?,
             None,
-            RecordUsage::default(),
+            OpponentUsage::default(),
         ));
     };
     let (mut black, black_usage) =
-        propagate_opponent(positions, records, draws, fill, "w", |_, _, _| {})?;
+        propagate_opponent(positions, opponent_replies, draws, fill, "w", |_, _, _| {})?;
     let (white, white_usage) =
-        propagate_opponent(positions, records, draws, fill, "b", |_, _, _| {})?;
+        propagate_opponent(positions, opponent_replies, draws, fill, "b", |_, _, _| {})?;
+    if opponent_replies.joins.is_some()
+        && black_usage.joins.positions == 0
+        && white_usage.joins.positions == 0
+    {
+        drop((black, white));
+        return propagate_for_sides(
+            positions,
+            Opponent {
+                joins: None,
+                ..opponent_replies
+            },
+            draws,
+            fill,
+            flips,
+        );
+    }
     for ((key, _), (b, w)) in positions.iter().zip(black.known.iter_mut().zip(white.known)) {
         if key.split_whitespace().nth(1) == Some("w") {
             *b = w;
@@ -1619,7 +1816,9 @@ fn propagate_for_sides(
         for node in 0..graph.len() {
             let key = graph.key(node);
             if !positions.contains_key(key)
-                && !(records.contains_key(key) && key.split_whitespace().nth(1) == Some(opponent))
+                && !opponent_replies
+                    .records
+                    .is_some_and(|r| r.contains_key(key) && super::model::side(key) == opponent)
             {
                 replies.insert(key.to_owned());
                 if graph.moves(node).any(|m| m.edge.is_none()) {
@@ -1634,9 +1833,19 @@ fn propagate_for_sides(
     Ok((
         black,
         Some(white.graph),
-        RecordUsage {
-            positions: black_usage.positions + white_usage.positions,
-            moves: black_usage.moves + white_usage.moves,
+        OpponentUsage {
+            record_positions: black_usage.record_positions + white_usage.record_positions,
+            record_moves: black_usage.record_moves + white_usage.record_moves,
+            joins: JoinUsage {
+                moves: [white_usage.joins.moves[0], black_usage.joins.moves[1]],
+                positions: black_usage.joins.positions + white_usage.joins.positions,
+                best: black_usage.joins.best + white_usage.joins.best,
+            },
+            cycle_mains: black_usage
+                .cycle_mains
+                .into_iter()
+                .chain(white_usage.cycle_mains)
+                .collect(),
         },
     ))
 }
@@ -1647,6 +1856,7 @@ fn propagate_entries(
     draws: DrawValues,
     flips: Flips,
     cache: Option<&MoveCache>,
+    own_black: Option<bool>,
 ) -> Result<(Graph, Vec<Vec<bool>>, usize, PropagationStats)> {
     let options = BackpropOptions {
         skip_flipped_children: flips == Flips::Skip,
@@ -1661,9 +1871,12 @@ fn propagate_entries(
         cache,
     )?;
     let illegal_moves = graph.illegal_moves;
-    let known = known_moves(all, &graph)?;
+    let known = known_moves(all, &graph, own_black.is_some())?;
     retain_known(&mut graph, &known)?;
-    let stats = propagate_values(&mut graph, draws, MergeMode::Replace)?;
+    let stats = match own_black {
+        Some(black) => propagate_for_side(&mut graph, draws, black)?,
+        None => propagate_values(&mut graph, draws, MergeMode::Replace)?,
+    };
     Ok((graph, known, illegal_moves, stats))
 }
 
@@ -1675,6 +1888,17 @@ fn propagate_with(
     fill: Fill,
     flips: Flips,
     cache: Option<&MoveCache>,
+) -> Result<Propagated> {
+    propagate_with_side(positions, draws, fill, flips, cache, None)
+}
+
+fn propagate_with_side(
+    positions: &BTreeMap<String, MasterPosition>,
+    draws: DrawValues,
+    fill: Fill,
+    flips: Flips,
+    cache: Option<&MoveCache>,
+    own_black: Option<bool>,
 ) -> Result<Propagated> {
     let keys: Vec<&String> = positions.keys().collect();
     // 並べて調べ、エラーは key の順で最初のものを返す (並べた順で選ぶと実行ごとに変わり得る)。
@@ -1711,7 +1935,8 @@ fn propagate_with(
         positions.iter().chain(&replies).map(|(key, p)| (key.as_str(), p)).collect();
     // 補った局面は元データと key が重ならないので、key 順に並べれば元データの局面の順は保たれる。
     all.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    let (graph, known_all, illegal_moves, stats) = propagate_entries(&all, draws, flips, cache)?;
+    let (graph, known_all, illegal_moves, stats) =
+        propagate_entries(&all, draws, flips, cache, own_black)?;
     let known = all
         .iter()
         .zip(known_all)
@@ -1886,8 +2111,16 @@ pub(super) fn evaluate_for_side(
 ) -> Result<ReplyEvaluation> {
     let opponent = if own == "b" { "w" } else { "b" };
     let mut replies = BTreeMap::new();
-    let (propagated, _) =
-        propagate_opponent(positions, records, draws, fill, opponent, |key, position, known| {
+    let (propagated, _) = propagate_opponent(
+        positions,
+        Opponent {
+            records: Some(records),
+            joins: None,
+        },
+        draws,
+        fill,
+        opponent,
+        |key, position, known| {
             if super::model::side(key) == opponent {
                 replies.insert(
                     key.to_owned(),
@@ -1900,7 +2133,8 @@ pub(super) fn evaluate_for_side(
                         .collect(),
                 );
             }
-        })?;
+        },
+    )?;
     Ok(ReplyEvaluation {
         values: evaluated_values(positions, &propagated.graph, &propagated.known)?,
         replies,
@@ -1992,11 +2226,11 @@ fn bridge_findings(
     draws: DrawValues,
     book: &AuditedBook,
     line: i32,
-    records: Option<&BTreeMap<String, MasterPosition>>,
+    opponent: Opponent<'_>,
 ) -> Result<Vec<BridgeFinding>> {
     // 補った伝播と同じく反転の辺を張らずに比べ、補ったことによる差だけを出す。
     let (plain, white_graph, _) =
-        propagate_for_sides(positions, records, draws, Fill::Off, Flips::Skip)?;
+        propagate_for_sides(positions, opponent, draws, Fill::Off, Flips::Skip)?;
     let plain = AuditedBook {
         graph: plain.graph,
         known: plain.known,
@@ -2189,7 +2423,16 @@ fn audit_with_records(
         deep_plies,
         deep_freq,
     };
-    audit_select(book, draws, select, fill, opponent_records)
+    audit_select(
+        book,
+        draws,
+        select,
+        fill,
+        Opponent {
+            records: opponent_records,
+            joins: None,
+        },
+    )
 }
 
 /// 点検の表に出す局面の決め方。
@@ -2218,7 +2461,7 @@ pub(super) fn audit_with_flips(
             deep_freq: None,
         },
         Fill::Off,
-        None,
+        Opponent::default(),
         flips,
     )
 }
@@ -2228,9 +2471,9 @@ fn audit_select(
     draws: DrawValues,
     select: Select,
     fill: Fill,
-    opponent_records: Option<&BTreeMap<String, MasterPosition>>,
+    opponent: Opponent<'_>,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
-    audit_select_with_flips(book, draws, select, fill, opponent_records, Flips::for_fill(fill))
+    audit_select_with_flips(book, draws, select, fill, opponent, Flips::for_fill(fill))
 }
 
 fn audit_select_with_flips(
@@ -2243,19 +2486,21 @@ fn audit_select_with_flips(
         deep_freq,
     }: Select,
     fill: Fill,
-    opponent_records: Option<&BTreeMap<String, MasterPosition>>,
+    opponent: Opponent<'_>,
     flips: Flips,
 ) -> Result<(Vec<Finding>, AuditSummary, AuditedBook)> {
     let mut summary = AuditSummary {
         records: *records,
         ..AuditSummary::default()
     };
-    let (propagated, white_graph, record_usage) =
-        propagate_for_sides(positions, opponent_records, draws, fill, flips)?;
+    let (propagated, white_graph, usage) =
+        propagate_for_sides(positions, opponent, draws, fill, flips)?;
     report_direct_lookup(&propagated.stats, None)?;
-    summary.opponent_record_positions = opponent_records.map(|_| record_usage.positions);
-    summary.opponent_record_moves = record_usage.moves;
-    summary.records -= record_usage.moves;
+    summary.opponent_record_positions = opponent.records.map(|_| usage.record_positions);
+    summary.opponent_record_moves = usage.record_moves;
+    summary.records -= usage.record_moves;
+    summary.opponent_joins = usage.joins;
+    let cycle_mains = usage.cycle_mains;
     let Propagated {
         graph,
         known,
@@ -2319,6 +2564,19 @@ fn audit_select_with_flips(
                 }
             })
             .expect("main がある");
+        // 合流でできた循環では、同値で main を維持すると出口を選ばずに千日手になり得る。
+        let draw = if side == 0 { draws.black } else { draws.white };
+        let preferred = if let Some(&perpetual) = cycle_mains.get(key) {
+            audited
+                .iter()
+                .flatten()
+                .max_by_key(|m| m.value)
+                .filter(|m| (perpetual || m.value > draw) && m.value > main.value)
+        } else {
+            None
+        };
+        let cycle_exit = preferred.is_some();
+        let best = preferred.unwrap_or(best);
         let restore = |m: &AuditedMove| AuditedMove {
             value: raw(m),
             tie_lowered: false,
@@ -2326,10 +2584,11 @@ fn audit_select_with_flips(
         };
         let (mut main, mut best) = (restore(main), restore(best));
         let gap = best.value - main.value;
-        if gap == 0 {
+        if cycle_exit {
+            summary.cycle_exits += 1;
+        } else if gap == 0 {
             continue;
-        }
-        if rule == SwitchRule::Propagated {
+        } else if rule == SwitchRule::Propagated {
             // 補った相手の手番の局面で着いた手の読みの値が最善なら、辺があっても値は 1 回の読みなので数え直す。
             let graph = book.graph_for(key);
             let capped = |k: &str| book.capped.contains(k);
@@ -2388,6 +2647,7 @@ fn audit_select_with_flips(
             source: position.source.clone(),
             main,
             best,
+            cycle_exit,
         });
     }
     findings.sort_by(|a, b| b.gap().cmp(&a.gap()).then_with(|| a.key.cmp(&b.key)));
@@ -2455,6 +2715,15 @@ pub(super) fn format_summary(
             "相手の手として使った {roles} {} / 局面 {count}",
             summary.opponent_record_moves
         ));
+    }
+    if summary.opponent_joins.positions > 0 {
+        out(format!(
+            "相手の未収録の合流手 {} / 合流手がある局面 {} / 合流手が伝播の 1 位の局面 {} (同率を含む)",
+            sides(summary.opponent_joins.moves),
+            summary.opponent_joins.positions,
+            summary.opponent_joins.best,
+        ));
+        out(format!("千日手・連続王手を避ける main の置換候補: {}", summary.cycle_exits));
     }
     if changed > 0 {
         let buckets = delta_buckets(&summary.abs_deltas)
@@ -2550,6 +2819,267 @@ mod tests {
         let parsed = parse_master_rows(text.as_bytes())?;
         let (findings, summary, _) = audit(&parsed, draws, line, Fill::Off, None)?;
         Ok((findings, summary))
+    }
+
+    const JOIN_FROM: &str = "5k3/9/9/9/9/9/9/9/4K4 w -";
+    const JOIN_MOVE: &str = "4a5a";
+
+    fn join_cycle(exit: i32, defender_eval: &str, flip: bool) -> Vec<Row> {
+        let exit_eval = (-exit).to_string();
+        let mut rows = parse_master(&master(&[
+            (ROOT, "5i4h", "main", ""),
+            (ROOT, "5i6h", "alt", ""),
+            (A, "5a4a", "main", ""),
+            ("5k3/9/9/9/9/9/9/5K3/9 b -", "4h5i", "main", ""),
+            (JOIN_FROM, "4a3a", "main", defender_eval),
+            ("4k4/9/9/9/9/9/9/3K5/9 w -", "5a5b", "main", &exit_eval),
+        ]))
+        .unwrap();
+        if flip {
+            for row in &mut rows {
+                let key = rshogi_book::flipped_key(&format!("{} 1", row.get("key"))).unwrap();
+                row.set("key", strip_ply(&key).into());
+                row.set("move", rshogi_book::flip_usi_move(row.get("move")).unwrap());
+            }
+        }
+        rows
+    }
+
+    fn inspect_joins(
+        rows: &[Row],
+        draws: DrawValues,
+        fill: Fill,
+        roles: &[&str],
+    ) -> (AuditSummary, AuditedBook) {
+        let text = format_master(rows);
+        let parsed = parse_master_rows(text.as_bytes()).unwrap();
+        let records = (!roles.is_empty()).then(|| opponent_replies(rows, roles).unwrap());
+        let mut unplayed = BTreeMap::new();
+        for row in rows.iter().filter(|r| master_table::is_unplayed(r.get("role"))) {
+            remember_unplayed(&mut unplayed, row);
+        }
+        let joins = find_opponent_joins(&parsed.0, records.as_ref(), &unplayed).unwrap();
+        let (_, summary, book) = audit_select(
+            &parsed,
+            draws,
+            Select {
+                line: 1,
+                rule: SwitchRule::Line,
+                deep_plies: None,
+                deep_freq: None,
+            },
+            fill,
+            Opponent {
+                records: records.as_ref(),
+                joins: (!joins.is_empty()).then_some(&joins),
+            },
+        )
+        .unwrap();
+        (summary, book)
+    }
+
+    #[test]
+    fn opponent_joins_cycle_uses_each_draw_value_and_switches_to_better_exit() {
+        for (flip, draw, expected_counts) in [(false, -70, [0, 1]), (true, 70, [1, 0])] {
+            for (exit, switch) in [(draw + 20, true), (draw - 20, false), (draw, false)] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut args = test_args(dir.path());
+                let rows = join_cycle(exit, "-200", flip);
+                let root = rows[0].get("key");
+                let opponent_key = rows[4].get("key");
+                let draws = DrawValues {
+                    black: -70,
+                    white: 70,
+                };
+                let (summary, book) = inspect_joins(&rows, draws, Fill::Off, &[]);
+                assert_eq!(
+                    summary.opponent_joins,
+                    JoinUsage {
+                        moves: expected_counts,
+                        positions: 1,
+                        best: 1,
+                    }
+                );
+                let own_graph = book.graph_for(root);
+                let other_graph = book.graph_for(opponent_key);
+                let values: Vec<_> = own_graph.moves(own_graph.find(root).unwrap()).collect();
+                let cycle_value = values[0].new + i32::from(values[0].tie_lowered);
+                // 出口が良ければ、合流後は次に出口を選べるので循環へ入る手も同じ値になる。
+                assert_eq!(cycle_value, exit.max(draw));
+                assert_eq!(own_graph.moves(own_graph.find(opponent_key).unwrap()).count(), 2);
+                assert_eq!(other_graph.moves(other_graph.find(opponent_key).unwrap()).count(), 1);
+                if switch {
+                    assert!(values[0].tie_lowered);
+                }
+                assert_eq!(summary.cycle_exits, usize::from(switch));
+
+                args.opp_joins = true;
+                args.line = 40;
+                args.draw_value_white = 70;
+                args.apply = true;
+                args.since = Some("確認".into());
+                let db = dir.path().join("audit.db");
+                args.out_db = Some(db.clone());
+                let path = args.master.clone();
+                std::fs::write(&path, format_master(&rows)).unwrap();
+                run(args).unwrap();
+                let actual = parse_master(&std::fs::read_to_string(path).unwrap()).unwrap();
+                assert_eq!(actual.len(), rows.len());
+                for (actual, expected) in actual.iter().zip(&rows) {
+                    assert_eq!(
+                        (actual.get("key"), actual.get("move")),
+                        (expected.get("key"), expected.get("move"))
+                    );
+                }
+                let main = actual
+                    .iter()
+                    .find(|r| r.get("key") == root && r.get("role") == "main")
+                    .unwrap();
+                assert_eq!(main.get("move"), rows[usize::from(switch)].get("move"));
+                if !switch {
+                    assert_eq!(actual, rows);
+                }
+                let join_move = if flip {
+                    rshogi_book::flip_usi_move(JOIN_MOVE).unwrap()
+                } else {
+                    JOIN_MOVE.into()
+                };
+                assert!(
+                    !std::fs::read_to_string(db).unwrap().contains(&format!("{join_move} none"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opponent_joins_keeps_a_cycle_without_reads_and_uses_bench_when_enabled() {
+        let draws = DrawValues {
+            black: -70,
+            white: 15,
+        };
+        let pure_cycle = join_cycle(-100, "", false)
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| ![1, 5].contains(i))
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>();
+        let (_, book) = inspect_joins(&pure_cycle, draws, Fill::Off, &[]);
+        let graph = book.graph_for(ROOT);
+        assert_eq!(graph.moves(graph.find(ROOT).unwrap()).next().unwrap().new, -70);
+
+        let mut rows = join_cycle(-100, "", false);
+        let mut bench = rows[4].clone();
+        bench.set("move", "4a3b".into());
+        bench.set("role", "bench".into());
+        bench.set("evals", "120".into());
+        bench.set("cond", "unknown".into());
+        bench.set("value_kind", "single".into());
+        rows.push(bench);
+        let (summary, book) = inspect_joins(&rows, draws, Fill::Off, &["bench"]);
+        assert_eq!(summary.opponent_record_moves, 1);
+        assert_eq!(
+            summary.opponent_joins,
+            JoinUsage {
+                moves: [0, 1],
+                positions: 1,
+                best: 0
+            }
+        );
+        let graph = book.graph_for(ROOT);
+        let cycle = graph.moves(graph.find(ROOT).unwrap()).next().unwrap();
+        assert_eq!(cycle.new + i32::from(cycle.tie_lowered), -120);
+    }
+
+    #[test]
+    fn opponent_joins_preserves_outputs_when_only_listed_or_flipped_targets_exist() {
+        let flipped = master(&[
+            (ROOT, "5i6h", "main", "10"),
+            (A_FLIPPED, "5i5h", "main", "30"),
+        ]);
+        for text in [flipped, {
+            let mut rows = join_cycle(-100, "-200", false);
+            let mut record = rows[4].clone();
+            record.set("move", JOIN_MOVE.into());
+            record.set("role", "record".into());
+            rows.push(record);
+            format_master(&rows)
+        }] {
+            let run_fixture = |opp_joins, apply| {
+                let dir = tempfile::tempdir().unwrap();
+                let mut args = test_args(dir.path());
+                let master = args.master.clone();
+                let table = args.table.clone();
+                let db = dir.path().join("audit.db");
+                args.out_db = Some(db.clone());
+                args.opp_joins = opp_joins;
+                args.apply = apply;
+                args.since = Some("確認".into());
+                std::fs::write(&master, &text).unwrap();
+                run(args).unwrap();
+                [master, table, db].map(|path| std::fs::read(path).unwrap())
+            };
+            for apply in [false, true] {
+                assert_eq!(run_fixture(false, apply), run_fixture(true, apply));
+            }
+        }
+    }
+
+    #[test]
+    fn opponent_joins_ignores_positions_created_by_fill_and_bridge() {
+        for fill in [Fill::Unread, Fill::Bridge] {
+            let mut rows = join_cycle(-100, "-200", false);
+            rows.remove(4);
+            if fill == Fill::Bridge {
+                rows[3].set("evals", "-50".into());
+                rows[3].set("cond", "unknown".into());
+                rows[3].set("value_kind", "single".into());
+            }
+            let draws = DrawValues {
+                black: -70,
+                white: 70,
+            };
+            let (summary, book) = inspect_joins(&rows, draws, fill, &[]);
+            assert_eq!(summary.reply_positions, 1);
+            assert_eq!(summary.opponent_joins, JoinUsage::default());
+            assert!(book.graph.find(JOIN_FROM).is_some());
+        }
+    }
+
+    #[test]
+    fn opponent_joins_apply_escapes_own_perpetual_check_at_draw_value() {
+        let start = "4k4/9/5+R3/9/9/9/9/9/K8 b -";
+        let mut pos = position_from_sfen(&format!("{start} 1")).unwrap();
+        let mut keys = Vec::new();
+        for mv in ["4c5c", "5a4a", "5c4c", JOIN_MOVE] {
+            keys.push(strip_ply(&pos.to_sfen()).to_owned());
+            apply_usi(&mut pos, mv).unwrap();
+        }
+        assert_eq!(strip_ply(&pos.to_sfen()), start);
+        let cycle = [
+            (keys[0].as_str(), "4c5c", "main", ""),
+            (&keys[0], "9i8i", "alt", "-70"),
+            (&keys[1], "5a4a", "main", ""),
+            (&keys[2], "5c4c", "main", ""),
+            (&keys[3], "4a3a", "main", "-200"),
+        ];
+        for continues_checking in [false, true] {
+            let mut rows = cycle.to_vec();
+            if !continues_checking {
+                rows[3].2 = "alt";
+                rows.push((&keys[2], "9i8i", "main", "-70"));
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let mut args = test_args(dir.path());
+            args.opp_joins = true;
+            args.apply = true;
+            args.switch_rule = SwitchRule::Propagated;
+            args.since = Some("確認".into());
+            let path = args.master.clone();
+            std::fs::write(&path, master(&rows)).unwrap();
+            run(args).unwrap();
+            let rows = parse_master(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(rows[1].get("role"), if continues_checking { "main" } else { "alt" });
+        }
     }
 
     fn opponent_record_fixture(record_eval: &str) -> String {
@@ -3123,7 +3653,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
                 deep_freq: None,
             },
             Fill::Off,
-            None,
+            Opponent::default(),
         )
         .unwrap();
         assert!(findings.is_empty());
@@ -3545,7 +4075,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             let all = read_graph(&all_path, BackpropOptions::default()).unwrap();
             let entries: Vec<(&str, &MasterPosition)> =
                 positions.iter().map(|(key, p)| (key.as_str(), p)).collect();
-            let known = known_moves(&entries, &all).unwrap();
+            let known = known_moves(&entries, &all, false).unwrap();
             let known_path = dir.path().join("known.db");
             std::fs::write(&known_path, text_db(Some(&known))).unwrap();
             let mut rebuilt = read_graph(
@@ -3558,7 +4088,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             .unwrap();
             propagate_values(&mut rebuilt, draws, MergeMode::Replace).unwrap();
             let (memory, actual_known, illegal, _) =
-                propagate_entries(&entries, draws, Flips::Shared, None).unwrap();
+                propagate_entries(&entries, draws, Flips::Shared, None, None).unwrap();
             assert_eq!(known, actual_known, "mask {mask}");
             assert_eq!(all.illegal_moves, illegal, "mask {mask}");
             assert_eq!(rebuilt.len(), memory.len(), "mask {mask}");
@@ -4605,6 +5135,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
             bridge_replies: false,
             opp_records: false,
             opp_bench: false,
+            opp_joins: false,
             bridge_table: None,
             bridge_enqueue_out: None,
             bridge_depth: 6,
@@ -4989,8 +5520,10 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         let defaults = Cli::try_parse_from(base).unwrap().args;
         assert_eq!((defaults.line, defaults.demote_line), (40, 100));
         assert!(!defaults.opp_records);
+        assert!(!defaults.opp_joins);
         let combined = Cli::try_parse_from(base.into_iter().chain([
             "--opp-records",
+            "--opp-joins",
             "--bridge-replies",
             "--deep-plies",
             "2",
@@ -5002,6 +5535,7 @@ sfen 9/4k4/9/9/9/9/9/5K3/9 b - 1
         .unwrap()
         .args;
         assert!(combined.opp_records);
+        assert!(combined.opp_joins);
         assert!(combined.bridge_replies);
 
         let custom = Cli::try_parse_from(base.into_iter().chain(["--demote-line", "70"]))

@@ -202,6 +202,28 @@ impl<'a, P: MoveSource> BookIndex<'a, P> {
         self.list.binary_search_by(|(k, _)| (*k).cmp(key)).ok()
     }
 
+    /// 直接のキーで索引内の局面に着く合法手を生成順で渡す。
+    pub fn visit_joins(&self, pos: &mut Position, mut visit: impl FnMut(Move)) {
+        self.visit_joins_inner(pos, |mv, _, _, _| visit(mv));
+    }
+
+    fn visit_joins_inner(&self, pos: &mut Position, mut visit: impl FnMut(Move, u64, Packed, u32)) {
+        let mut list = MoveList::new();
+        generate_legal_all(pos, &mut list);
+        for &mv in list.iter() {
+            let hash = pos.key_after(mv);
+            if !self.has_hash(hash) {
+                continue;
+            }
+            pos.do_move(mv, pos.gives_check(mv));
+            let packed = Packed::of(pos);
+            pos.undo_move(mv);
+            if let Some(to) = self.find_packed(hash, &packed) {
+                visit(mv, hash, packed, to);
+            }
+        }
+    }
+
     /// ハッシュ値が一致する局面があるか (当たりを付けるだけ)。
     fn has_hash(&self, hash: u64) -> bool {
         self.hashes.contains(hash)
@@ -438,20 +460,9 @@ pub(super) fn build_filtered<'a, P: MoveSource>(
                 edges.push((mv, child.key(), packed, to_master, i as u32));
             }
         } else {
-            let mut list = MoveList::new();
-            generate_legal_all(&pos, &mut list);
-            for &mv in list.iter() {
-                let hash = pos.key_after(mv);
-                if !index.has_hash(hash) {
-                    continue;
-                }
-                pos.do_move(mv, pos.gives_check(mv));
-                let packed = Packed::of(&pos);
-                pos.undo_move(mv);
-                if let Some(to_master) = index.find_packed(hash, &packed) {
-                    edges.push((mv, hash, packed, to_master, NONE));
-                }
-            }
+            index.visit_joins_inner(&mut pos, |mv, hash, packed, to| {
+                edges.push((mv, hash, packed, to, NONE));
+            });
         }
         Ok((edges, illegal, false))
     };

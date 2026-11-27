@@ -162,6 +162,8 @@ pub struct Graph {
     row_flags: Vec<u8>,
     /// 補完した行の指し手 (`Move` の下位 16 bit)。行の順に並ぶ。
     added: Vec<u16>,
+    /// 側を固定した伝播で、循環を持つ成分の番号。
+    cycle_components: Vec<u32>,
     pub flip_edges: usize,
     pub illegal_moves: usize,
 }
@@ -233,7 +235,8 @@ impl Graph {
         usize::from(!self.black(node))
     }
 
-    fn checked(&self, node: usize) -> bool {
+    /// 手番側の玉が王手を受けているか。
+    pub(crate) fn checked(&self, node: usize) -> bool {
         self.node_flags[node] & NODE_CHECKED != 0
     }
 
@@ -261,6 +264,32 @@ impl Graph {
 
     fn added(&self, row: usize) -> bool {
         self.row_flags[row] & ROW_ADDED != 0
+    }
+
+    /// 循環に属する局面。読みのない循環にも後退解析で値を付けるために使う。
+    pub(crate) fn cyclic_positions(&self) -> Vec<bool> {
+        let components = Components::of(self);
+        components.comp_of.iter().map(|&c| components.nontrivial[c as usize]).collect()
+    }
+
+    /// 側を固定して伝播したとき、局面が属する循環の成分番号。
+    pub(crate) fn cycle_component(&self, node: usize) -> Option<u32> {
+        self.cycle_components.get(node).copied().filter(|&c| c != NONE)
+    }
+
+    /// 自分の main が王手を続ける辺と、相手の応手から成分番号を求める。
+    pub(crate) fn checking_components(
+        &self,
+        own_black: bool,
+        included: impl Fn(usize) -> bool,
+        is_main: impl Fn(usize, usize) -> bool,
+    ) -> Vec<u32> {
+        Components::with_edges(self, |v, to| {
+            included(v)
+                && self.cycle_component(v) == self.cycle_component(to)
+                && (self.black(v) != own_black || (is_main(v, to) && self.checked(to)))
+        })
+        .comp_of
     }
 
     fn total_rows(&self) -> usize {
@@ -1559,6 +1588,7 @@ fn build_graph(
         to,
         row_flags,
         added,
+        cycle_components: Vec::new(),
         flip_edges,
         illegal_moves,
     })
@@ -1569,6 +1599,25 @@ pub fn propagate_values(
     graph: &mut Graph,
     draws: DrawValues,
     merge: MergeMode,
+) -> Result<PropagationStats> {
+    propagate_values_impl(graph, draws, merge, None)
+}
+
+/// 反転の辺がない、相手専用の応手を持つグラフを、自分の側を固定して解く。
+pub(crate) fn propagate_for_side(
+    graph: &mut Graph,
+    draws: DrawValues,
+    black: bool,
+) -> Result<PropagationStats> {
+    ensure!(graph.options.skip_flipped_children, "内部エラー: 反転の辺を張るグラフです");
+    propagate_values_impl(graph, draws, MergeMode::Replace, Some(black))
+}
+
+fn propagate_values_impl(
+    graph: &mut Graph,
+    draws: DrawValues,
+    merge: MergeMode,
+    own_black: Option<bool>,
 ) -> Result<PropagationStats> {
     let params = BestParams {
         draws,
@@ -1583,8 +1632,9 @@ pub fn propagate_values(
         }
     }
     let mut stats = PropagationStats::default();
-    let mut sides = Vec::with_capacity(2);
-    for black in [true, false] {
+    let perspectives: &[bool] = own_black.as_ref().map_or(&[true, false], std::slice::from_ref);
+    let mut sides = Vec::with_capacity(perspectives.len());
+    for &black in perspectives {
         let game = SideGame::new(graph, params, black)?;
         let solution = book_retrograde::solve(&game)?;
         stats.check_core_states += solution.core_size[0] + solution.core_size[1];
@@ -1593,9 +1643,13 @@ pub fn propagate_values(
     // 局面の手番の側を自分として解いた結果は保存されている向き、反対の側の結果は反転キーで合流した向き。
     let results = |graph: &Graph, v: usize| sides[graph.color(v)].result(graph, params, v);
     let flipped = |graph: &Graph, v: usize| sides[1 - graph.color(v)].result(graph, params, v);
-    if graph.options.direct_lookup_only {
+    if own_black.is_some() {
+        let fixed = |graph: &Graph, v: usize| sides[0].stored_result(graph, params, v);
+        stats.restricted_ties = write_certified(graph, params, &fixed, &|_, _| None, perspectives)?;
+    } else if graph.options.direct_lookup_only {
         // 反転した向きでは行を使わないので、その向きの結果を書き出し値の決め方と保証検査に渡さない。
-        stats.restricted_ties = write_certified(graph, params, &results, &|_, _| None)?;
+        stats.restricted_ties =
+            write_certified(graph, params, &results, &|_, _| None, perspectives)?;
         let disagreements = flip_conflicts(graph, params, &flipped)
             .into_iter()
             .map(|(v, stored, flipped)| FlipDisagreement {
@@ -1614,7 +1668,7 @@ pub fn propagate_values(
         stats.direct_lookup =
             Some(direct_lookup_report(graph, params, disagreements, broken_guarantees));
     } else {
-        stats.restricted_ties = write_certified(graph, params, &results, &flipped)?;
+        stats.restricted_ties = write_certified(graph, params, &results, &flipped, perspectives)?;
     }
     drop(sides);
 
@@ -1659,6 +1713,15 @@ pub fn propagate_values(
             new_best,
         })
         .collect();
+    graph.cycle_components.clear();
+    if own_black.is_some() && stats.nontrivial_sccs > 0 {
+        graph.cycle_components = scc.comp_of;
+        for component in &mut graph.cycle_components {
+            if !scc.nontrivial[*component as usize] {
+                *component = NONE;
+            }
+        }
+    }
     Ok(stats)
 }
 
@@ -1736,6 +1799,7 @@ fn write_certified(
     params: BestParams,
     results: &ResultsOf<'_>,
     mirrored: &ResultsOf<'_>,
+    perspectives: &[bool],
 ) -> Result<usize> {
     let n = graph.len();
     let mirrored_values: Vec<Option<i32>> =
@@ -1743,7 +1807,7 @@ fn write_certified(
     // 同値手は値を保つ手の中から選び、他は保存時だけ -1 する。選ぶと保証が破れる局面は、破れた向きの保証手だけを残す。
     let mut restricted = vec![Restriction::default(); n];
     loop {
-        assign_outputs(graph, params, results, mirrored, &restricted);
+        assign_outputs(graph, params, results, mirrored, &restricted, perspectives);
         let conflicts = flip_conflicts(graph, params, mirrored);
         if !conflicts.is_empty() {
             let sample = conflicts
@@ -1761,8 +1825,13 @@ fn write_certified(
             ))
             .into());
         }
-        let violations =
-            certify(graph, params, &mirrored_values, !graph.options.direct_lookup_only);
+        let violations = certify_perspectives(
+            graph,
+            params,
+            &mirrored_values,
+            !graph.options.direct_lookup_only,
+            perspectives,
+        );
         if violations.stored.is_empty() && violations.flipped.is_empty() {
             break;
         }
@@ -2152,6 +2221,34 @@ impl Side {
         self.values[self.state[to][1 - self.me] as usize] + self.draw
     }
 
+    fn stored_result(&self, graph: &Graph, params: BestParams, v: usize) -> Option<NodeResult> {
+        if graph.color(v) == self.me {
+            return self.result(graph, params, v);
+        }
+        let value = -self.edge_value(v);
+        let rows: Vec<_> = graph
+            .rows(v)
+            .map(|row| {
+                if !params.counts(graph, row) {
+                    return None;
+                }
+                let Some(to) = graph.edge_to(row) else {
+                    return Some((graph.old[row], Some(0)));
+                };
+                let target = self.state[to][self.me] as usize;
+                let distance = (self.distance[target] != NONE).then(|| self.distance[target] + 1);
+                Some((-(self.values[target] + self.draw), distance))
+            })
+            .collect();
+        // 相手は保証検査で全手を指せるので、同値でも応手を絞る必要はない。
+        Some(NodeResult {
+            value,
+            rows,
+            guaranteed: None,
+            preferred: None,
+        })
+    }
+
     /// 局面 `v` を実際の手番の側を自分として解いた結果。その向きで届かない局面は `None`。
     fn result(&self, graph: &Graph, params: BestParams, v: usize) -> Option<NodeResult> {
         let s = self.state[v][self.me];
@@ -2224,6 +2321,7 @@ fn assign_outputs(
     results: &ResultsOf<'_>,
     mirrored: &ResultsOf<'_>,
     restricted: &[Restriction],
+    perspectives: &[bool],
 ) {
     for (node, &restriction) in restricted.iter().enumerate() {
         let restricted = restriction.any();
@@ -2280,7 +2378,7 @@ fn assign_outputs(
                             && distance.is_some()
                             && distance == chosen_distance
                             && common(idx));
-                    if best && !keep {
+                    if best && !keep && perspectives.contains(&graph.black(node)) {
                         // 最小の合法値 -MATE は据え置き、-INFINITE を生成しない。
                         let lowered_value = value.saturating_sub(1).max(-Value::MATE.raw());
                         lowered = lowered_value != value;
@@ -2339,6 +2437,16 @@ fn certify(
     mirrored: &[Option<i32>],
     follow_flips: bool,
 ) -> Violations {
+    certify_perspectives(graph, params, mirrored, follow_flips, &[true, false])
+}
+
+fn certify_perspectives(
+    graph: &Graph,
+    params: BestParams,
+    mirrored: &[Option<i32>],
+    follow_flips: bool,
+    perspectives: &[bool],
+) -> Violations {
     let mut violations = Violations {
         stored: BTreeSet::new(),
         flipped: BTreeSet::new(),
@@ -2346,7 +2454,7 @@ fn certify(
         repetition: BTreeSet::new(),
     };
     let mate = Value::MATE.raw();
-    for black in [true, false] {
+    for &black in perspectives {
         let states = CertifyStates::new(graph, params, mirrored, black, follow_flips);
         let draw = params.draws.of(black);
         let follows = |s: usize, idx: usize, _t: usize| states.follows(s, idx);
@@ -2626,13 +2734,19 @@ struct Components {
 impl Components {
     /// Kosaraju 法で求める。成分は縮約したグラフの位相順に番号が付き、成分をまたぐ辺は番号の大きい成分へ向かう。
     fn of(graph: &Graph) -> Self {
+        Self::with_edges(graph, |_, _| true)
+    }
+
+    fn with_edges(graph: &Graph, include: impl Fn(usize, usize) -> bool) -> Self {
         let n = graph.len();
         let mut start = vec![0u32; n + 1];
         let mut children = Vec::new();
         let mut buf = Vec::new();
         for v in 0..n {
             buf.clear();
-            buf.extend(graph.rows(v).filter_map(|row| graph.edge_to(row).map(|t| t as u32)));
+            buf.extend(graph.rows(v).filter_map(|row| {
+                graph.edge_to(row).filter(|&to| include(v, to)).map(|to| to as u32)
+            }));
             buf.sort_unstable();
             buf.dedup();
             children.extend_from_slice(&buf);
@@ -3117,6 +3231,7 @@ mod tests {
             old,
             to,
             added: Vec::new(),
+            cycle_components: Vec::new(),
             flip_edges: 0,
             illegal_moves: 0,
         }
@@ -3294,17 +3409,25 @@ mod tests {
             move |_: &Graph, v: usize| results[v].clone()
         };
         let none = |_: &Graph, _: usize| None;
-        assert_eq!(write_certified(&mut graph, params, &results_of(&results), &none).unwrap(), 1);
+        assert_eq!(
+            write_certified(&mut graph, params, &results_of(&results), &none, &[true, false])
+                .unwrap(),
+            1
+        );
         assert_eq!(values(&graph), [vec![50, 49], vec![-50]]);
         // 保証手だけにしても破られる値はエラーにする。
         let mut broken = results.clone();
         broken[0].as_mut().unwrap().guaranteed = Some(1);
         broken[0].as_mut().unwrap().preferred = Some(1);
-        let error = write_certified(&mut graph, params, &results_of(&broken), &none).unwrap_err();
+        let error =
+            write_certified(&mut graph, params, &results_of(&broken), &none, &[true, false])
+                .unwrap_err();
         assert!(error.downcast_ref::<FlipFailure>().is_none(), "{error}");
         // 定跡を直接の key だけで引く前提でも、保存されている向きで破られる値は止める。
         graph.options.direct_lookup_only = true;
-        let error = write_certified(&mut graph, params, &results_of(&broken), &none).unwrap_err();
+        let error =
+            write_certified(&mut graph, params, &results_of(&broken), &none, &[true, false])
+                .unwrap_err();
         assert!(error.to_string().contains("千日手へ逃げられる 1 局面"), "{error}");
         assert!(error.downcast_ref::<FlipFailure>().is_none(), "{error}");
     }
@@ -3328,7 +3451,8 @@ mod tests {
         };
         let flipped = |g: &Graph, v: usize| stored(g, v).map(|r| NodeResult { value: 100, ..r });
         assert_eq!(flip_conflicts(&graph, params, &flipped).len(), 7);
-        let error = write_certified(&mut graph, params, &stored, &flipped).unwrap_err();
+        let error =
+            write_certified(&mut graph, params, &stored, &flipped, &[true, false]).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("反転キーで合流した 7 局面 ["), "{error}");
         assert!(error.downcast_ref::<FlipFailure>().is_some(), "{error}");
