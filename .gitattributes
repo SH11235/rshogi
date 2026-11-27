@@ -3,6 +3,7 @@
 crates/tools/tests/golden/** text eol=lf
 # テストが include_str! でバイト一致を比べる期待値
 crates/tools/src/book_tree/seeds/seeds-original-*  text eol=lf
+crates/tools/src/book_tree/add/fixed_rows.tsv text eol=lf
 
 # Rust source files
 *.rs text eol=lf
