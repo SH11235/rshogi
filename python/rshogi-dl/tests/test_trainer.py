@@ -648,6 +648,59 @@ class TrainerTest(unittest.TestCase):
             with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                 replace(self.config, **{field: value})
 
+    def test_checkpoint_retention_preserves_latest_and_pinned_steps_across_resume(self) -> None:
+        config = replace(
+            self.config, max_steps=11, checkpoint_every=1,
+            checkpoint_keep_latest=3, checkpoint_pin_steps=(2, 9),
+        )
+        self.run_training("retained", config)
+        run = self.root / "retained"
+        self.assertEqual(
+            sorted(path.name for path in run.glob("resume*.pt")),
+            ["resume-0000000002.pt", "resume-0000000008.pt", "resume-0000000009.pt",
+             "resume-0000000010.pt", "resume-final.pt"],
+        )
+        report = self.run_training(
+            "retained-resumed",
+            replace(config, checkpoint_every=2, checkpoint_keep_latest=1, checkpoint_pin_steps=(4,)),
+            resume=run / "resume-0000000002.pt",
+        )
+        expected = load_resume(run / "resume-final.pt")
+        resumed = load_resume(self.root / "retained-resumed" / "resume-final.pt")
+        for field in ("model_state", "optimizer_state", "scaler_state", "scheduler_state", "progress", "rng"):
+            self.assert_nested_equal(expected[field], resumed[field])
+        self.assertEqual(report["trainer_config"]["checkpoint_pin_steps"], (4,))
+        self.assertTrue((run / "resume-0000000002.pt").exists())
+
+    def test_checkpoint_save_failure_preserves_previous_checkpoints(self) -> None:
+        from rshogi_dl.trainer import atomic_save
+
+        def save(path, payload):
+            if path.name == "resume-0000000004.pt":
+                raise OSError("checkpoint write failed")
+            return atomic_save(path, payload)
+
+        config = replace(self.config, checkpoint_every=1, checkpoint_keep_latest=2, checkpoint_pin_steps=(1,))
+        with mock.patch("rshogi_dl.trainer.atomic_save", side_effect=save):
+            with self.assertRaisesRegex(OSError, "checkpoint write failed"):
+                self.run_training("retention-failure", config)
+        self.assertEqual(
+            sorted(path.name for path in (self.root / "retention-failure").glob("resume*.pt")),
+            ["resume-0000000001.pt", "resume-0000000002.pt", "resume-0000000003.pt"],
+        )
+
+    def test_checkpoint_retention_rejects_invalid_settings(self) -> None:
+        for options in (
+            {"checkpoint_keep_latest": 1},
+            {"checkpoint_every": 2, "checkpoint_keep_latest": 0},
+            {"checkpoint_every": 2, "checkpoint_pin_steps": (2,)},
+            {"checkpoint_every": 2, "checkpoint_keep_latest": 1, "checkpoint_pin_steps": (3,)},
+            {"checkpoint_every": 2, "checkpoint_keep_latest": 1, "checkpoint_pin_steps": (8,)},
+            {"checkpoint_every": 2, "checkpoint_keep_latest": 1, "checkpoint_pin_steps": (2, 2)},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                replace(self.config, **options)
+
     def test_missing_policy_keeps_head_grad_none_with_weight_decay(self) -> None:
         records = synthetic_records(seed=12, count=4)
         for record in records:

@@ -351,7 +351,9 @@ python -m rshogi_dl.trainer \
 | `--fuse-muon-symmetric-polynomial` | `batched-muon` のNewton–Schulz反復で、対称な二次項のタイルを再利用する。短辺256・長辺が32の倍数の行列が対象。NVIDIA CUDA compute capability 8.0以上とTritonが必要。丸め順が変わる場合がある。既定は無効 |
 | `--threads` | CPU thread数、既定1 |
 | `--validation-batches` | held-out先頭batchの上限、既定32。0は全件評価 |
-| `--checkpoint-every` | 中間checkpointの試行間隔。既定0は最終状態のみ。中間は最大8個 |
+| `--checkpoint-every` | 中間 checkpoint の試行間隔。既定 0 は最終状態のみ。保持数を指定しない場合は中間が最大 8 個 |
+| `--checkpoint-keep-latest N` | 直近 N 個の中間 checkpoint を保持する。新しい checkpoint の保存完了後に古いものを削除する。最終 checkpoint は別に保存する |
+| `--checkpoint-pin-step STEP` | 直近 N 個の範囲を外れても STEP の中間 checkpoint を保持する。複数指定可。STEP は総試行数未満の正の保存間隔の倍数で、`--checkpoint-keep-latest` が必要 |
 | `--log-every` | `metrics.jsonl`への記録間隔。既定100 |
 | `--deterministic` | 決定的アルゴリズムを要求。CUDAでは起動前に`CUBLAS_WORKSPACE_CONFIG=:4096:8`等を設定 |
 
@@ -393,7 +395,7 @@ python -m rshogi_dl.trainer \
   --validation-batches 0 --checkpoint-every 250 --log-every 100
 ```
 
-`max_steps`は再開後の総試行数です。model・学習設定・dataset指紋・実行ライブラリ版を照合し、不一致なら更新前に失敗します。変更できるのは総試行数とcheckpoint/log間隔だけです。再開状態にはmodel、AdamW、GradScaler、定数learning rateのscheduler状態(null)、進捗、Python/NumPy/TorchとCUDA runのGPU RNGを保存します。sample cursorから対象shardへ直接進み、既読行を読み捨てません。checkpointはfsync後にatomic renameし、POSIXではdirectoryもfsyncします。Windowsの保証範囲はfile fsyncとatomic renameまでです。
+`max_steps`は再開後の総試行数です。model・学習設定・dataset指紋・実行ライブラリ版を照合し、不一致なら更新前に失敗します。再開時は総試行数、checkpoint の保存間隔・保持設定、log 間隔、入力先読みを変更できます。保持設定の対象は再開先の run で新たに保存する中間 checkpoint です。再開状態にはmodel、AdamW、GradScaler、定数learning rateのscheduler状態(null)、進捗、Python/NumPy/TorchとCUDA runのGPU RNGを保存します。sample cursorから対象shardへ直接進み、既読行を読み捨てません。checkpointはfsync後にatomic renameし、POSIXではdirectoryもfsyncします。Windowsの保証範囲はfile fsyncとatomic renameまでです。
 
 FP16 の scaler は `growth_factor=2.0`、`backoff_factor=0.5`、`growth_interval=2000` に固定し、再開時も一致を要求します。動的に変わる scale と growth tracker は checkpoint から復元します。
 
