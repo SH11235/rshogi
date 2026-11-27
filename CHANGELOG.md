@@ -15,6 +15,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 ## Unreleased
 
 - LayerStacks-DenseConcat に FT 幅 4096 / 6144 / 8192 / 12288 の edition を追加。すべて Threat なしと全幅に対応し、6144 は部分幅 3072、8192 は部分幅 2816 にも対応。
+- `tournament` は既定で worker あたりのエンジン常駐数を 2 本に抑え、対局カードに応じて入れ替える。`--max-live-engines-per-worker 0` で全エンジンを常駐できる。
 
 ## v1.11.0 — 2026-11-26
 

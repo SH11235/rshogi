@@ -306,8 +306,18 @@ fn disabled_ponder_preserves_commands_and_omits_output_fields() {
         format!("position sfen {initial} moves 3i4h 7a6b 4h3i 6b7a"),
     ];
     for (index, commands) in run.logs.iter().enumerate() {
-        let mut expected: Vec<String> =
-            ["usi", "isready", "usinewgame"].into_iter().map(str::to_owned).collect();
+        let mut expected: Vec<String> = [
+            "usi",
+            "isready",
+            "usinewgame",
+            "quit",
+            "usi",
+            "isready",
+            "usinewgame",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
         for game in 0..4 {
             expected.extend(["usinewgame".into(), "isready".into()]);
             for (ply, position) in positions.iter().enumerate() {

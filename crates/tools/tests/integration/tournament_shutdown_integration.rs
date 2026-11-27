@@ -24,7 +24,7 @@ fn run_case(mode: &str, concurrency: u32) -> (tempfile::TempDir, serde_json::Val
 while IFS= read -r line; do
   case "$line" in
     usi)
-      if [ "$MODE" = "fail" ]; then exit 1; fi
+      if [ "$MODE" = "fail" ] && [ -d "$GATE/preflight" ]; then exit 1; fi
       printf 'id name shutdown-mock
 usiok
 ' ;;
@@ -49,7 +49,15 @@ usiok
       fi
       printf 'bestmove resign
 ' ;;
-    quit) break ;;
+    quit)
+      if [ "$MODE" = "fail" ]; then
+        if [ -d "$GATE/first-ready" ]; then
+          mkdir "$GATE/preflight"
+        else
+          mkdir "$GATE/first-ready"
+        fi
+      fi
+      break ;;
   esac
 done
 "#,
@@ -145,6 +153,28 @@ fn initialization_failure_exits_without_waiting_for_ticket_and_records_failure()
     assert_eq!(meta["run_status"], "worker_failed");
     assert_eq!(meta["invalid"], true);
     assert!(!output.contains("Tournament Complete"));
+}
+
+#[test]
+fn preflight_failure_exits_before_creating_game_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = dir.path().join("engine.sh");
+    fs::write(&engine, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let out_dir = dir.path().join("out");
+    let output = Command::new(env!("CARGO_BIN_EXE_tournament"))
+        .arg("--engine")
+        .arg(&engine)
+        .args(["--engine-label", "a", "--engine"])
+        .arg(&engine)
+        .args(["--engine-label", "b", "--nodes", "1", "--out-dir"])
+        .arg(&out_dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("engine preflight failed for a"));
+    assert!(!out_dir.join("meta.json").exists());
+    assert!(!out_dir.join("pair-0-1__a-vs-b.jsonl").exists());
 }
 
 #[test]

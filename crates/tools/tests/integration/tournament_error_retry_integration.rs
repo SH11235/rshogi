@@ -86,7 +86,7 @@ fn run_error_retry_case(isready_action: &str, go_action: &str) {
     );
 
     let launch_count = fs::read_to_string(&launches).unwrap().lines().count();
-    assert_eq!(launch_count, 2, "error 後に flaky engine が新規起動されるべき");
+    assert_eq!(launch_count, 3, "起動前チェック・初回対局・再試行で各 1 回起動する");
 
     let jsonl = fs::read_to_string(out_dir.join("pair-0-1__flaky-vs-steady.jsonl")).unwrap();
     let results: Vec<Value> = jsonl
