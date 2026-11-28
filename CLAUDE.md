@@ -18,6 +18,8 @@
 ### 必須チェック
 1. `cargo fmt && cargo clippy --fix --allow-dirty --tests`
 2. `cargo test`
+   - 作業の途中で変更のたびに走らせるときは `bash scripts/test-affected.sh`。origin/main から変わった crate と、それに依存する crate のテストだけを nextest で走らせる
+   - doctest は nextest で走らないので、作業を終える前に `cargo test` で全体を一度走らせる
 3. `bash scripts/check-tracked-abs-paths.sh`（tracked file に machine 依存の絶対パスを書かない。データは `$SHOGI_DATA`、外部 repo は `/path/to/...` を使う）
 - Clippy の警告は `cargo clippy --fix --allow-dirty --tests` → 手動修正 → 再実行でゼロに。必要なら再度 `cargo fmt`。
 - 警告抑止のために安易に `#[allow(...)]` や未使用変数へ `_` 接頭辞を付けることは禁止。
