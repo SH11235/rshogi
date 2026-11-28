@@ -171,6 +171,7 @@ NNUE を使った性能比較では `--nnue-file` と必要な routing を明示
 - [HCPE の 38 byte 形式と padding](docs/hcpe-format.md)、[LayerStacks routing と進行度係数](docs/nnue-routing.md)。
 - CSA client のログは単局集計です。未決の対局は勝敗集計・教師抽出から除外し、SPRT の対象にしません。
   詳細は [解析](docs/analyze_selfplay.md) と [KIF 変換](docs/jsonl_to_kif.md) を参照してください。
+- [jsonl_to_kif](docs/jsonl_to_kif.md) は meta の対局者ラベルを使い、先後交換を反映した KIF を出力します。
 - Floodgate の HTTPS 取得は OS の証明書ストアを使います。最小 Linux コンテナには `ca-certificates` を用意してください。
   暗号 provider は `ring` で、ビルドには C コンパイラが必要です（CMake / NASM は不要）。
 - [コマンド例集](examples/README.md)、[教師データの追加パイプライン](docs/training_data_pipeline.md)。

@@ -1,6 +1,6 @@
 //! 電竜戦の公式 KIF 棋譜を、棋譜サーバーへ送る CSA に変換する。
 //!
-//! 電竜戦の KIF は移動元を括弧で書く (`７六歩(77)`) ので、盤面を追わずに 1 手ずつ
+//! KIF の指し手は移動元を括弧で書く (`７六歩(77)`) ので、盤面を追わずに 1 手ずつ
 //! 変換できる。合法性はここでは確かめない (サーバーが取り込み時に全手を再生して確かめる)。
 //!
 //! # 出力
@@ -38,6 +38,7 @@ pub const REASON_NO_MOVES: &str = "指し手なし";
 pub const REASON_HANDICAP: &str = "平手以外";
 
 const REASON_BAD_HEADER: &str = "対局者名が無い";
+const REASON_BAD_BOARD: &str = "開始局面の局面図を変換できない";
 const REASON_BAD_MOVE: &str = "指し手を変換できない";
 const REASON_MOVE_NUMBER: &str = "手数が連続していない";
 const REASON_UNKNOWN_END: &str = "未対応の終局表記";
@@ -45,6 +46,7 @@ const REASON_NO_WINNER: &str = "反則負けの勝者が まで 行から分か�
 const REASON_RESULT_MISMATCH: &str = "勝敗が まで 行と食い違う";
 const REASON_AFTER_END: &str = "終局の手の後に指し手が続く";
 const REASON_MOVE_COUNT: &str = "手数が まで 行と合わない";
+const BOD_FRAME: &str = "+---------------------------+";
 
 /// `まで84手で後手の勝ち` の手数。
 static MADE_COUNT: LazyLock<Regex> =
@@ -105,6 +107,72 @@ fn zenkaku_digit(c: char) -> Option<u8> {
 
 fn kanji_digit(c: char) -> Option<u8> {
     "一二三四五六七八九".chars().position(|k| k == c).map(|index| index as u8 + 1)
+}
+
+fn bod_piece_code(piece: char) -> Option<&'static str> {
+    let mut buffer = [0; 4];
+    let name = piece.encode_utf8(&mut buffer);
+    PIECES.iter().find_map(|&(label, code)| (label == name).then_some(code))
+}
+
+fn bod_to_csa(rows: &[&str], black_hand: &str, white_hand: &str) -> Option<String> {
+    if rows.len() != 9 {
+        return None;
+    }
+    let mut board = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        let (cells, rank) = row.strip_prefix('|')?.split_once('|')?;
+        let mut rank = rank.trim().chars();
+        let number = kanji_digit(rank.next()?)?;
+        if rank.next().is_some() || usize::from(number) != index + 1 {
+            return None;
+        }
+        board.push_str(&format!("P{number}"));
+        let mut cells = cells.chars();
+        for _ in 0..9 {
+            match (cells.next()?, cells.next()?) {
+                (' ', '・') => board.push_str(" * "),
+                (side @ (' ' | 'v'), piece) => {
+                    board.push(if side == 'v' { '-' } else { '+' });
+                    board.push_str(bod_piece_code(piece)?);
+                }
+                _ => return None,
+            }
+        }
+        if cells.next().is_some() {
+            return None;
+        }
+        board.push('\n');
+    }
+    for (prefix, hand) in [("P+", black_hand), ("P-", white_hand)] {
+        if hand == "なし" {
+            continue;
+        }
+        if hand.is_empty() {
+            return None;
+        }
+        board.push_str(prefix);
+        for piece in hand.split_whitespace() {
+            let mut chars = piece.chars();
+            let code = bod_piece_code(chars.next()?)?;
+            if !matches!(code, "HI" | "KA" | "KI" | "GI" | "KE" | "KY" | "FU") {
+                return None;
+            }
+            let count = match (chars.next(), chars.next(), chars.next()) {
+                (None, None, None) => 1,
+                (Some('十'), None, None) => 10,
+                (Some(digit), None, None) => kanji_digit(digit)?,
+                (Some('十'), Some(digit), None) => 10 + kanji_digit(digit)?,
+                _ => return None,
+            };
+            for _ in 0..count {
+                board.push_str("00");
+                board.push_str(code);
+            }
+        }
+        board.push('\n');
+    }
+    Some(board)
 }
 
 /// 変換した 1 手。`dest` は次の `同` のために持つ。
@@ -230,10 +298,10 @@ fn failed(reason: &'static str, detail: impl Into<String>) -> Rejection {
 
 /// KIF 1 局分を CSA に変換する。
 ///
-/// - 指し手が 1 つも無い棋譜、平手でない棋譜、開始日時が無い棋譜は
+/// - 開始局面の局面図があれば盤面・持駒・手番を変換し、盤の行が無ければ平手で始める。
+/// - 指し手が無い棋譜、`手合割` が平手以外の棋譜、開始日時が無いか読めない棋譜は
 ///   [`Rejection::Excluded`]。
-/// - 変換できない指し手・未対応の終局表記、`まで` 行の勝敗と変換結果の食い違いは
-///   [`Rejection::Failed`]。
+/// - 変換できない局面図や指し手、未対応の終局表記、`まで` 行との食い違いは [`Rejection::Failed`]。
 pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut event = None;
@@ -241,6 +309,11 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
     let mut black = None;
     let mut white = None;
     let mut handicap = None;
+    let mut has_board = false;
+    let mut board_rows = Vec::new();
+    let mut black_hand = None;
+    let mut white_hand = None;
+    let mut white_starts = false;
     let mut clock = None;
     let mut end_reason = "";
     let mut kept_comments: Vec<&str> = Vec::new();
@@ -266,6 +339,7 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
         }
         if !in_moves {
             if line.starts_with("手数--") {
+                white_starts &= has_board;
                 in_moves = true;
             } else if let Some(value) = line.strip_prefix("棋戦：") {
                 event = Some(value.trim());
@@ -277,6 +351,17 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
                 black = Some(value.trim());
             } else if let Some(value) = line.strip_prefix("後手：") {
                 white = Some(value.trim());
+            } else if let Some(value) = line.strip_prefix("先手の持駒：") {
+                black_hand = Some(value.trim());
+            } else if let Some(value) = line.strip_prefix("後手の持駒：") {
+                white_hand = Some(value.trim());
+            } else if line == BOD_FRAME {
+                has_board = true;
+            } else if line.starts_with('|') {
+                has_board = true;
+                board_rows.push(line);
+            } else if line == "後手番" {
+                white_starts = true;
             } else if let Some(found) = TIME_SETTING.captures(line) {
                 clock = found[1].parse::<u64>().ok().zip(found[2].parse::<u64>().ok());
             } else if let Some(value) = line.strip_prefix("*終局理由：") {
@@ -340,7 +425,7 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             _ => None,
         };
         if let Some(mv) = parse_kif_move(move_text, last_dest) {
-            let sign = if moves_count.is_multiple_of(2) {
+            let sign = if moves_count.is_multiple_of(2) != white_starts {
                 '+'
             } else {
                 '-'
@@ -403,9 +488,9 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             return Err(failed(REASON_RESULT_MISMATCH, format!("終局の手が無い / {made_line}")));
         }
     };
-    // 平手の先手番から始まるので、偶数手を指した後は先手番。
+    let black_to_move = moves_count.is_multiple_of(2) != white_starts;
     if let (Some(expected), Some(converted)) =
-        (made_outcome, outcome_from_special(special, moves_count.is_multiple_of(2)))
+        (made_outcome, outcome_from_special(special, black_to_move))
         && expected != converted
     {
         return Err(failed(
@@ -441,7 +526,16 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
     for comment in kept_comments {
         csa.push_str(&format!("'{comment}\n"));
     }
-    csa.push_str("PI\n+\n");
+    if has_board {
+        let board = black_hand
+            .zip(white_hand)
+            .and_then(|(black, white)| bod_to_csa(&board_rows, black, white))
+            .ok_or_else(|| failed(REASON_BAD_BOARD, ""))?;
+        csa.push_str(&board);
+    } else {
+        csa.push_str("PI\n");
+    }
+    csa.push_str(if white_starts { "-\n" } else { "+\n" });
     for line in body {
         csa.push_str(&line);
         csa.push('\n');
@@ -460,6 +554,38 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
 mod tests {
     use super::*;
     use crate::kifu_publish::cp932::decode_kifu_bytes;
+
+    const BOD_ROWS: [&str; 9] = [
+        "| とv杏 圭v全 馬v龍 ・v玉 ・|一",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ ・|二",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ ・|三",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ ・|四",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ ・|五",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ ・|六",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ ・|七",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ ・|八",
+        "| ・ ・ ・ ・ ・ ・ ・ ・ 玉|九",
+    ];
+
+    #[test]
+    fn bod_converts_promoted_pieces_and_white_hand() {
+        let csa = bod_to_csa(&BOD_ROWS, "なし", "金二　香　歩十八　桂十").unwrap();
+        let mut lines = csa.lines();
+        assert_eq!(lines.next(), Some("P1+TO-NY+NK-NG+UM-RY * -OU * "));
+        assert_eq!(lines.nth(7), Some("P9 *  *  *  *  *  *  *  * +OU"));
+        let white_hand = format!("P-00KI00KI00KY{}{}", "00FU".repeat(18), "00KE".repeat(10));
+        assert_eq!(lines.next(), Some(white_hand.as_str()));
+        assert_eq!(lines.next(), None);
+    }
+
+    #[test]
+    fn bod_rejects_missing_rows_and_unknown_pieces() {
+        assert_eq!(bod_to_csa(&BOD_ROWS[..8], "なし", "なし"), None);
+
+        let mut rows = BOD_ROWS;
+        rows[0] = "| とv杏 圭v全 馬v龍 ・v玉 駒|一";
+        assert_eq!(bod_to_csa(&rows, "なし", "なし"), None);
+    }
 
     fn body(text: &str, previous_dest: Option<(u8, u8)>) -> Option<String> {
         parse_kif_move(text, previous_dest).map(|mv| mv.body)
@@ -557,6 +683,27 @@ mod tests {
         // CRLF、対局者名の末尾のタブ・空白も同じ結果になる。
         let crlf = text.replace("先手：黒\n", "先手：黒\t \n").replace('\n', "\r\n");
         assert_eq!(kif_to_csa(&crlf).unwrap(), expected);
+    }
+
+    #[test]
+    fn hand_headers_without_board_use_standard_start() {
+        let moves = format!("{TWO_MOVES} 3 投了\n");
+        let made = "まで2手で後手の勝ち\n";
+        let expected = kif_to_csa(&kif("", &moves, made)).unwrap();
+        assert!(expected.contains("\nPI\n+\n+7776FU,T3\n"));
+        for hands in [
+            "先手の持駒：なし\n",
+            "後手の持駒：\n",
+            "後手の持駒：\n先手の持駒：なし\n",
+        ] {
+            assert_eq!(kif_to_csa(&kif(hands, &moves, made)).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn board_frame_without_rows_is_rejected() {
+        let header = format!("後手の持駒：なし\n{BOD_FRAME}\n先手の持駒：なし\n");
+        assert_eq!(reason(kif_to_csa(&kif(&header, TWO_MOVES, ""))), REASON_BAD_BOARD);
     }
 
     #[test]

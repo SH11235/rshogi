@@ -47,7 +47,7 @@
 | [`fix_scores`](fix_scores.md) | 元 PSV を保護して前処理済み PSV の score を復元 |
 | [`psv_to_jsonl`](psv_to_jsonl.md) | PSV を確認用 JSONL に変換 |
 | [`jsonl_to_psv`](jsonl_to_psv.md) | 自己対局 JSONL から PSV を生成し、破損行を件数付きで除外 |
-| [`jsonl_to_kif`](jsonl_to_kif.md) | JSONL から先後・終局理由を反映した KIF を局単位で生成 |
+| [`jsonl_to_kif`](jsonl_to_kif.md) | JSONL から対局者ラベル・先後・終局理由を反映した KIF を局単位で生成 |
 | [`psv_to_hcpe3`](psv_to_hcpe3.md) | PSV を cshogi 互換の hcpe3 / hcpe へストリーミング変換 |
 | [`hcpe_to_psv`](hcpe_to_psv.md) | 38 byte hcpe を 40 byte PSV に変換 |
 | [`pack_to_psv`](pack_to_psv.md) | GenSfen pack を有界バッチで PSV に変換 |
@@ -67,7 +67,7 @@
 | [`floodgate_record`](floodgate_record.md) | csa_client の対局ログから先後別・相手別成績と NPS を集計 |
 | [`floodgate_pipeline`](floodgate_pipeline.md) | Floodgate 棋譜の取得、128 棋譜ずつの局面抽出、live mirror |
 | [`kifu_player`](kifu_player.md) | PSV / JSONL / CSA の再生・検索・追記監視を行う TUI |
-| [`kifu_publish`](kifu_publish.md) | JSONL / CSA / KIF とイベント情報を棋譜サーバーへ公開 |
+| [`kifu_publish`](kifu_publish.md) | JSONL / CSA / KIF とイベント情報を棋譜サーバーへ公開。KIF は開始局面の局面図にも対応 |
 
 ## 性能計測・NNUE 診断・ラベル評価
 
