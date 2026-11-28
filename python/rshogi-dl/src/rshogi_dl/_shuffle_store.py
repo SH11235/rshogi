@@ -3,7 +3,8 @@
 import hashlib
 import json
 import os
-from collections.abc import Iterable, Iterator
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from io import BufferedReader, BufferedWriter
@@ -347,10 +348,12 @@ def _sort_partition(
 
 def iter_shuffled_rows(
     work: Path, *, start_row: int = 0, max_partition_bytes: int = 128 << 20,
+    committed_rows: Callable[[], int] | None = None,
 ) -> Iterator[bytes]:
     """完了済みの入力から、指定位置以降を分割境界によらないキー順で返す。
 
     呼び出し側はイテレータを閉じるまで作業ディレクトリの排他ロックを保持する。
+    committed_rows は検証可能な状態で公開済みの出力行数を返す。区画の末尾まで公開されたら一時データを解放する。
     """
     if type(max_partition_bytes) is not int or max_partition_bytes <= 0:
         raise ValueError("max_partition_bytes must be a positive integer")
@@ -373,7 +376,18 @@ def iter_shuffled_rows(
         total += rows
     if total != prepared["rows"]:
         raise ValueError("shuffle store receipt total does not match the sources")
+    pending = deque()
+    through = 0
     with _scratch(work) as scratch:
         for index, fragments in enumerate(by_partition):
             yield from _sort_partition(fragments, index, bits, max_partition_bytes, scratch, start_row)
-            start_row = max(0, start_row - sum(fragment.rows for fragment in fragments))
+            rows = sum(fragment.rows for fragment in fragments)
+            through += rows
+            start_row = max(0, start_row - rows)
+            if committed_rows is not None:
+                pending.append((through, fragments))
+                committed = committed_rows()
+                while pending and pending[0][0] <= committed:
+                    _, completed = pending.popleft()
+                    for fragment in completed:
+                        fragment.path.unlink(missing_ok=True)

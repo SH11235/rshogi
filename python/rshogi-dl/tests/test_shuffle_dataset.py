@@ -168,6 +168,24 @@ class ShuffleDatasetTest(unittest.TestCase):
             list(iter_shuffled_rows(store, start_row=127, max_partition_bytes=64)), expected[127:],
         )
 
+    def test_partition_reclamation_keeps_uncommitted_rows_available_for_resume(self):
+        original = [f"row-{index}".encode() for index in range(260)]
+        store = self.root / "reclamation-store"
+        partition_rows(store, (iter(original[:95]), iter(original[95:])), seed=49, partition_bits=2)
+        expected = list(iter_shuffled_rows(store))
+        fragments = set(store.glob("source-*/partition-*.zst"))
+        committed = 0
+        shuffled = iter_shuffled_rows(store, committed_rows=lambda: committed)
+        try:
+            self.assertEqual([next(shuffled) for _ in range(128)], expected[:128])
+            self.assertEqual(set(store.glob("source-*/partition-*.zst")), fragments)
+            committed = 128
+            self.assertEqual([next(shuffled) for _ in range(80)], expected[128:208])
+            self.assertLess(set(store.glob("source-*/partition-*.zst")), fragments)
+        finally:
+            shuffled.close()
+        self.assertEqual(list(iter_shuffled_rows(store, start_row=committed)), expected[committed:])
+
     @unittest.skipUnless(os.name == "posix" and shutil.which("xz"), "requires an executable fixture and xz")
     def test_cli_raw_xz_and_training_manifest_preserve_filtering(self):
         encoder = self.root / "encoder"

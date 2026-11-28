@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 from struct import Struct
@@ -271,7 +272,9 @@ def _write_output(output, store, rows, identity, sources, shard_records, compres
                             else "unknown"),
     }
     start, written, content = _resume_output(output, manifest)
-    with closing(iter_shuffled_rows(store, start_row=written)) as records:
+    # Windows では directory の fsync ができないため、途中の一時区画を保持する。
+    committed_rows = None if os.name == "nt" else lambda: written
+    with closing(iter_shuffled_rows(store, start_row=written, committed_rows=committed_rows)) as records:
         for index, (columns, count) in enumerate(_decode_shards(records, shard_records), start):
             digest = _write_shard(output, index, columns, count, compressor)
             content.update(bytes.fromhex(digest))
