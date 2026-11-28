@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # base ref からの変更 (commit 済み・未 commit・untracked) を含む crate と、それに依存する crate の
 # テストだけを nextest で走らせる。workspace 共通の設定が変わったときは全体を走らせる。
+# crate をまたぐ移動では移動元の crate も対象にするため、rename 検出を切る。
 # doctest は nextest が走らせないので、作業の最後に `cargo test` で全体を確かめる。
 #
 # usage: scripts/test-affected.sh [--base <ref>] [nextest の追加引数...]
@@ -18,7 +19,7 @@ fi
 merge_base=$(git merge-base "$base" HEAD)
 changed=$(
   {
-    git diff --name-only "$merge_base"
+    git diff --name-only --no-renames "$merge_base"
     git ls-files --others --exclude-standard
   } | sort -u
 )
