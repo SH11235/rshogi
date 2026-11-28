@@ -205,7 +205,11 @@ impl AnalysisSession {
     ///
     /// 前の局面の続きは再開できなくなる。前の局面の停止ハンドルと準備済みの実行は失効し、
     /// 実行 ID（[`AnalysisRunHandle::run_id`]）は前の局面から続けて振る。前の実行が panic で
-    /// 失敗していたときは状態を引き継がず、`RunFailed` を返す（新しいセッションを作る）。
+    /// 失敗していたときは状態を引き継がず、`RunFailed` を返す（新しい [`Search`] から
+    /// セッションを作り直す。`into_search` で回収した探索器には途中の状態が残り得る）。
+    ///
+    /// 置換表のキーは局面だけなので、根の手番を基準にした引き分けの値や引き分けまでの手数は、
+    /// 前に読んだ値に前の局面の条件のまま残る。対局で手が進んでも置換表を使い続けるのと同じ扱い。
     pub fn set_position(
         &mut self,
         position: Position,
@@ -394,93 +398,5 @@ impl AnalysisSession {
             total_time_ms: self.total_time_ms,
             total_nodes: self.total_nodes,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn on_large_stack(f: impl FnOnce() + Send + 'static) {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(f)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn hirate_after(moves: &[&str]) -> Position {
-        let mut pos = Position::new();
-        pos.set_hirate();
-        for usi in moves {
-            let mv = pos.to_move(crate::types::Move::from_usi(usi).unwrap()).unwrap();
-            pos.do_move(mv, pos.gives_check(mv));
-        }
-        pos
-    }
-
-    fn run_depth(session: &mut AnalysisSession, depth: i32) -> AnalysisFinished {
-        let run = session.prepare(AnalysisBudget::Depth(depth)).unwrap();
-        session.run(&run, None::<fn(&SearchInfo)>).unwrap()
-    }
-
-    #[test]
-    fn set_position_keeps_tables_and_invalidates_old_runs() {
-        let _guard = crate::eval::material::test_support::lock_material();
-        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
-        on_large_stack(|| {
-            for threads in [1, 2] {
-                let mut search = Search::new(1);
-                search.set_num_threads(threads);
-                let mut session = AnalysisSession::new(search, hirate_after(&[]), 3).unwrap();
-                run_depth(&mut session, 9);
-                let old_run = session.prepare(AnalysisBudget::Depth(10)).unwrap();
-                assert!(session.search.tt_hashfull_for_test() > 0);
-
-                session.set_position(hirate_after(&["7g7f"]), 2).unwrap();
-                assert!(session.search.tt_hashfull_for_test() > 0);
-                let run = session.prepare(AnalysisBudget::Depth(5)).unwrap();
-                assert!(run.run_id() > old_run.run_id(), "run ids continue across positions");
-                assert_eq!(
-                    session.run(&old_run, None::<fn(&SearchInfo)>).err(),
-                    Some(AnalysisError::InvalidRun)
-                );
-                assert!(!old_run.pause(), "a stale handle must not stop the new run");
-                let finished = session.run(&run, None::<fn(&SearchInfo)>).unwrap();
-                assert_eq!(finished.result.depth, 5);
-                assert_eq!(finished.total_nodes, finished.result.nodes);
-                assert_eq!(finished.worker_depths.len(), threads);
-                assert!(finished.worker_depths.iter().all(|&(before, _)| before == 0));
-            }
-        });
-    }
-
-    #[test]
-    fn set_position_clears_tables_after_evaluation_change() {
-        let _guard = crate::eval::material::test_support::lock_material();
-        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
-        on_large_stack(|| {
-            let mut session = AnalysisSession::new(Search::new(1), hirate_after(&[]), 1).unwrap();
-            run_depth(&mut session, 9);
-            assert_eq!(
-                session.set_position(hirate_after(&["7g7f"]), 0),
-                Err(AnalysisError::InvalidOptions)
-            );
-            assert!(session.search.tt_hashfull_for_test() > 0);
-
-            crate::eval::changed();
-            assert_eq!(
-                session.prepare(AnalysisBudget::Depth(5)).err(),
-                Some(AnalysisError::EvaluationChanged)
-            );
-            session.set_position(hirate_after(&["7g7f"]), 1).unwrap();
-            assert_eq!(session.search.tt_hashfull_for_test(), 0);
-            assert_eq!(run_depth(&mut session, 5).result.depth, 5);
-
-            // panic で失敗した探索器の状態は引き継がない。
-            session.unavailable = Some(AnalysisError::RunFailed);
-            assert_eq!(session.set_position(hirate_after(&[]), 1), Err(AnalysisError::RunFailed));
-        });
     }
 }

@@ -14,7 +14,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
-- `AnalysisSession::set_position` を足した。同じ探索器のまま解析する局面と MultiPV を替え、置換表・評価値のハッシュ・履歴を残す（評価関数が替わっていたとき、前の実行が失敗していたときは空にする）。近い局面を行き来する解析で、戻った局面が前に読んだ深さへ速く届く。
+- `AnalysisSession::set_position` を足した。同じ探索器のまま解析する局面と MultiPV を替え、置換表・評価値のハッシュ・履歴を残す（評価関数が替わっていたときは空にする。前の実行が panic で失敗していたときは `RunFailed` を返す）。近い局面を行き来する解析で、戻った局面が前に読んだ深さへ速く届く。
 - LayerStacks-DenseConcat に FT 幅 4096 / 6144 / 8192 / 12288 の edition を追加。すべて Threat なしと全幅に対応し、6144 は部分幅 3072、8192 は部分幅 2816 にも対応。
 - rshogi-core に cargo feature `search-updates` を足した（既定では無効）。`Search::go_with_updates` に渡したコールバックが、メインスレッドの局面数がしきい値（既定 1000 万）を超えてから、段の途中の進み具合（一定間隔）・`currmove`・MultiPV の読み筋 1 本ごとの確定値を受け取る。rshogi-usi も同名の feature で、`currmove` と読み筋 1 本ごとの値を `info` で出す。
 - `tournament` は既定で worker あたりのエンジン常駐数を 2 本に抑え、対局カードに応じて入れ替える。`--max-live-engines-per-worker 0` で全エンジンを常駐できる。
