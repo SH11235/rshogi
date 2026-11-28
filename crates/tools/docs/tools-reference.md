@@ -47,7 +47,7 @@
 | [`fix_scores`](fix_scores.md) | 元 PSV を保護して前処理済み PSV の score を復元 |
 | [`psv_to_jsonl`](psv_to_jsonl.md) | PSV を確認用 JSONL に変換 |
 | [`jsonl_to_psv`](jsonl_to_psv.md) | 自己対局 JSONL から PSV を生成し、破損行を件数付きで除外 |
-| [`jsonl_to_kif`](jsonl_to_kif.md) | JSONL から先後・終局理由を反映した KIF を局単位で生成 |
+| [`jsonl_to_kif`](jsonl_to_kif.md) | JSONL から対局者ラベル・先後・終局理由を反映した KIF を局単位で生成 |
 | [`psv_to_hcpe3`](psv_to_hcpe3.md) | PSV を cshogi 互換の hcpe3 / hcpe へストリーミング変換 |
 | [`hcpe_to_psv`](hcpe_to_psv.md) | 38 byte hcpe を 40 byte PSV に変換 |
 | [`pack_to_psv`](pack_to_psv.md) | GenSfen pack を有界バッチで PSV に変換 |
