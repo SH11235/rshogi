@@ -112,8 +112,8 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _read_json(path: Path) -> dict:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_METADATA_BYTES:
+def _read_json(path: Path, *, max_bytes: int = _MAX_METADATA_BYTES) -> dict:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > max_bytes:
         raise DatasetError(f"missing or invalid metadata file: {path.name}")
     try:
         with path.open(encoding="utf-8") as stream:

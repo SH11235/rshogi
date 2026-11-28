@@ -29,6 +29,7 @@ _SHARD_RECORDS = 32768
 _INPUT_BATCH = 4096
 _ROW_HEADER = Struct(f"<{TOKEN_COUNT}sf?H")
 _FORMAT = "rshogi-dl-full-shuffle-v1"
+_MAX_RECEIPT_BYTES = 64 << 20
 
 
 @dataclass(frozen=True)
@@ -208,8 +209,18 @@ def _open_work(path):
 
 
 def _same_receipt(path, identity):
-    if sharded._read_json(path) != identity:
+    if _read_receipt(path) != identity:
         raise sharded.DatasetError(f"shuffle configuration changed: {path}")
+
+
+def _read_receipt(path):
+    return sharded._read_json(path, max_bytes=_MAX_RECEIPT_BYTES)
+
+
+def _write_receipt(path, identity):
+    sharded._write_json(path, identity)
+    if path.stat().st_size > _MAX_RECEIPT_BYTES:
+        raise sharded.DatasetError("shuffle receipt exceeds the supported size")
 
 
 def _resume_output(output, manifest):
@@ -245,7 +256,7 @@ def _create_output(output, identity):
     with TemporaryDirectory(prefix=".shuffle-init-", dir=output.parent) as temporary:
         staged = Path(temporary) / "output"
         staged.mkdir()
-        sharded._write_json(staged / "shuffle.json", identity)
+        _write_receipt(staged / "shuffle.json", identity)
         sharded._sync_directory(staged)
         staged.rename(output)
     root = shogi_data_root()
@@ -311,7 +322,7 @@ def shuffle_dataset(sources, output, *, seed: int, work=None, encoder=None, part
 
     with _work_lock(work):
         receipt = work / "input.json"
-        previous = sharded._read_json(receipt) if receipt.exists() else {}
+        previous = _read_receipt(receipt) if receipt.exists() else {}
         if not previous and any(
             path.name != "lock" and
             (not path.name.startswith(".shuffle-receipt-") or path.is_symlink() or not path.is_dir())
@@ -362,7 +373,7 @@ def shuffle_dataset(sources, output, *, seed: int, work=None, encoder=None, part
 def _save_receipt(path, identity):
     with TemporaryDirectory(prefix=".shuffle-receipt-", dir=path.parent) as temporary:
         staged = Path(temporary) / path.name
-        sharded._write_json(staged, identity)
+        _write_receipt(staged, identity)
         staged.replace(path)
     sharded._sync_directory(path.parent)
 

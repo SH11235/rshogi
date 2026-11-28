@@ -13,7 +13,7 @@ from unittest import mock
 from rshogi_dl import sharded
 from rshogi_dl._shuffle_store import iter_shuffled_rows, partition_rows
 from rshogi_dl.hcpe3_stream import FORMAT, iter_hcpe3_batches
-from rshogi_dl.shuffle_dataset import _write_shard, shuffle_dataset
+from rshogi_dl.shuffle_dataset import _create_output, _same_receipt, _save_receipt, _write_shard, shuffle_dataset
 
 from .support import artifact_tempdir, synthetic_records
 from .test_hcpe3_stream import _archive, _identity
@@ -132,6 +132,17 @@ class ShuffleDatasetTest(unittest.TestCase):
         self.assertEqual(sentinel.read_bytes(), b"owned by another job")
         self.assertFalse((work / "input.json").exists())
         self.assertFalse((output / "manifest.json").exists())
+
+    def test_large_work_and_output_receipts_can_be_read_after_publication(self):
+        work = self.root / "large-work"
+        work.mkdir()
+        output = self.root / "large-output"
+        identity = {"sources": [{"path": "archive-" + "x" * 320 + str(i)} for i in range(220)]}
+        _save_receipt(work / "input.json", identity)
+        _create_output(output, identity)
+        for path in (work / "input.json", output / "shuffle.json"):
+            self.assertGreater(path.stat().st_size, 65536)
+            _same_receipt(path, identity)
 
     def test_swapped_equal_size_shards_are_rejected_before_publication(self):
         template = synthetic_records(seed=43, count=1)[0]
