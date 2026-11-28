@@ -67,7 +67,7 @@
 | [`floodgate_record`](floodgate_record.md) | csa_client の対局ログから先後別・相手別成績と NPS を集計 |
 | [`floodgate_pipeline`](floodgate_pipeline.md) | Floodgate 棋譜の取得、128 棋譜ずつの局面抽出、live mirror |
 | [`kifu_player`](kifu_player.md) | PSV / JSONL / CSA の再生・検索・追記監視を行う TUI |
-| [`kifu_publish`](kifu_publish.md) | JSONL / CSA / KIF とイベント情報を棋譜サーバーへ公開 |
+| [`kifu_publish`](kifu_publish.md) | JSONL / CSA / KIF とイベント情報を棋譜サーバーへ公開。KIF は開始局面の局面図にも対応 |
 
 ## 性能計測・NNUE 診断・ラベル評価
 
