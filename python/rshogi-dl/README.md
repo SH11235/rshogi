@@ -202,6 +202,33 @@ python -m rshogi_dl.sharded verify --data "$SHOGI_DATA/teachers/dl/<compressed-d
 
 変換プログラムからは `rshogi_dl.sharded.convert_records` に行の iterable を渡せます。
 行は JSONL と共通の形式で、同じ検証と重みの正規化を経て shard に保存されます。
+
+### 複数入力をまたぐ全量シャッフル
+
+`shuffle_dataset` は指定した全入力から学習行を取り出し、seed で決めた一つの順序に並べて圧縮 shard を作ります。
+生の `.hcpe3`、`.hcpe3.xz`、HCPE3 直接入力用 manifest、既存の学習 shard ディレクトリを指定できます。
+Zstandard 用に `pip install -e '.[compression]'` を使い、`hcpe3.xz` を読む環境では PATH に `xz` を用意してください。
+
+```bash
+python -m rshogi_dl.shuffle_dataset \
+  --encoder target/release/hcpe3_to_dl_rows \
+  --seed 12345 \
+  --output "$SHOGI_DATA/teachers/dl/shuffled-train" \
+  "$SHOGI_DATA/teachers/dl/games-a.hcpe3" \
+  "$SHOGI_DATA/teachers/dl/games-b.hcpe3.xz"
+```
+
+元の直接入力で評価用局面の除外や混合価値を指定している場合は、その HCPE3 manifest を入力に渡します。
+原本ファイルを直接列挙する場合は `--value-eval-weight`、`--value-eval-scale`、`--policy-temperature` で教師を指定できます。
+既存 shard は保存済みの教師ラベルをそのまま使います。複数の入力の分割名は揃えてください。
+同じ局面が入力に複数あれば、その出現回数を保持します。
+
+変換中は圧縮した一時区画を出力と同じ階層に置きます。`--work` で作業ディレクトリを指定できます。
+中断した場合は同じコマンドを再実行すると、読み込み済みの入力と書き込み済みの shard を再利用します。
+ファイル記述子の上限が小さい環境では `--partition-bits 7` などで同時書き込み数を減らせます。
+区画数を変えても同じ seed と入力順に対するシャッフル結果は同じです。
+変換の完了後は `trainer --train` に出力ディレクトリを指定します。学習時はシャッフル済みの順序で順次読み込みます。
+同じ入力と seed で再学習する場合は出力を共有でき、新しい順序を使う場合は別の seed と出力先を指定します。
 `source_name` と `source_size` には入力の名前とバイト数を指定します。入力の安定性は呼び出し元で保証してください。
 
 JSONL の検証・Python record の作成を毎 epoch 繰り返す代わりに、検証済みの入力を NumPy 配列の shard に変換できます。変換は全行を一度検証し、最大 `--shard-records` 行ずつ保存します。既定4096行、上限65536行で、入力全体をメモリに読みません。
