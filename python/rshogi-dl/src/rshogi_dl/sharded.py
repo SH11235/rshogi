@@ -112,8 +112,8 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _read_json(path: Path) -> dict:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_METADATA_BYTES:
+def _read_json(path: Path, *, max_bytes: int = _MAX_METADATA_BYTES) -> dict:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > max_bytes:
         raise DatasetError(f"missing or invalid metadata file: {path.name}")
     try:
         with path.open(encoding="utf-8") as stream:
@@ -517,7 +517,8 @@ def _read_array(path: Path, dtype: np.dtype, shape: tuple[int, ...]) -> np.ndarr
 
 
 class _Shard:
-    def __init__(self, root: Path, index: int, manifest: dict, *, verify_hashes: bool) -> None:
+    def __init__(self, root: Path, index: int, manifest: dict, *, verify_hashes: bool,
+                 manifest_name: str = "manifest.json") -> None:
         directory = _shard_dir(root, index)
         if directory.is_symlink() or not directory.is_dir():
             raise DatasetError("missing or symlinked shard directory")
@@ -550,7 +551,7 @@ class _Shard:
             "policy_targets": (np.dtype("<f4"), (entries,)),
         }
         self.signatures = {
-            root / "manifest.json": _signature(root / "manifest.json"),
+            root / manifest_name: _signature(root / manifest_name),
             directory / "metadata.json": _signature(directory / "metadata.json"),
         }
         files = metadata["files"]
