@@ -2821,6 +2821,10 @@ impl Search {
     pub(crate) fn ponderhit_flag_for_test(&self) -> bool {
         self.ponderhit_flag.load(Ordering::Relaxed)
     }
+    /// テスト専用: 置換表の使用率（千分率、世代を問わない）。
+    pub(crate) fn tt_hashfull_for_test(&self) -> i32 {
+        self.tt.hashfull(u8::MAX >> crate::tt::GENERATION_BITS)
+    }
 }
 
 #[cfg(test)]

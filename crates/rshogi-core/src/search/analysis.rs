@@ -196,6 +196,41 @@ impl AnalysisSession {
             total_nodes: 0,
         })
     }
+    /// 同じ探索器のまま、解析する局面と MultiPV を替える。
+    ///
+    /// 置換表・評価値のハッシュ・履歴は残す。対局で手が進んでも捨てないのと同じで、近い局面を
+    /// 行き来する解析では前に読んだ値と手の順序が効く。評価関数が替わっていたとき、前の実行が
+    /// panic で失敗していたときは [`AnalysisSession::new`] と同じく空にする。
+    /// 前の局面の続きは再開できなくなり、前の局面の停止ハンドルは新しい実行に作用しない。
+    pub fn set_position(
+        &mut self,
+        position: Position,
+        multi_pv: usize,
+    ) -> Result<(), AnalysisError> {
+        if multi_pv == 0 {
+            return Err(AnalysisError::InvalidOptions);
+        }
+        self.control.fetch_or(1, Ordering::AcqRel);
+        let evaluation_revision = crate::eval::revision();
+        if self.unavailable == Some(AnalysisError::RunFailed)
+            || self.evaluation_revision != evaluation_revision
+        {
+            self.search.clear_tt();
+            self.search.clear_eval_hash();
+            self.search.clear_for_new_game();
+        }
+        self.position = position;
+        self.multi_pv = multi_pv;
+        self.control = Arc::new(AtomicU32::new(0));
+        self.pending = None;
+        self.started = false;
+        self.unavailable = None;
+        self.evaluation_revision = evaluation_revision;
+        self.total_time_ms = 0;
+        self.total_nodes = 0;
+        Ok(())
+    }
+
     /// 状態を解放して探索器を返す。保持した停止ハンドルはこのセッションにしか作用しない。
     pub fn into_search(self) -> Search {
         self.control.fetch_or(1, Ordering::AcqRel);
@@ -350,5 +385,83 @@ impl AnalysisSession {
             total_time_ms: self.total_time_ms,
             total_nodes: self.total_nodes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn on_large_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn hirate_after(moves: &[&str]) -> Position {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        for usi in moves {
+            let mv = pos.to_move(crate::types::Move::from_usi(usi).unwrap()).unwrap();
+            pos.do_move(mv, pos.gives_check(mv));
+        }
+        pos
+    }
+
+    fn run_depth(session: &mut AnalysisSession, depth: i32) -> AnalysisFinished {
+        let run = session.prepare(AnalysisBudget::Depth(depth)).unwrap();
+        session.run(&run, None::<fn(&SearchInfo)>).unwrap()
+    }
+
+    #[test]
+    fn set_position_keeps_tables_and_invalidates_old_runs() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        on_large_stack(|| {
+            let mut session = AnalysisSession::new(Search::new(1), hirate_after(&[]), 3).unwrap();
+            run_depth(&mut session, 9);
+            let old_run = session.prepare(AnalysisBudget::Depth(7)).unwrap();
+            assert!(session.search.tt_hashfull_for_test() > 0);
+
+            session.set_position(hirate_after(&["7g7f"]), 2).unwrap();
+            assert!(session.search.tt_hashfull_for_test() > 0);
+            assert_eq!(
+                session.run(&old_run, None::<fn(&SearchInfo)>).err(),
+                Some(AnalysisError::InvalidRun)
+            );
+            let run = session.prepare(AnalysisBudget::Depth(5)).unwrap();
+            // 前の局面のハンドルで止めても、新しい実行は止まらない。
+            old_run.pause();
+            let finished = session.run(&run, None::<fn(&SearchInfo)>).unwrap();
+            assert_eq!(finished.result.depth, 5);
+            assert_eq!(finished.total_nodes, finished.result.nodes);
+        });
+    }
+
+    #[test]
+    fn set_position_clears_tables_after_evaluation_change() {
+        let _guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        on_large_stack(|| {
+            let mut session = AnalysisSession::new(Search::new(1), hirate_after(&[]), 1).unwrap();
+            run_depth(&mut session, 9);
+            assert_eq!(
+                session.set_position(hirate_after(&["7g7f"]), 0),
+                Err(AnalysisError::InvalidOptions)
+            );
+            assert!(session.search.tt_hashfull_for_test() > 0);
+
+            crate::eval::changed();
+            assert_eq!(
+                session.prepare(AnalysisBudget::Depth(5)).err(),
+                Some(AnalysisError::EvaluationChanged)
+            );
+            session.set_position(hirate_after(&["7g7f"]), 1).unwrap();
+            assert_eq!(session.search.tt_hashfull_for_test(), 0);
+            assert_eq!(run_depth(&mut session, 5).result.depth, 5);
+        });
     }
 }
