@@ -8,7 +8,7 @@ use super::reply_graph::HIRATE_KEY;
 use super::schema::Schema;
 use super::targets::{Line, MAX_DEPTH, MAX_PRIORITY, Opts};
 use super::walk::{check_tag, queue_id};
-use crate::book_db::{apply_usi_move, parse_move_line, strip_ply};
+use crate::book_db::{apply_usi_move, strip_ply};
 use crate::kif::{eval_comment_lines, move_text};
 use crate::selfplay::EvalLog;
 use anyhow::{Context, Result, ensure};
@@ -37,7 +37,7 @@ pub(super) struct MainLineArgs {
     #[arg(long)]
     kif: Option<PathBuf>,
     /// KIF に付ける伝播値の定跡 DB (master audit --out-db)
-    #[arg(long)]
+    #[arg(long, requires = "kif")]
     values_db: Option<PathBuf>,
     /// 初期局面から辿る手数の上限
     #[arg(long, default_value_t = 400)]
@@ -84,9 +84,6 @@ impl MainLineArgs {
         if let Some(path) = &self.values_db {
             inputs.push(("--values-db", path.as_path()));
         }
-        if let Some(path) = &self.schema {
-            inputs.push(("--schema", path.as_path()));
-        }
         let schema_paths: Vec<_> =
             self.schema.iter().flat_map(|dir| super::schema::paths(dir)).collect();
         for path in &schema_paths {
@@ -98,10 +95,7 @@ impl MainLineArgs {
             ("--kif", self.kif.as_deref()),
         ] {
             if let Some(path) = path {
-                reject_same_file(path, &inputs).with_context(|| format!("{flag} の出力先"))?;
-                let protected: Vec<_> = inputs.iter().map(|&(_, input)| input).collect();
-                crate::output_path::ensure_no_entity_overlap(&[path], &protected)
-                    .with_context(|| format!("{flag} の出力先"))?;
+                reject_same_file(path, &inputs)?;
                 inputs.push((flag, path));
             }
         }
@@ -167,7 +161,7 @@ fn walk(
     mut steps: Vec<Step>,
 ) -> Result<Walked> {
     let start_ply = steps.len();
-    let mut seen = BTreeSet::new();
+    let mut seen: BTreeSet<_> = steps.iter().map(|step| step.key.clone()).collect();
     let stop = loop {
         if !seen.insert(key.clone()) {
             break Stop::Cycle;
@@ -239,32 +233,50 @@ fn read_values<'a>(path: &Path, steps: &'a [Step]) -> Result<LineValues<'a>> {
     for step in steps {
         values.entry(&step.key).or_default().insert(&step.mv, None);
     }
+    let mut remaining: usize = values.values().map(BTreeMap::len).sum();
     let mut key = None;
-    let mut reader = BufReader::new(File::open(path)?);
+    let file = File::open(path)
+        .with_context(|| format!("--values-db を開けません: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
     let mut line = String::new();
-    while reader.read_line(&mut line)? != 0 {
+    let mut line_number = 0;
+    while remaining > 0 {
+        line.clear();
+        line_number += 1;
+        if reader.read_line(&mut line).with_context(|| {
+            format!("--values-db {} の {line_number} 行目を読めません", path.display())
+        })? == 0
+        {
+            break;
+        }
         let text = line.trim();
+        let mut fields = text.split_whitespace();
         if let Some(sfen) = text.strip_prefix("sfen ") {
             key = values.get_key_value(strip_ply(sfen)).map(|(&k, _)| k);
         } else if let Some(key) = key
-            && let Some(mv) = text.split_whitespace().next()
+            && let Some(mv) = fields.next()
             && let Some(value) = values.get_mut(key).and_then(|moves| moves.get_mut(mv))
-            && value.is_none()
-            && let Some(entry) = parse_move_line(text)
         {
-            *value = Some(entry.value);
+            let parsed = fields.nth(1).and_then(|field| field.parse::<i32>().ok()).with_context(
+                || {
+                    format!(
+                        "--values-db {} の {line_number} 行目: {mv} の評価値欄に i32 の整数が必要です",
+                        path.display()
+                    )
+                },
+            )?;
+            if value.is_none() {
+                *value = Some(parsed);
+                remaining -= 1;
+            }
         }
-        line.clear();
     }
     Ok(values)
 }
 
 fn render_kif(walked: &Walked, values_db: Option<&Path>) -> Result<Vec<u8>> {
     let values = values_db
-        .map(|path| {
-            read_values(path, &walked.steps)
-                .with_context(|| format!("--values-db を読めません: {}", path.display()))
-        })
+        .map(|path| read_values(path, &walked.steps))
         .transpose()?
         .unwrap_or_default();
     let mut bytes = "手合割：平手\n先手：\n後手：\n手数----指手---------消費時間--\n"

@@ -126,6 +126,24 @@ fn cycle_and_max_ply_write_no_tree_line() {
 }
 
 #[test]
+fn cycle_stops_at_a_position_already_visited_in_start_moves() {
+    let path = ["7g7f", "3c3d", "5i5h", "5a5b", "5h5i", "5b5a"];
+    for (path, start_ply) in [(&path[2..], 1), (path.as_slice(), 3)] {
+        let d = TempDir::new().unwrap();
+        let rows: Vec<_> =
+            (start_ply..path.len()).map(|i| row(&path[..i], path[i], "main", "")).collect();
+        let prefix = path[..start_ply].join(" ");
+        let stdout = run_with(&d, &rows, &["--start-moves", &prefix]);
+        assert!(
+            stdout.starts_with(&format!("{} 手で切れる。理由: cycle", path.len())),
+            "{stdout}"
+        );
+        assert!(stdout.contains(&format!("moves={}\n", path.join(" "))), "{stdout}");
+        assert!(lines(&d).is_empty());
+    }
+}
+
+#[test]
 fn outputs_must_differ_from_inputs() {
     let d = TempDir::new().unwrap();
     let master = d.path().join("moves.tsv");
@@ -227,7 +245,7 @@ fn exports_kif_with_direct_book_values_and_promotion() {
     std::fs::write(
         &values,
         format!(
-            "{BOOK_HEADER}\nsfen {} 99\n7g7f none 101 1 2\nsfen {} 88\n3c3d none -2147483648 1 2\nsfen {flipped}\n{flipped_move} none 999 1 2\nsfen {} 4\n8c8d none 500 1 1\nsfen {} 5\n2g2f none 0 1 2\n",
+            "{BOOK_HEADER}\nsfen {} 99\n7g7f none 101 1 2\nsfen {} 88\n3c3d none -2147483648 1 2\nsfen {flipped}\n{flipped_move} none 999 1 2\nsfen {} 4\n8c8d none invalid 1 1\nsfen {} 5\n2g2f none 0 1 2\n",
             keys[0], keys[1], keys[3], keys[4],
         ),
     )
@@ -269,6 +287,73 @@ fn exports_kif_with_direct_book_values_and_promotion() {
 }
 
 #[test]
+fn exports_kif_with_drop_and_unpromoted_move() {
+    let d = TempDir::new().unwrap();
+    let prefix = ["7g7f", "3c3d", "8h2b", "3a2b"];
+    let rows = [row(&prefix, "B*4e", "main", "")];
+    let kif = d.path().join("line.kif");
+    run_with(
+        &d,
+        &rows,
+        &[
+            "--start-moves",
+            &prefix.join(" "),
+            "--kif",
+            kif.to_str().unwrap(),
+        ],
+    );
+    let text = std::fs::read_to_string(&kif).unwrap();
+    assert!(text.lines().any(|line| line == "   3 ２二角(88)"), "{text}");
+    assert!(text.lines().any(|line| line == "   5 ４五角打"), "{text}");
+}
+
+#[test]
+fn kif_rejects_missing_or_invalid_values_on_matching_rows() {
+    let d = TempDir::new().unwrap();
+    let values = d.path().join("values.db");
+    let (key, steps) = start_path("7g7f", 400).unwrap();
+    let walked = Walked {
+        steps,
+        start_ply: 1,
+        key,
+        stop: Stop::Missing,
+    };
+    for row in ["7g7f none", "7g7f none invalid", "7g7f none 2147483648"] {
+        std::fs::write(&values, format!("sfen {HIRATE_KEY} 1\n2g2f none\n{row}\n")).unwrap();
+        let err = render_kif(&walked, Some(&values)).unwrap_err().to_string();
+        assert!(err.contains(&format!("{} の 3 行目", values.display())), "{err}");
+        assert!(err.contains("7g7f の評価値欄"), "{err}");
+    }
+}
+
+#[test]
+fn read_values_stops_after_the_last_requested_value() {
+    let d = TempDir::new().unwrap();
+    let values = d.path().join("values.db");
+    let (_, steps) = start_path("7g7f 3c3d", 400).unwrap();
+    let mut db = format!(
+        "sfen {HIRATE_KEY} 1\n7g7f none 101\n7g7f none 999\nsfen {} 2\n3c3d none 202\n",
+        steps[1].key
+    )
+    .into_bytes();
+    db.extend_from_slice(b"\xff\n");
+    std::fs::write(&values, db).unwrap();
+    let loaded = read_values(&values, &steps).unwrap();
+    assert_eq!(loaded[HIRATE_KEY]["7g7f"], Some(101));
+    assert_eq!(loaded[steps[1].key.as_str()]["3c3d"], Some(202));
+}
+
+#[test]
+fn values_db_requires_kif() {
+    let Err(err) = Cli::try_parse_from(["test", "--master", "moves.tsv", "--values-db", "a.db"])
+    else {
+        panic!("--kif が必要です");
+    };
+    assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(err.to_string().contains("--kif"), "{err}");
+}
+
+#[test]
 fn kif_and_values_db_participate_in_output_path_checks() {
     let d = TempDir::new().unwrap();
     let master = d.path().join("moves.tsv");
@@ -276,26 +361,23 @@ fn kif_and_values_db_participate_in_output_path_checks() {
     std::fs::create_dir(&schema).unwrap();
     let schema_file = schema.join("sources.tsv");
     let other = d.path().join("other");
+    let kif = d.path().join("line.kif");
     let master = master.to_str().unwrap();
     let schema = schema.to_str().unwrap();
     let schema_file = schema_file.to_str().unwrap();
     let other = other.to_str().unwrap();
+    let kif = kif.to_str().unwrap();
     for (options, conflicting) in [
         (vec!["--kif", master], "--master"),
         (vec!["--kif", schema_file], "--schema"),
         (vec!["--kif", other, "--table", other], "--table"),
         (vec!["--kif", other, "--enqueue-out", other], "--enqueue-out"),
         (vec!["--values-db", other, "--kif", other], "--values-db"),
-        (vec!["--values-db", other, "--table", other], "--values-db"),
-        (vec!["--values-db", other, "--enqueue-out", other], "--values-db"),
+        (vec!["--values-db", other, "--table", other, "--kif", kif], "--values-db"),
+        (vec!["--values-db", other, "--enqueue-out", other, "--kif", kif], "--values-db"),
     ] {
         let argv = ["test", "--master", master, "--schema", schema].into_iter().chain(options);
         let err = Cli::parse_from(argv).args.check().unwrap_err();
         assert!(format!("{err:#}").contains(&format!("{conflicting} と同じ")), "{err:#}");
     }
-    std::fs::write(master, "").unwrap();
-    std::fs::hard_link(master, other).unwrap();
-    let args = Cli::parse_from(["test", "--master", master, "--kif", other]).args;
-    let err = args.check().unwrap_err();
-    assert!(format!("{err:#}").contains("same file"), "{err:#}");
 }

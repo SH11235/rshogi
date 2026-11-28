@@ -2453,7 +2453,7 @@ book_mine master main-line --master moves.tsv --start-moves "7g7f 3c3d" \
 | `--table <TSV>` | なし | 辿った手順の表 |
 | `--start-moves "<USI 手順>"` | 空 | 初期局面から指す合法手を空白区切りで指定 |
 | `--kif <PATH>` | なし | 初手からの手順を平手の KIF に書き出す |
-| `--values-db <PATH>` | なし | KIF に評価値を付けるための `master audit --out-db` の DB |
+| `--values-db <PATH>` | なし | KIF に評価値を付けるための `master audit --out-db` の DB (`--kif` が必須) |
 | `--max-ply <N>` | 400 | 初期局面からの手数の上限 (`--start-moves` の手数を含む) |
 | `--enqueue-out <JSONL>` | なし | 切れた局面を根にした own=bw の木の行 (`tree enqueue --from` の形) |
 | `--tag` / `--depth` / `--priority` | mainline / 6 / 10 | 木の行の id の先頭 (`[A-Za-z0-9_-]` の 1〜40 文字)・段数・priority |
@@ -2466,7 +2466,7 @@ book_mine master main-line --master moves.tsv --start-moves "7g7f 3c3d" \
 | `missing` | 局面が元データに無い (反転キーでも無い) | 出す |
 | `flipped-only` | 反転キーでだけ元データにある | 出す |
 | `no-main` | 局面はあるが main の行が無い (標準出力に、ある role を出す) | 出す |
-| `cycle` | 同じ局面 (手数を除く) に戻った | 出さない |
+| `cycle` | 初期局面や `--start-moves` の途中を含め、既に通った局面 (手数を除く) に戻った | 出さない |
 | `max-ply` | `--max-ply` 手まで辿った | 出さない |
 
 標準出力には、切れた手数・理由・次の手番、初期局面からの手順 (`moves=`)、切れた局面 (`sfen <局面> <手数>`) を出します。
@@ -2479,6 +2479,7 @@ book_mine master main-line --master moves.tsv --start-moves "7g7f 3c3d" \
 KIF では指定手順の最後の手の後に `*ここから定跡の main` を置き、末尾を `まで<N>手で中断` とします。
 各手を指す前の局面とその手を DB で引き、見つかった伝播値を先手から見た `**評価値=<値>` として手の直後に書きます。
 局面の照合には盤面・手番・持ち駒を使います。DB を省略した場合や、直接キーの局面にその手が無い場合は評価値コメントを省きます。
+照合した行の評価値欄が空か符号付き 32 ビット整数として読めない場合は、DB のパスと行番号を添えてエラーにします。全手の伝播値が見つかった時点で DB の走査を終えます。
 出力には、入力ファイルおよび他の出力と異なるパスを指定してください。
 
 木の行は、根が切れた局面 (手数は初期局面からの手数 + 1)、id が `<tag>_<根の手数>_<局面の sha256 の先頭 16 桁>_bw`、
