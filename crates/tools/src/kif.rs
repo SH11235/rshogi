@@ -295,8 +295,8 @@ fn export_game_to_kif<W: Write>(
     if is_hirate(&pos) {
         writeln!(writer, "手合割：平手")?;
     }
-    writeln!(writer, "先手：{}", black_name)?;
-    writeln!(writer, "後手：{}", white_name)?;
+    writeln!(writer, "先手：{}", one_line(&black_name))?;
+    writeln!(writer, "後手：{}", one_line(&white_name))?;
     writeln!(writer, "持ち時間：先手{}ms / 後手{}ms", btime, wtime)?;
     if let Some(settings) = meta.map(|m| &m.settings)
         && (settings.binc > 0 || settings.white_increment() > 0)
@@ -548,6 +548,14 @@ fn start_position_for_game(game_id: u32, moves: &[MoveEntry]) -> Result<Position
         anyhow!("game {}: failed to parse sfen_before '{}': {}", game_id, first.sfen_before, e)
     })?;
     Ok(pos)
+}
+
+/// KIF の見出しは 1 行 1 項目なので、名前に含まれる改行を空白にする。
+fn one_line(name: &str) -> String {
+    name.split(['\r', '\n'])
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn engine_names_for(meta: Option<&KifMeta>) -> (String, String) {
@@ -1159,6 +1167,31 @@ mod tests {
             export_game_to_kif(&mut output, Some(&meta), 1, &game)?;
             assert!(String::from_utf8_lossy(&output).contains(&names));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn line_breaks_in_labels_stay_on_one_header_line() -> Result<()> {
+        let meta: KifMeta = serde_json::from_value(serde_json::json!({
+            "engine_cmd": {
+                "path_black": "a", "path_white": "b",
+                "label_black": "候補A\n設定2", "label_white": "基準\r\n",
+            }
+        }))?;
+        let game = GameLog {
+            moves: vec![serde_json::from_value(serde_json::json!({
+                "game_id": 1, "ply": 1,
+                "sfen_before": "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+                "move_usi": "resign", "engine": "候補A\n設定2",
+            }))?],
+            result: Some(serde_json::from_value(serde_json::json!({
+                "outcome": "white_win", "reason": "resign",
+            }))?),
+        };
+        let mut output = Vec::new();
+        export_game_to_kif(&mut output, Some(&meta), 1, &game)?;
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("先手：候補A 設定2\n後手：基準\n"), "{text}");
         Ok(())
     }
 
