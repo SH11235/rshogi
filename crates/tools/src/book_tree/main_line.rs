@@ -1,4 +1,4 @@
-//! 初期局面から先手の main と後手の main を交互に指し、元データの定跡が切れる所を出す。
+//! 初期局面または指定手順の後から、先手の main と後手の main を交互に辿る。
 
 use super::audit::reject_same_file;
 use super::master_index::MasterIndex;
@@ -8,10 +8,15 @@ use super::reply_graph::HIRATE_KEY;
 use super::schema::Schema;
 use super::targets::{Line, MAX_DEPTH, MAX_PRIORITY, Opts};
 use super::walk::{check_tag, queue_id};
+use crate::book_db::{apply_usi_move, parse_move_line, strip_ply};
+use crate::kif::{eval_comment_lines, move_text};
+use crate::selfplay::EvalLog;
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use std::collections::BTreeSet;
-use std::io::Write;
+use rshogi_core::{position::Position, types::Move};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
@@ -25,6 +30,15 @@ pub(super) struct MainLineArgs {
     /// 辿った手順の表 (TSV)
     #[arg(long)]
     table: Option<PathBuf>,
+    /// 初期局面から main を辿り始める局面までの USI 手順 (空白区切り)
+    #[arg(long)]
+    start_moves: Option<String>,
+    /// 初期局面からの手順を書き出す KIF
+    #[arg(long)]
+    kif: Option<PathBuf>,
+    /// KIF に付ける伝播値の定跡 DB (master audit --out-db)
+    #[arg(long)]
+    values_db: Option<PathBuf>,
     /// 初期局面から辿る手数の上限
     #[arg(long, default_value_t = 400)]
     max_ply: usize,
@@ -67,16 +81,29 @@ impl MainLineArgs {
         ensure!(self.depth <= MAX_DEPTH, "--depth は {MAX_DEPTH} 以下にしてください");
         ensure!(self.priority <= MAX_PRIORITY, "--priority は {MAX_PRIORITY} 以下にしてください");
         let mut inputs = vec![("--master", self.master.as_path())];
+        if let Some(path) = &self.values_db {
+            inputs.push(("--values-db", path.as_path()));
+        }
+        if let Some(path) = &self.schema {
+            inputs.push(("--schema", path.as_path()));
+        }
         let schema_paths: Vec<_> =
             self.schema.iter().flat_map(|dir| super::schema::paths(dir)).collect();
         for path in &schema_paths {
             inputs.push(("--schema", path.as_path()));
         }
-        for output in [&self.table, &self.enqueue_out].into_iter().flatten() {
-            reject_same_file(output, &inputs)?;
-        }
-        if let (Some(table), Some(out)) = (&self.table, &self.enqueue_out) {
-            reject_same_file(out, &[("--table", table.as_path())])?;
+        for (flag, path) in [
+            ("--table", self.table.as_deref()),
+            ("--enqueue-out", self.enqueue_out.as_deref()),
+            ("--kif", self.kif.as_deref()),
+        ] {
+            if let Some(path) = path {
+                reject_same_file(path, &inputs).with_context(|| format!("{flag} の出力先"))?;
+                let protected: Vec<_> = inputs.iter().map(|&(_, input)| input).collect();
+                crate::output_path::ensure_no_entity_overlap(&[path], &protected)
+                    .with_context(|| format!("{flag} の出力先"))?;
+                inputs.push((flag, path));
+            }
         }
         Ok(())
     }
@@ -128,13 +155,18 @@ struct Step {
 
 struct Walked {
     steps: Vec<Step>,
+    start_ply: usize,
     key: String,
     stop: Stop,
 }
 
-fn walk(index: &mut MasterIndex, max_ply: usize) -> Result<Walked> {
-    let mut key = HIRATE_KEY.to_owned();
-    let mut steps = Vec::new();
+fn walk(
+    index: &mut MasterIndex,
+    max_ply: usize,
+    mut key: String,
+    mut steps: Vec<Step>,
+) -> Result<Walked> {
+    let start_ply = steps.len();
     let mut seen = BTreeSet::new();
     let stop = loop {
         if !seen.insert(key.clone()) {
@@ -170,7 +202,103 @@ fn walk(index: &mut MasterIndex, max_ply: usize) -> Result<Walked> {
             mv,
         });
     };
-    Ok(Walked { steps, key, stop })
+    Ok(Walked {
+        steps,
+        start_ply,
+        key,
+        stop,
+    })
+}
+
+fn start_path(moves: &str, max_ply: usize) -> Result<(String, Vec<Step>)> {
+    let mut key = HIRATE_KEY.to_owned();
+    let mut steps = Vec::new();
+    for (i, mv) in moves.split_whitespace().enumerate() {
+        ensure!(
+            Move::from_usi_strict(mv).is_some_and(|m| !m.is_pass() && !m.is_none()),
+            "--start-moves の {} 手目: USI 指し手が不正です: {mv}",
+            i + 1
+        );
+        let next =
+            child(&key, mv).with_context(|| format!("--start-moves の {} 手目: {mv}", i + 1))?;
+        ensure!(i < max_ply, "--start-moves の手数が --max-ply {max_ply} を超えています");
+        steps.push(Step {
+            key: std::mem::replace(&mut key, next),
+            mv: mv.to_owned(),
+            value_black: None,
+        });
+    }
+    Ok((key, steps))
+}
+
+type LineValues<'a> = BTreeMap<&'a str, BTreeMap<&'a str, Option<i32>>>;
+
+fn read_values<'a>(path: &Path, steps: &'a [Step]) -> Result<LineValues<'a>> {
+    // 定跡 DB の大きさに関わらず、棋譜に書く手の値だけを保持する。
+    let mut values = LineValues::new();
+    for step in steps {
+        values.entry(&step.key).or_default().insert(&step.mv, None);
+    }
+    let mut key = None;
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = String::new();
+    while reader.read_line(&mut line)? != 0 {
+        let text = line.trim();
+        if let Some(sfen) = text.strip_prefix("sfen ") {
+            key = values.get_key_value(strip_ply(sfen)).map(|(&k, _)| k);
+        } else if let Some(key) = key
+            && let Some(mv) = text.split_whitespace().next()
+            && let Some(value) = values.get_mut(key).and_then(|moves| moves.get_mut(mv))
+            && value.is_none()
+            && let Some(entry) = parse_move_line(text)
+        {
+            *value = Some(entry.value);
+        }
+        line.clear();
+    }
+    Ok(values)
+}
+
+fn render_kif(walked: &Walked, values_db: Option<&Path>) -> Result<Vec<u8>> {
+    let values = values_db
+        .map(|path| {
+            read_values(path, &walked.steps)
+                .with_context(|| format!("--values-db を読めません: {}", path.display()))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut bytes = "手合割：平手\n先手：\n後手：\n手数----指手---------消費時間--\n"
+        .as_bytes()
+        .to_vec();
+    let mut pos = Position::new();
+    pos.set_hirate();
+    let mut previous_dest = None;
+    for (i, step) in walked.steps.iter().enumerate() {
+        let ply = i + 1;
+        let mv =
+            Move::from_usi(&step.mv).with_context(|| format!("KIF の {ply} 手目: {}", step.mv))?;
+        writeln!(bytes, "{ply:>4} {}", move_text(&pos, mv, previous_dest))?;
+        let mover = pos.side_to_move();
+        apply_usi_move(&mut pos, &step.mv)?;
+        previous_dest = Some(mv.to());
+        if let Some(&Some(value)) =
+            values.get(step.key.as_str()).and_then(|moves| moves.get(step.mv.as_str()))
+        {
+            let eval = EvalLog {
+                score_cp: Some(value),
+                ..EvalLog::default()
+            };
+            for comment in eval_comment_lines(&pos, mover, mv, Some(&eval)) {
+                writeln!(bytes, "{comment}")?;
+            }
+        }
+        if ply == walked.start_ply {
+            writeln!(bytes, "*ここから定跡の main")?;
+        }
+    }
+    let ply = walked.steps.len();
+    writeln!(bytes, "{:>4} 中断\n\nまで{ply}手で中断", ply + 1)?;
+    Ok(bytes)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -183,8 +311,9 @@ pub(super) fn run(args: MainLineArgs) -> Result<()> {
 
 fn run_to(args: MainLineArgs, stdout: &mut impl Write) -> Result<()> {
     args.check()?;
+    let (key, steps) = start_path(args.start_moves.as_deref().unwrap_or_default(), args.max_ply)?;
     let mut index = MasterIndex::open(&args.master, &Schema::load(args.schema.as_deref())?)?;
-    let walked = walk(&mut index, args.max_ply)?;
+    let walked = walk(&mut index, args.max_ply, key, steps)?;
     let moves: Vec<_> = walked.steps.iter().map(|s| s.mv.as_str()).collect();
     let ply = walked.steps.len();
     let turn = if side(&walked.key) == "b" {
@@ -200,7 +329,12 @@ fn run_to(args: MainLineArgs, stdout: &mut impl Write) -> Result<()> {
     )?;
     writeln!(stdout, "moves={}", moves.join(" "))?;
     writeln!(stdout, "sfen {} {}", walked.key, ply + 1)?;
-    // 木の行を作って検査してから書き出し、片方だけ新しい組を残さない。
+    // 全出力の内容を検査してからファイルを書き出す。
+    let kif = args
+        .kif
+        .as_ref()
+        .map(|_| render_kif(&walked, args.values_db.as_deref()))
+        .transpose()?;
     let queued = if args.enqueue_out.is_some() {
         let mut bytes = Vec::new();
         if walked.stop.readable() {
@@ -247,6 +381,9 @@ fn run_to(args: MainLineArgs, stdout: &mut impl Write) -> Result<()> {
         write_atomic(path, &bytes)?;
     }
     if let (Some(path), Some(bytes)) = (&args.enqueue_out, &queued) {
+        write_atomic(path, bytes)?;
+    }
+    if let (Some(path), Some(bytes)) = (&args.kif, &kif) {
         write_atomic(path, bytes)?;
     }
     Ok(())

@@ -2430,7 +2430,7 @@ TSV の列は次のとおりです。値の無い欄は空です。
 
 ## `master main-line`: main 対 main で定跡が切れる所
 
-初期局面から、手番の側の main (先手の局面では先手の main、後手の局面では後手の main) を交互に指して辿り、
+初期局面または指定手順の後の局面から、手番の側の main (先手の局面では先手の main、後手の局面では後手の main) を交互に指して辿り、
 元データの定跡が切れる局面と理由を出します。局面は直接キーで引きます。対局で FlippedBook を使わない場合、
 反転キーでだけ元データにある局面ではそこで定跡が切れるので、切れ目として扱います。
 
@@ -2439,12 +2439,22 @@ book_mine master main-line --master moves.tsv --table main-line.tsv \
   --enqueue-out main-line.jsonl --tag mainline --depth 6 --priority 10
 ```
 
+伝播値つきの手順を ramu-shogi の研究ノートで見るには、`master audit --out-db` で作った DB を指定して KIF を書き出します。
+
+```sh
+book_mine master main-line --master moves.tsv --start-moves "7g7f 3c3d" \
+  --kif main-line.kif --values-db audited.db
+```
+
 | 引数 | 既定 | 内容 |
 | --- | --- | --- |
 | `--master <TSV>` | 必須 | 元データ (`moves.tsv`) |
 | `--schema <DIR>` | なし | 語彙の表。行の検査に使う |
 | `--table <TSV>` | なし | 辿った手順の表 |
-| `--max-ply <N>` | 400 | 辿る手数の上限 |
+| `--start-moves "<USI 手順>"` | 空 | 初期局面から指す合法手を空白区切りで指定 |
+| `--kif <PATH>` | なし | 初手からの手順を平手の KIF に書き出す |
+| `--values-db <PATH>` | なし | KIF に評価値を付けるための `master audit --out-db` の DB |
+| `--max-ply <N>` | 400 | 初期局面からの手数の上限 (`--start-moves` の手数を含む) |
 | `--enqueue-out <JSONL>` | なし | 切れた局面を根にした own=bw の木の行 (`tree enqueue --from` の形) |
 | `--tag` / `--depth` / `--priority` | mainline / 6 / 10 | 木の行の id の先頭 (`[A-Za-z0-9_-]` の 1〜40 文字)・段数・priority |
 | `--opp-n` / `--stop` / `--rounds` / `--draw-black` / `--draw-white` | なし | 木の行の `opts` |
@@ -2460,8 +2470,17 @@ book_mine master main-line --master moves.tsv --table main-line.tsv \
 | `max-ply` | `--max-ply` 手まで辿った | 出さない |
 
 標準出力には、切れた手数・理由・次の手番、初期局面からの手順 (`moves=`)、切れた局面 (`sfen <局面> <手数>`) を出します。
+指定手順の途中の局面が元データになくても指し進めます。非合法手は何手目かを添えてエラーにします。
+指定手順の手数が `--max-ply` を超える場合もエラーになります。
 表は `ply key move value_black reason` の列を持ちます。ply はその局面までに指した手数 (初期局面が 0) で、辿った手ごとに 1 行 (value_black は main の行の読みの値の平均を先手から見た値、無ければ空) で、
 最後に切れた局面の行 (move・value_black が空、reason が理由) を置きます。
+指定手順の手も表に含め、その行の `value_black` は空欄にします。
+
+KIF では指定手順の最後の手の後に `*ここから定跡の main` を置き、末尾を `まで<N>手で中断` とします。
+各手を指す前の局面とその手を DB で引き、見つかった伝播値を先手から見た `**評価値=<値>` として手の直後に書きます。
+局面の照合には盤面・手番・持ち駒を使います。DB を省略した場合や、直接キーの局面にその手が無い場合は評価値コメントを省きます。
+出力には、入力ファイルおよび他の出力と異なるパスを指定してください。
+
 木の行は、根が切れた局面 (手数は初期局面からの手数 + 1)、id が `<tag>_<根の手数>_<局面の sha256 の先頭 16 桁>_bw`、
 memo が `main-line reason=<reason> moves=<手順>` です。木の行を出さない理由のときは、空の JSONL を書きます。
 元データはディスクのバケットに索引化して、辿る局面の行だけを読みます。辿った局面に main が 2 行以上あればエラーにします。

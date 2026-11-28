@@ -245,7 +245,7 @@ enum MasterCommand {
     GamePave(Box<game_gaps::pave::GamePaveArgs>),
     /// 注目の線の元データと完了した木を合わせ、伝播した値つき定跡を書き出す
     LineDb(line_db::LineDbArgs),
-    /// 初期局面から先手と後手の main を交互に指し、定跡が切れる所と、そこを根にした木の行を出す
+    /// 先手と後手の main を交互に辿り、定跡が切れる所や木の行、評価値つき KIF を出す
     MainLine(main_line::MainLineArgs),
     /// walk の止まりと伝播の切れ目を、有望・塞ぎたい・浅い・値の出所が弱いに分けて報告する
     ExitReport(exit_report::ExitReportArgs),

@@ -158,3 +158,144 @@ fn stop_at_max_ply_keeps_readable_reason_and_two_mains_fail() {
     let error = run_to(args, &mut Vec::new()).unwrap_err().to_string();
     assert!(error.contains("main が 2 行"), "{error}");
 }
+
+#[test]
+fn starts_after_legal_prefix_and_counts_it_in_table_and_limit() {
+    let d = TempDir::new().unwrap();
+    let rows = [
+        row(&["7g7f"], "3c3d", "main", "-20"),
+        row(&["7g7f", "3c3d"], "8h2b+", "main", "60"),
+    ];
+    let stdout = run_with(&d, &rows, &["--start-moves", "7g7f", "--max-ply", "2"]);
+    assert!(stdout.starts_with("2 手で切れる。理由: max-ply"), "{stdout}");
+    assert!(stdout.contains("moves=7g7f 3c3d\n"), "{stdout}");
+    let table = std::fs::read_to_string(d.path().join("line.tsv")).unwrap();
+    let after_prefix = child(HIRATE_KEY, "7g7f").unwrap();
+    let end = child(&after_prefix, "3c3d").unwrap();
+    assert_eq!(
+        table,
+        format!(
+            "ply\tkey\tmove\tvalue_black\treason\n0\t{HIRATE_KEY}\t7g7f\t\t\n1\t{after_prefix}\t3c3d\t20\t\n2\t{end}\t\t\tmax-ply\n"
+        )
+    );
+}
+
+#[test]
+fn rejects_invalid_prefix_moves_with_their_ply() {
+    let d = TempDir::new().unwrap();
+    let master = d.path().join("moves.tsv");
+    std::fs::write(&master, format_master(&[row(&[], "7g7f", "main", "")])).unwrap();
+    let master = master.to_str().unwrap();
+    for mv in ["bad", "3c3dextra", "7f7e", "pass"] {
+        let prefix = format!("7g7f {mv}");
+        let args = Cli::parse_from(["test", "--master", master, "--start-moves", &prefix]).args;
+        let err = run_to(args, &mut Vec::new()).unwrap_err().to_string();
+        assert!(err.contains("--start-moves の 2 手目") && err.contains(mv), "{err}");
+    }
+    let args = Cli::parse_from([
+        "test",
+        "--master",
+        master,
+        "--start-moves",
+        "7g7f 3c3d",
+        "--max-ply",
+        "1",
+    ])
+    .args;
+    let err = run_to(args, &mut Vec::new()).unwrap_err().to_string();
+    assert!(err.contains("--max-ply 1"), "{err}");
+}
+
+#[test]
+fn exports_kif_with_direct_book_values_and_promotion() {
+    use crate::book_db::BOOK_HEADER;
+    use crate::kifu_publish::kif_convert::kif_to_csa;
+
+    let d = TempDir::new().unwrap();
+    let path = ["7g7f", "3c3d", "8h2b+", "3a2b", "2g2f"];
+    let rows: Vec<_> = (2..path.len()).map(|i| row(&path[..i], path[i], "main", "9")).collect();
+    let keys: Vec<_> = path
+        .iter()
+        .scan(HIRATE_KEY.to_owned(), |key, mv| {
+            let next = child(key, mv).unwrap();
+            Some(std::mem::replace(key, next))
+        })
+        .collect();
+    let values = d.path().join("values.db");
+    let flipped = rshogi_book::flipped_key(&format!("{} 3", keys[2])).unwrap();
+    let flipped_move = rshogi_book::flip_usi_move(path[2]).unwrap();
+    std::fs::write(
+        &values,
+        format!(
+            "{BOOK_HEADER}\nsfen {} 99\n7g7f none 101 1 2\nsfen {} 88\n3c3d none -2147483648 1 2\nsfen {flipped}\n{flipped_move} none 999 1 2\nsfen {} 4\n8c8d none 500 1 1\nsfen {} 5\n2g2f none 0 1 2\n",
+            keys[0], keys[1], keys[3], keys[4],
+        ),
+    )
+    .unwrap();
+    let kif = d.path().join("line.kif");
+    let args = ["--start-moves", "7g7f 3c3d", "--kif", kif.to_str().unwrap()];
+    let mut with_values = args.to_vec();
+    with_values.extend(["--values-db", values.to_str().unwrap()]);
+    let stdout = run_with(&d, &rows, &with_values);
+    assert!(stdout.contains(&format!("moves={}\n", path.join(" "))), "{stdout}");
+    let text = std::fs::read_to_string(&kif).unwrap();
+    assert_eq!(
+        text,
+        concat!(
+            "手合割：平手\n先手：\n後手：\n手数----指手---------消費時間--\n",
+            "   1 ７六歩(77)\n**評価値=101\n",
+            "   2 ３四歩(33)\n**評価値=2147483648\n*ここから定跡の main\n",
+            "   3 ２二角成(88)\n   4 同　銀(31)\n   5 ２六歩(27)\n**評価値=0\n",
+            "   6 中断\n\nまで5手で中断\n",
+        )
+    );
+    // CSA 変換に必要な対局情報を補い、中断は変換器が扱える終局行なしの形式にする。
+    let for_csa = format!(
+        "開始日時：2026/01/01 12:00:00\n{}",
+        text.replace("先手：\n後手：\n", "先手：先手\n後手：後手\n")
+            .strip_suffix("   6 中断\n\nまで5手で中断\n")
+            .unwrap()
+    );
+    let csa = kif_to_csa(&for_csa).unwrap();
+    let moves: Vec<_> = csa
+        .lines()
+        .filter(|line| line.starts_with(['+', '-']) && line.len() == 7)
+        .collect();
+    assert_eq!(moves, ["+7776FU", "-3334FU", "+8822UM", "-3122GI", "+2726FU"]);
+
+    run_with(&d, &rows, &args);
+    let without_values = std::fs::read_to_string(&kif).unwrap();
+    assert!(!without_values.contains("**評価値"));
+}
+
+#[test]
+fn kif_and_values_db_participate_in_output_path_checks() {
+    let d = TempDir::new().unwrap();
+    let master = d.path().join("moves.tsv");
+    let schema = d.path().join("schema");
+    std::fs::create_dir(&schema).unwrap();
+    let schema_file = schema.join("sources.tsv");
+    let other = d.path().join("other");
+    let master = master.to_str().unwrap();
+    let schema = schema.to_str().unwrap();
+    let schema_file = schema_file.to_str().unwrap();
+    let other = other.to_str().unwrap();
+    for (options, conflicting) in [
+        (vec!["--kif", master], "--master"),
+        (vec!["--kif", schema_file], "--schema"),
+        (vec!["--kif", other, "--table", other], "--table"),
+        (vec!["--kif", other, "--enqueue-out", other], "--enqueue-out"),
+        (vec!["--values-db", other, "--kif", other], "--values-db"),
+        (vec!["--values-db", other, "--table", other], "--values-db"),
+        (vec!["--values-db", other, "--enqueue-out", other], "--values-db"),
+    ] {
+        let argv = ["test", "--master", master, "--schema", schema].into_iter().chain(options);
+        let err = Cli::parse_from(argv).args.check().unwrap_err();
+        assert!(format!("{err:#}").contains(&format!("{conflicting} と同じ")), "{err:#}");
+    }
+    std::fs::write(master, "").unwrap();
+    std::fs::hard_link(master, other).unwrap();
+    let args = Cli::parse_from(["test", "--master", master, "--kif", other]).args;
+    let err = args.check().unwrap_err();
+    assert!(format!("{err:#}").contains("same file"), "{err:#}");
+}

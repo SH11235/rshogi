@@ -599,12 +599,16 @@ pub(crate) fn format_move_label(ply: u32, pos: &Position, mv: Move) -> String {
     if mv.is_pass() {
         return format!("{:>4} {}パス", ply, prefix);
     }
-    format!("{:>4} {}{}", ply, prefix, move_text(pos, mv))
+    format!("{:>4} {}{}", ply, prefix, move_text(pos, mv, None))
 }
 
 /// 手番の印・手数を付けない指し手の表記（`７六歩(77)`、`５五角打`、`２二角成(88)`）。
-fn move_text(pos: &Position, mv: Move) -> String {
-    let dest = square_label_kanji(mv.to());
+pub(crate) fn move_text(pos: &Position, mv: Move, previous_dest: Option<Square>) -> String {
+    let dest = if previous_dest == Some(mv.to()) {
+        "同　".to_owned()
+    } else {
+        square_label_kanji(mv.to())
+    };
     let (label, from_suffix) = if mv.is_drop() {
         (format!("{}打", piece_label(mv.drop_piece_type(), false)), String::new())
     } else {
@@ -724,7 +728,7 @@ pub(crate) fn piece_label(piece_type: PieceType, promoted: bool) -> &'static str
 ///   読み筋が指した手から始まらないときは書かない
 ///
 /// 深さ・ノード数のほか、選択深さ・探索時間・NPS も同じ形で添える。
-fn eval_comment_lines(
+pub(crate) fn eval_comment_lines(
     after: &Position,
     mover: Color,
     played: Move,
@@ -803,7 +807,7 @@ fn format_pv(pos: &Position, pv: &[String]) -> String {
         } else {
             '△'
         });
-        text.push_str(&move_text(&pos, mv));
+        text.push_str(&move_text(&pos, mv, None));
         let gives_check = pos.gives_check(mv);
         pos.do_move(mv, gives_check);
     }
