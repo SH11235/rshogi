@@ -59,7 +59,12 @@ const EVERYTHING: SearchUpdateOptions = SearchUpdateOptions {
 
 fn check_multi_pv_updates(rec: &Recorded, total_nodes: u64) {
     // 平手の合法手は 30 手。通し番号は確定済みの本の数を含む。
-    assert!(rec.currmoves.iter().any(|c| c.multi_pv == 3));
+    for multi_pv in 1..=3 {
+        assert!(
+            rec.currmoves.iter().any(|c| c.multi_pv == multi_pv),
+            "no currmove in line {multi_pv}"
+        );
+    }
     for c in &rec.currmoves {
         assert!((1..=3).contains(&c.multi_pv));
         assert!(c.number >= c.multi_pv && c.number <= 30, "{c:?}");
@@ -74,7 +79,7 @@ fn check_multi_pv_updates(rec: &Recorded, total_nodes: u64) {
         assert!(!info.pv.is_empty());
     }
 
-    assert!(!rec.progress.is_empty());
+    assert!(rec.progress.len() >= 2, "progress {}", rec.progress.len());
     for pair in rec.progress.windows(2) {
         assert!(pair[1].time_ms >= pair[0].time_ms + EVERYTHING.progress_interval_ms);
     }
@@ -161,12 +166,77 @@ fn analysis_run_with_updates_reports_progress() {
             let mut pos = Position::new();
             pos.set_hirate();
             let mut session = AnalysisSession::new(search, pos, 3).unwrap();
-            let run = session.prepare(AnalysisBudget::Depth(9)).unwrap();
-            let (recorded, on_update) = recorder();
-            let finished = session
-                .run_with_updates(&run, None::<fn(&SearchInfo)>, EVERYTHING, on_update)
-                .unwrap();
-            check_multi_pv_updates(&take(recorded), finished.result.nodes);
+            // 続きからの実行でも、局面数・時間はその実行の分から数え直して届く。
+            for depth in [9, 10] {
+                let run = session.prepare(AnalysisBudget::Depth(depth)).unwrap();
+                let (recorded, on_update) = recorder();
+                let finished = session
+                    .run_with_updates(&run, None::<fn(&SearchInfo)>, EVERYTHING, on_update)
+                    .unwrap();
+                assert_eq!(finished.result.depth, depth);
+                check_multi_pv_updates(&take(recorded), finished.result.nodes);
+            }
         }
     });
+}
+
+/// (段の途中の本か, multipv, 深さ, 先頭の手) を届いた順に並べる。
+type LineEvents = Arc<Mutex<Vec<(bool, usize, i32, Move)>>>;
+
+#[test]
+fn stopped_mid_depth_reprints_completed_lines() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    on_large_stack(|| {
+        let mut exercised = false;
+        for nodes in [150_000u64, 250_000, 350_000, 450_000, 600_000, 800_000] {
+            let events = LineEvents::default();
+            let from_info = Arc::clone(&events);
+            let from_update = Arc::clone(&events);
+            let mut pos = Position::new();
+            pos.set_hirate();
+            Search::new(16).go_with_updates(
+                &mut pos,
+                LimitsType {
+                    nodes,
+                    multi_pv: 3,
+                    ..Default::default()
+                },
+                Some(move |info: &SearchInfo| {
+                    from_info.lock().unwrap().push((false, info.multi_pv, info.depth, info.pv[0]));
+                }),
+                EVERYTHING,
+                move |update: &SearchUpdate<'_>| {
+                    if let SearchUpdate::PvLine(info) = update {
+                        from_update.lock().unwrap().push((
+                            true,
+                            info.multi_pv,
+                            info.depth,
+                            info.pv[0],
+                        ));
+                    }
+                },
+            );
+            let events = take_events(events);
+            let last_full = events.iter().filter(|e| !e.0).map(|e| e.2).max().unwrap();
+            exercised |= events.iter().any(|e| e.0 && e.2 > last_full);
+            // 本ごとの最後の info は、同じ深さで別々の手になる。
+            let mut latest = [None; 3];
+            for &(_, multi_pv, depth, mv) in &events {
+                latest[multi_pv - 1] = Some((depth, mv));
+            }
+            let latest: Vec<_> = latest.into_iter().map(Option::unwrap).collect();
+            assert!(latest.iter().all(|&(depth, _)| depth == last_full), "{latest:?}");
+            assert!(
+                latest[0].1 != latest[1].1
+                    && latest[1].1 != latest[2].1
+                    && latest[0].1 != latest[2].1
+            );
+        }
+        assert!(exercised, "no run stopped after a line of an unfinished depth");
+    });
+}
+
+fn take_events<T>(events: Arc<Mutex<Vec<T>>>) -> Vec<T> {
+    Arc::try_unwrap(events).ok().unwrap().into_inner().unwrap()
 }

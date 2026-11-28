@@ -1854,6 +1854,41 @@ impl Search {
             main_nodes.saturating_add(helper_nodes)
         };
 
+        // 読み終えていない段の途中の本を出したまま止まったら、完了した反復の 2 本目以降を出し直す。
+        // 本ごとの最後の info を読む呼出側に、深さの違う本が混ざって同じ手が 2 本に並ばないようにする。
+        // MultiPV が 2 以上なら根の手は完了した反復に戻っている。
+        #[cfg(feature = "search-updates")]
+        if time_manager.take_unfinished_pv_lines()
+            && limits.analysis.is_none()
+            && let Some(callback) = on_info.as_mut()
+            && let Some(worker) = self.worker.as_ref()
+        {
+            let time_ms = time_manager.elapsed().max(0) as u64;
+            let nps = total_nodes.saturating_mul(1000) / time_ms.max(1);
+            let hashfull = self.tt.hashfull(3) as u32;
+            for (idx, root_move) in
+                worker.state.root_moves.iter().enumerate().take(_effective_multi_pv).skip(1)
+            {
+                if !root_score_is_initialized(root_move.score) {
+                    continue;
+                }
+                let mut line_pv = root_move.pv.clone();
+                line_pv.truncate(legal_pv_prefix_len(pos, &line_pv, self.entering_king_rule));
+                callback(&SearchInfo {
+                    depth: completed_depth,
+                    sel_depth: root_move.sel_depth,
+                    score: root_move.score,
+                    bound: root_move.score_bound(),
+                    nodes: total_nodes,
+                    time_ms,
+                    nps,
+                    hashfull,
+                    pv: line_pv,
+                    multi_pv: idx + 1,
+                });
+            }
+        }
+
         // Lazy SMPで採択したbestThreadのPVをbestmove直前の最終infoとして再出力する。
         // 最後の info の pv 先頭を bestmove に揃えるため、採択ライン (multipv 1) を出す。
         // score が番兵 (±INFINITE) のまま = depth 1 の初手完了前に中断した場合は
@@ -2421,6 +2456,8 @@ where
 
         // Depth完了後の処理
         if !worker.state.abort {
+            #[cfg(feature = "search-updates")]
+            time_manager.complete_pv_lines();
             worker.state.completed_depth = search_depth;
             worker.state.best_move = worker.state.root_moves[0].mv();
 
@@ -2631,12 +2668,10 @@ fn report_finished_pv_lines(
     lines: usize,
 ) {
     // SearchUpdate::Progress と同じ時刻・共有カウンタを基準にし、続けて届く値が逆戻りしないようにする。
-    // 補助スレッドの反復ごとの値（ms.total_nodes）は反復の途中の分を含まないので、多い方を使う。
+    // 通知先があるとき、補助スレッドがあれば共有カウンタは必ず有効になっている。
     let time_ms = time_manager.elapsed().max(0) as u64;
     time_manager.publish_nodes(worker.state.nodes);
-    let total_nodes = time_manager
-        .budget_nodes(worker.state.nodes)
-        .max(ms.total_nodes(worker.state.nodes));
+    let total_nodes = time_manager.budget_nodes(worker.state.nodes);
     let nps = total_nodes.saturating_mul(1000).checked_div(time_ms).unwrap_or(0);
     let hashfull = ms.tt.hashfull(3) as u32;
     for (idx, root_move) in worker.state.root_moves.iter().take(lines).enumerate() {

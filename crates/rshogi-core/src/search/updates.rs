@@ -88,6 +88,8 @@ pub(crate) struct UpdateSink {
     options: SearchUpdateOptions,
     callback: Box<dyn FnMut(&SearchUpdate<'_>) + Send>,
     next_progress_ms: u64,
+    /// 読み終えていない段の [`SearchUpdate::PvLine`] を出したか。
+    pub(crate) unfinished_pv_lines: bool,
 }
 
 impl UpdateSink {
@@ -99,6 +101,7 @@ impl UpdateSink {
             options,
             callback,
             next_progress_ms: options.progress_interval_ms,
+            unfinished_pv_lines: false,
         }
     }
 

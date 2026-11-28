@@ -1027,7 +1027,22 @@ impl TimeManagement {
     pub(crate) fn report_pv_line(&mut self, main_nodes: u64, info: &super::SearchInfo) {
         if let Some(sink) = self.updates.as_mut().filter(|sink| sink.active(main_nodes)) {
             sink.emit(&super::updates::SearchUpdate::PvLine(info));
+            sink.unfinished_pv_lines = true;
         }
+    }
+
+    /// 段を読み終え、その段の全部の本が `on_info` で出たときに呼ぶ。
+    pub(crate) fn complete_pv_lines(&mut self) {
+        if let Some(sink) = self.updates.as_mut() {
+            sink.unfinished_pv_lines = false;
+        }
+    }
+
+    /// 読み終えていない段の途中の本を出したまま探索が終わったか。
+    pub(crate) fn take_unfinished_pv_lines(&mut self) -> bool {
+        self.updates
+            .as_mut()
+            .is_some_and(|sink| std::mem::take(&mut sink.unfinished_pv_lines))
     }
 }
 
