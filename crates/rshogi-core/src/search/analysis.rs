@@ -196,6 +196,50 @@ impl AnalysisSession {
             total_nodes: 0,
         })
     }
+    /// 同じ探索器のまま、解析する局面と MultiPV を替える。
+    ///
+    /// 置換表・評価値のハッシュ・履歴は残す。対局で手が進んでも捨てないのと同じで、近い局面を
+    /// 行き来する解析では前に読んだ値と手の順序が効く（根に近い手の履歴 `low_ply_history` は、
+    /// 新しい局面の最初の実行で通常どおり初期化される）。評価関数が替わっていたときは
+    /// [`AnalysisSession::new`] と同じく空にする。
+    ///
+    /// 前の局面の続きは再開できなくなる。前の局面の停止ハンドルと準備済みの実行は失効し、
+    /// 実行 ID（[`AnalysisRunHandle::run_id`]）は前の局面から続けて振る。前の実行が panic で
+    /// 失敗していたときは状態を引き継がず、`RunFailed` を返す（新しい [`Search`] から
+    /// セッションを作り直す。`into_search` で回収した探索器には途中の状態が残り得る）。
+    ///
+    /// 置換表のキーは局面だけなので、根の手番を基準にした引き分けの値や引き分けまでの手数は、
+    /// 前に読んだ値に前の局面の条件のまま残る。対局で手が進んでも置換表を使い続けるのと同じ扱い。
+    pub fn set_position(
+        &mut self,
+        position: Position,
+        multi_pv: usize,
+    ) -> Result<(), AnalysisError> {
+        if multi_pv == 0 {
+            return Err(AnalysisError::InvalidOptions);
+        }
+        if self.unavailable == Some(AnalysisError::RunFailed) {
+            return Err(AnalysisError::RunFailed);
+        }
+        // 前の世代を停止済みにし、次の prepare で世代を進める。
+        self.control.fetch_or(1, Ordering::AcqRel);
+        let evaluation_revision = crate::eval::revision();
+        if self.evaluation_revision != evaluation_revision {
+            self.search.clear_tt();
+            self.search.clear_eval_hash();
+            self.search.clear_for_new_game();
+        }
+        self.position = position;
+        self.multi_pv = multi_pv;
+        self.pending = None;
+        self.started = false;
+        self.unavailable = None;
+        self.evaluation_revision = evaluation_revision;
+        self.total_time_ms = 0;
+        self.total_nodes = 0;
+        Ok(())
+    }
+
     /// 状態を解放して探索器を返す。保持した停止ハンドルはこのセッションにしか作用しない。
     pub fn into_search(self) -> Search {
         self.control.fetch_or(1, Ordering::AcqRel);
@@ -285,7 +329,11 @@ impl AnalysisSession {
         }
         let budget = *budget;
         self.pending = None;
-        let previous_depths = self.search.analysis_worker_depths();
+        // 続きでない実行は、前のセッションや局面の完了深さではなく 0 から数える。
+        let mut previous_depths = self.search.analysis_worker_depths();
+        if !self.started {
+            previous_depths.fill(0);
+        }
         let start = Instant::now();
         let run = AnalysisRun {
             handle: handle.clone(),

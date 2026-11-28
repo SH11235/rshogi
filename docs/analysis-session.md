@@ -1,7 +1,7 @@
 # メモリ内の局面解析セッション
 
 `rshogi_core::search::AnalysisSession` は通常対局の `Search::go` と別のライフサイクルで探索状態を保持する。
-局面と探索設定はセッション作成時に固定し、再開時は追加予算だけを渡す。
+探索設定はセッション作成時に固定し、再開時は追加予算だけを渡す。解析する局面と MultiPV は `set_position` で替えられる。
 
 ```rust,no_run
 use rshogi_core::{position::Position, search::{AnalysisBudget, AnalysisSession, Search, SearchInfo}};
@@ -31,7 +31,8 @@ if finished.resumable {
 - 新しい反復が完成しなければ info を再発行しない。前回の結果は `AnalysisFinished.result`、今回／累積の消費は専用フィールドで返す。
 - `worker_depths` は論理 ID 順の実行前／後の完了深さ。main は ID 0。デバッグ用に helper の深さの違いを確認できる。
 - 評価関数・係数・評価設定の変更はセッションを失効させる。モデル設定と探索の並行実行は禁止（既存グローバル評価状態の排他契約）。
-- 設定や対象の変更には新しいセッションを作る。`into_search` は保持状態を手放して探索器を返す。新規セッションは以前の TT・評価キャッシュ・履歴をクリアする。
+- 対象の局面と MultiPV は `set_position` で替えられる。TT・評価キャッシュ・履歴を残すので、近い局面を行き来すると前に読んだ値と手の順序が効く。根に近い手の履歴 `low_ply_history` は最初の実行で通常どおり初期化する。前の局面の続きは再開できず、前の局面の停止ハンドルは次の `prepare` 以降の実行に作用せず、実行 ID は続けて振られる。評価関数が変わっていれば TT・評価キャッシュ・履歴を空にする。`RunFailed` の後は受け付けないので、新しい `Search` からセッションを作り直す。TT のキーは局面だけなので、根の手番を基準にした引き分けの値と引き分けまでの手数は前の局面の条件のまま残る（対局で手が進んでも TT を使い続けるのと同じ扱い）。
+- それ以外の設定の変更には新しいセッションを作る。`into_search` は保持状態を手放して探索器を返す。新規セッションは以前の TT・評価キャッシュ・履歴をクリアする。
 - native の探索／コールバック panic は helper を停止し `RunFailed` として失効する。Wasm の abort は Rust 側で回復できないため host が Worker 群を破棄する。
 
 ## Wasm の停止制御
