@@ -5061,6 +5061,17 @@ where
             }
         };
         let output_mem = &output_mem;
+        // value出力だけのモデル（policy headを外したONNX）ではoutput_policyをバインドしない。
+        // TensorRTは使われないpolicy headを推論せず、そのD2Hもなくなる。expandはpolicyが要る。
+        let has_policy = session.outputs().iter().any(|o| o.name() == "output_policy");
+        if !has_policy && expand.is_some() {
+            let err = anyhow::anyhow!(
+                "--expand-output-dir needs the output_policy output, but the ONNX model has only {:?}",
+                session.outputs().iter().map(|o| o.name()).collect::<Vec<_>>()
+            );
+            let _ = done_tx.send((u64::MAX, Err(err)));
+            return (t_run, t_write);
+        }
         drive_pull_worker(warmup_turn, ready_rx, &done_tx, |batch| {
             if batch.actual_batch == 0 {
                 // EOF / 中断 sentinel はそのまま writer へ中継（最終 seq なので writer
@@ -5118,10 +5129,12 @@ where
                 binding.bind_input("input1", &input1).map_err(onnx_ort_err)?;
                 binding.bind_input("input2", &input2).map_err(onnx_ort_err)?;
                 // output_policy: スコアリングには不使用だが、省略すると ORT 内部処理で
-                // オーバーヘッドが増加するため全出力をバインドする
-                binding
-                    .bind_output_to_device("output_policy", output_mem)
-                    .map_err(onnx_ort_err)?;
+                // オーバーヘッドが増加するため全出力をバインドする（valueだけのモデルを除く）
+                if has_policy {
+                    binding
+                        .bind_output_to_device("output_policy", output_mem)
+                        .map_err(onnx_ort_err)?;
+                }
                 binding
                     .bind_output_to_device("output_value", output_mem)
                     .map_err(onnx_ort_err)?;

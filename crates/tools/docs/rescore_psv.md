@@ -61,6 +61,11 @@ target/release/rescore_psv \
   名前などで引き当てる）。モデルごとに別のディレクトリを指定し、モデルを置き換えたら
   `*.engine` と `*.profile` を消す（そのキャッシュを使う実行が止まっているときに）。残すと、
   重みだけが違うモデルでは古いモデルから作ったエンジンで推論する。
+- valueだけのONNX: `--dlshogi-onnx-model`は、`output_policy`の出力とそれにしか
+  使われないノードを外したモデルも読む。TensorRTがpolicy headを推論せず、policyの
+  GPU→CPU転送もなくなる（`--expand-output-dir`はpolicyを使うので、このモデルでは
+  エラーで止まる）。作り方の例（`pip install onnx`）:
+  `python -c "import onnx.utils as u; u.extract_model('m.onnx', 'm_value.onnx', ['input1', 'input2'], ['output_value'])"`
 - `--onnx-eval-scale 600`: 勝率→cp 変換スケール。dlshogi 系の標準値。
 - 長時間ジョブは `nohup` / `tmux` で流しっぱなしにする（非 TTY では自動で
   grep しやすいログ行形式になる）。
