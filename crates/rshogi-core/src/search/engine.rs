@@ -1860,6 +1860,7 @@ impl Search {
         #[cfg(feature = "search-updates")]
         if time_manager.take_unfinished_pv_lines()
             && limits.analysis.is_none()
+            && completed_depth > 0
             && let Some(callback) = on_info.as_mut()
             && let Some(worker) = self.worker.as_ref()
         {
@@ -2431,6 +2432,18 @@ where
             let elapsed = ms.start_time.elapsed();
             let time_ms = elapsed.as_millis() as u64;
             let total_nodes = ms.total_nodes(worker.state.nodes);
+            // 途中経過を出しているときは、段の途中の値と同じ時計・共有カウンタにそろえ、
+            // 続けて届く値が逆戻りしないようにする。
+            #[cfg(feature = "search-updates")]
+            let (time_ms, total_nodes) = if time_manager.has_updates() {
+                time_manager.publish_nodes(worker.state.nodes);
+                (
+                    time_manager.elapsed().max(0) as u64,
+                    time_manager.budget_nodes(worker.state.nodes),
+                )
+            } else {
+                (time_ms, total_nodes)
+            };
             let nps = total_nodes.saturating_mul(1000).checked_div(time_ms).unwrap_or(0);
 
             for pv_idx in 0..processed_pv {

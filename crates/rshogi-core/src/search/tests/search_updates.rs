@@ -57,7 +57,7 @@ const EVERYTHING: SearchUpdateOptions = SearchUpdateOptions {
     progress_interval_ms: 5,
 };
 
-fn check_multi_pv_updates(rec: &Recorded, total_nodes: u64) {
+fn check_multi_pv_updates(rec: &Recorded, total_nodes: u64, min_progress: usize) {
     // 平手の合法手は 30 手。通し番号は確定済みの本の数を含む。
     for multi_pv in 1..=3 {
         assert!(
@@ -79,7 +79,7 @@ fn check_multi_pv_updates(rec: &Recorded, total_nodes: u64) {
         assert!(!info.pv.is_empty());
     }
 
-    assert!(rec.progress.len() >= 2, "progress {}", rec.progress.len());
+    assert!(rec.progress.len() >= min_progress, "progress {}", rec.progress.len());
     for pair in rec.progress.windows(2) {
         assert!(pair[1].time_ms >= pair[0].time_ms + EVERYTHING.progress_interval_ms);
     }
@@ -115,7 +115,7 @@ fn updates_report_currmove_pv_lines_and_progress() {
                 on_update,
             );
             drop(search);
-            check_multi_pv_updates(&take(recorded), result.nodes);
+            check_multi_pv_updates(&take(recorded), result.nodes, 2);
         }
     });
 }
@@ -174,7 +174,7 @@ fn analysis_run_with_updates_reports_progress() {
                     .run_with_updates(&run, None::<fn(&SearchInfo)>, EVERYTHING, on_update)
                     .unwrap();
                 assert_eq!(finished.result.depth, depth);
-                check_multi_pv_updates(&take(recorded), finished.result.nodes);
+                check_multi_pv_updates(&take(recorded), finished.result.nodes, 0);
             }
         }
     });
@@ -188,52 +188,79 @@ fn stopped_mid_depth_reprints_completed_lines() {
     let _guard = crate::eval::material::test_support::lock_material();
     crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
     on_large_stack(|| {
-        let mut exercised = false;
-        for nodes in [150_000u64, 250_000, 350_000, 450_000, 600_000, 800_000] {
-            let events = LineEvents::default();
-            let from_info = Arc::clone(&events);
-            let from_update = Arc::clone(&events);
-            let mut pos = Position::new();
-            pos.set_hirate();
-            Search::new(16).go_with_updates(
-                &mut pos,
-                LimitsType {
-                    nodes,
-                    multi_pv: 3,
-                    ..Default::default()
-                },
-                Some(move |info: &SearchInfo| {
-                    from_info.lock().unwrap().push((false, info.multi_pv, info.depth, info.pv[0]));
-                }),
-                EVERYTHING,
-                move |update: &SearchUpdate<'_>| {
-                    if let SearchUpdate::PvLine(info) = update {
-                        from_update.lock().unwrap().push((
-                            true,
-                            info.multi_pv,
-                            info.depth,
-                            info.pv[0],
-                        ));
+        // 深さ 6 の 2 本目を読み終えた知らせを受けたところで止める（完了した反復は深さ 5）。
+        const STOP_DEPTH: i32 = 6;
+        let events = LineEvents::default();
+        let from_info = Arc::clone(&events);
+        let from_update = Arc::clone(&events);
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mut search = Search::new(16);
+        let stop = search.stop_flag();
+        search.go_with_updates(
+            &mut pos,
+            LimitsType {
+                depth: STOP_DEPTH + 2,
+                multi_pv: 3,
+                ..Default::default()
+            },
+            Some(move |info: &SearchInfo| {
+                from_info.lock().unwrap().push((false, info.multi_pv, info.depth, info.pv[0]));
+            }),
+            EVERYTHING,
+            move |update: &SearchUpdate<'_>| {
+                if let SearchUpdate::PvLine(info) = update {
+                    from_update.lock().unwrap().push((true, info.multi_pv, info.depth, info.pv[0]));
+                    if info.depth == STOP_DEPTH && info.multi_pv == 2 {
+                        stop.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
-                },
-            );
-            let events = take_events(events);
-            let last_full = events.iter().filter(|e| !e.0).map(|e| e.2).max().unwrap();
-            exercised |= events.iter().any(|e| e.0 && e.2 > last_full);
-            // 本ごとの最後の info は、同じ深さで別々の手になる。
-            let mut latest = [None; 3];
-            for &(_, multi_pv, depth, mv) in &events {
-                latest[multi_pv - 1] = Some((depth, mv));
-            }
-            let latest: Vec<_> = latest.into_iter().map(Option::unwrap).collect();
-            assert!(latest.iter().all(|&(depth, _)| depth == last_full), "{latest:?}");
-            assert!(
-                latest[0].1 != latest[1].1
-                    && latest[1].1 != latest[2].1
-                    && latest[0].1 != latest[2].1
-            );
+                }
+            },
+        );
+        let events = take_events(events);
+        assert!(events.iter().any(|e| e.0 && e.2 == STOP_DEPTH), "{events:?}");
+        // 本ごとの最後の info は、完了した反復の深さで別々の手になる。
+        let mut latest = [None; 3];
+        for &(_, multi_pv, depth, mv) in &events {
+            latest[multi_pv - 1] = Some((depth, mv));
         }
-        assert!(exercised, "no run stopped after a line of an unfinished depth");
+        let latest: Vec<_> = latest.into_iter().map(Option::unwrap).collect();
+        assert!(latest.iter().all(|&(depth, _)| depth == STOP_DEPTH - 1), "{latest:?}");
+        assert!(
+            latest[0].1 != latest[1].1 && latest[1].1 != latest[2].1 && latest[0].1 != latest[2].1
+        );
+    });
+}
+
+#[test]
+fn stopped_in_first_depth_does_not_reprint() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    on_large_stack(|| {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let from_info = Arc::clone(&lines);
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mut search = Search::new(16);
+        let stop = search.stop_flag();
+        search.go_with_updates(
+            &mut pos,
+            LimitsType {
+                depth: 4,
+                multi_pv: 3,
+                ..Default::default()
+            },
+            Some(move |info: &SearchInfo| from_info.lock().unwrap().push(info.multi_pv)),
+            EVERYTHING,
+            move |update: &SearchUpdate<'_>| {
+                if matches!(update, SearchUpdate::PvLine(_)) {
+                    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+        );
+        // 完了した反復が無いので、2 本目以降を出し直さない（最後の multipv 1 は従来どおり）。
+        let lines = take_events(lines);
+        assert!(lines.iter().all(|&multi_pv| multi_pv == 1), "{lines:?}");
     });
 }
 

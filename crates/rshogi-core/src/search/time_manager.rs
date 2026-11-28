@@ -977,6 +977,11 @@ impl TimeManagement {
         self.updates = sink;
     }
 
+    #[inline]
+    pub(crate) fn has_updates(&self) -> bool {
+        self.updates.is_some()
+    }
+
     /// 途中経過を出す条件（通知先があり、メインスレッドの局面数がしきい値を超えた）を満たすか。
     #[inline]
     pub(crate) fn updates_active(&self, main_nodes: u64) -> bool {
