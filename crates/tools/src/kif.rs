@@ -586,6 +586,7 @@ fn engine_file_name(path: &str) -> &str {
 /// `crates/tools/src/replay/` の棋譜プレイヤー TUI から、PSV/JSONL 共通の
 /// 手の表示ラベルとして再利用する（PSV には消費時間情報が無いため、
 /// 時間表示を含む `format_move_kif` ではなくこちらを直接使う）。
+#[cfg(feature = "csa-replay")]
 pub(crate) fn format_move_label(ply: u32, pos: &Position, mv: Move) -> String {
     let prefix = if pos.side_to_move() == Color::Black {
         "▲"
@@ -1229,6 +1230,7 @@ mod tests {
         Ok(String::from_utf8(output)?)
     }
 
+    #[cfg(feature = "csa-replay")]
     #[test]
     fn promotion_is_written_after_the_unpromoted_piece_name() -> Result<()> {
         let mut pos = Position::new();
