@@ -183,6 +183,10 @@ pub struct TimeManagement {
 
     /// 直近の停止閾値（min(total_time, maximum_time)を保持）
     last_stop_threshold: Option<TimePoint>,
+
+    /// 探索の途中経過の通知先。メインスレッドの `go_with_updates` だけが設定する。
+    #[cfg(feature = "search-updates")]
+    updates: Option<super::updates::UpdateSink>,
 }
 
 impl TimeManagement {
@@ -215,6 +219,8 @@ impl TimeManagement {
             stop_on_ponderhit: false,
             is_pondering: false,
             last_stop_threshold: None,
+            #[cfg(feature = "search-updates")]
+            updates: None,
         }
     }
 
@@ -962,6 +968,66 @@ impl TimeManagement {
     #[inline]
     pub fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::Relaxed) || self.analysis.as_ref().is_some_and(|run| run.stopped())
+    }
+}
+
+#[cfg(feature = "search-updates")]
+impl TimeManagement {
+    pub(crate) fn set_updates(&mut self, sink: Option<super::updates::UpdateSink>) {
+        self.updates = sink;
+    }
+
+    /// 途中経過を出す条件（通知先があり、メインスレッドの局面数がしきい値を超えた）を満たすか。
+    #[inline]
+    pub(crate) fn updates_active(&self, main_nodes: u64) -> bool {
+        self.updates.as_ref().is_some_and(|sink| sink.active(main_nodes))
+    }
+
+    pub(crate) fn report_currmove(
+        &mut self,
+        depth: i32,
+        main_nodes: u64,
+        mv: crate::types::Move,
+        number: usize,
+        multi_pv: usize,
+    ) {
+        if let Some(sink) = self.updates.as_mut().filter(|sink| sink.active(main_nodes)) {
+            sink.emit(&super::updates::SearchUpdate::CurrMove(super::updates::CurrMove {
+                depth,
+                mv,
+                number,
+                multi_pv,
+            }));
+        }
+    }
+
+    /// 停止確認から呼ぶ。合計の局面数は `publish_nodes` 済みの分なので、先に自分の分を publish すること。
+    pub(crate) fn report_progress(&mut self, depth: i32, main_nodes: u64, elapsed_ms: TimePoint) {
+        let elapsed_ms = elapsed_ms.max(0) as u64;
+        if !self
+            .updates
+            .as_mut()
+            .is_some_and(|sink| sink.active(main_nodes) && sink.progress_due(elapsed_ms))
+        {
+            return;
+        }
+        let total_nodes = self.budget_nodes(main_nodes);
+        let Some(sink) = self.updates.as_mut() else {
+            return;
+        };
+        let nps = total_nodes.saturating_mul(1000).checked_div(elapsed_ms).unwrap_or(0);
+        sink.emit(&super::updates::SearchUpdate::Progress(super::updates::SearchStatus {
+            depth,
+            nodes: total_nodes,
+            time_ms: elapsed_ms,
+            nps,
+        }));
+    }
+
+    pub(crate) fn report_pv_line(&mut self, main_nodes: u64, info: &super::SearchInfo) {
+        if let Some(sink) = self.updates.as_mut().filter(|sink| sink.active(main_nodes)) {
+            sink.emit(&super::updates::SearchUpdate::PvLine(info));
+        }
     }
 }
 

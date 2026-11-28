@@ -1922,13 +1922,19 @@ impl UsiEngine {
                     let allocation_before = rshogi_core::allocation_stats::snapshot();
                     #[cfg(feature = "tt-write-stats")]
                     let tt_write_before = search.tt_write_stats();
-                    let result = search.go(
+                    let print_info = |info: &SearchInfo| {
+                        println!("{}", info.to_usi_string());
+                        std::io::stdout().flush().ok();
+                    };
+                    #[cfg(not(feature = "search-updates"))]
+                    let result = search.go(&mut pos, limits, Some(print_info));
+                    #[cfg(feature = "search-updates")]
+                    let result = search.go_with_updates(
                         &mut pos,
                         limits,
-                        Some(|info: &SearchInfo| {
-                            println!("{}", info.to_usi_string());
-                            std::io::stdout().flush().ok();
-                        }),
+                        Some(print_info),
+                        rshogi_core::search::SearchUpdateOptions::default(),
+                        print_search_update,
                     );
 
                     #[cfg(feature = "allocation-stats")]
@@ -2342,6 +2348,24 @@ impl UsiEngine {
         }
         println!("info string SFEN: {}", self.position.to_sfen());
     }
+}
+
+/// 段の途中の currmove と読み筋 1 本ごとの値を USI の info で出す。1 秒ごとの進み具合は
+/// 対局のログを増やすので出さない。
+#[cfg(feature = "search-updates")]
+fn print_search_update(update: &rshogi_core::search::SearchUpdate<'_>) {
+    use rshogi_core::search::SearchUpdate;
+    match update {
+        SearchUpdate::CurrMove(cur) => println!(
+            "info depth {} currmove {} currmovenumber {}",
+            cur.depth,
+            cur.mv.to_usi(),
+            cur.number
+        ),
+        SearchUpdate::PvLine(info) => println!("{}", info.to_usi_string()),
+        SearchUpdate::Progress(_) => return,
+    }
+    std::io::stdout().flush().ok();
 }
 
 /// `go mate` の制限時間（ミリ秒）。`infinite`・省略・0 は無制限（0 を返す）。

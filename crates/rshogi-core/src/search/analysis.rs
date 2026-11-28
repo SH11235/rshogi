@@ -239,6 +239,38 @@ impl AnalysisSession {
         handle: &AnalysisRunHandle,
         on_info: Option<F>,
     ) -> Result<AnalysisFinished, AnalysisError> {
+        #[cfg(feature = "search-updates")]
+        let finished = self.run_impl(handle, on_info, None);
+        #[cfg(not(feature = "search-updates"))]
+        let finished = self.run_impl(handle, on_info);
+        finished
+    }
+
+    /// [`AnalysisSession::run`] と同じく探索し、段の途中の経過も `on_update` へ渡す
+    /// （`search-updates` feature）。通知の条件は [`Search::go_with_updates`] と同じで、
+    /// 局面数・時間はこの実行の分だけを数える。
+    #[cfg(feature = "search-updates")]
+    pub fn run_with_updates<F, U>(
+        &mut self,
+        handle: &AnalysisRunHandle,
+        on_info: Option<F>,
+        options: super::SearchUpdateOptions,
+        on_update: U,
+    ) -> Result<AnalysisFinished, AnalysisError>
+    where
+        F: FnMut(&SearchInfo),
+        U: FnMut(&super::SearchUpdate<'_>) + Send + 'static,
+    {
+        let sink = self.search.update_sink(&self.position, options, on_update);
+        self.run_impl(handle, on_info, Some(sink))
+    }
+
+    fn run_impl<F: FnMut(&SearchInfo)>(
+        &mut self,
+        handle: &AnalysisRunHandle,
+        on_info: Option<F>,
+        #[cfg(feature = "search-updates")] updates: Option<super::updates::UpdateSink>,
+    ) -> Result<AnalysisFinished, AnalysisError> {
         let Some((pending, budget)) = self.pending.as_ref() else {
             return Err(AnalysisError::InvalidRun);
         };
@@ -271,6 +303,10 @@ impl AnalysisSession {
         }
         // native unwind では全 helper を止めてから失効する。Wasm abort は host が Worker 群を破棄する。
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(feature = "search-updates")]
+            if let Some(sink) = updates {
+                return self.search.go_with_sink(&mut self.position, limits, on_info, sink);
+            }
             self.search.go(&mut self.position, limits, on_info)
         })) {
             Ok(result) => result,

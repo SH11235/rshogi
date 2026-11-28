@@ -1363,8 +1363,91 @@ impl Search {
     pub fn go<F>(
         &mut self,
         pos: &mut Position,
+        limits: LimitsType,
+        on_info: Option<F>,
+    ) -> SearchResult
+    where
+        F: FnMut(&SearchInfo),
+    {
+        #[cfg(feature = "search-updates")]
+        let result = self.go_impl(pos, limits, on_info, None);
+        #[cfg(not(feature = "search-updates"))]
+        let result = self.go_impl(pos, limits, on_info);
+        result
+    }
+
+    /// 探索を実行し、長い探索の途中経過も `on_update` へ渡す（`search-updates` feature）。
+    ///
+    /// `on_info` は [`Search::go`] と同じく深さを 1 段読み終えるたびに呼ばれる。`on_update` には
+    /// メインスレッドの局面数が `options.min_nodes` を超えてから、段の途中の
+    /// [`SearchUpdate`] が届く。どちらも探索を呼んだスレッドから呼ばれる。
+    /// [`SearchUpdate::PvLine`] の読み筋は `on_info` と同じく合法な接頭列に切り詰めてある。
+    ///
+    /// `on_update` には `Send` を求める（探索の状態を別スレッドへ渡せるようにするため）。呼ばれるのは
+    /// `go_with_updates` を呼んだスレッドだけなので、`Send` でない値（wasm の JS 関数など）は
+    /// そのスレッドの thread-local に置き、値を取り込まないクロージャーから呼べばよい。
+    #[cfg(feature = "search-updates")]
+    pub fn go_with_updates<F, U>(
+        &mut self,
+        pos: &mut Position,
+        limits: LimitsType,
+        on_info: Option<F>,
+        options: super::SearchUpdateOptions,
+        on_update: U,
+    ) -> SearchResult
+    where
+        F: FnMut(&SearchInfo),
+        U: FnMut(&super::SearchUpdate<'_>) + Send + 'static,
+    {
+        let sink = self.update_sink(pos, options, on_update);
+        self.go_impl(pos, limits, on_info, Some(sink))
+    }
+
+    /// `root` から探索するときの通知先を作る。`PvLine` の読み筋は合法な接頭列に切り詰めて渡す。
+    #[cfg(feature = "search-updates")]
+    pub(crate) fn update_sink<U>(
+        &self,
+        root: &Position,
+        options: super::SearchUpdateOptions,
+        mut on_update: U,
+    ) -> super::updates::UpdateSink
+    where
+        U: FnMut(&super::SearchUpdate<'_>) + Send + 'static,
+    {
+        use super::SearchUpdate;
+        let root_pos = root.clone();
+        let rule = self.entering_king_rule;
+        let callback = Box::new(move |update: &SearchUpdate<'_>| match update {
+            SearchUpdate::PvLine(info) => {
+                let mut public_info = (*info).clone();
+                public_info.pv.truncate(legal_pv_prefix_len(&root_pos, &public_info.pv, rule));
+                on_update(&SearchUpdate::PvLine(&public_info));
+            }
+            other => on_update(other),
+        });
+        super::updates::UpdateSink::new(options, callback)
+    }
+
+    #[cfg(feature = "search-updates")]
+    pub(crate) fn go_with_sink<F>(
+        &mut self,
+        pos: &mut Position,
+        limits: LimitsType,
+        on_info: Option<F>,
+        sink: super::updates::UpdateSink,
+    ) -> SearchResult
+    where
+        F: FnMut(&SearchInfo),
+    {
+        self.go_impl(pos, limits, on_info, Some(sink))
+    }
+
+    fn go_impl<F>(
+        &mut self,
+        pos: &mut Position,
         mut limits: LimitsType,
         mut on_info: Option<F>,
+        #[cfg(feature = "search-updates")] updates: Option<super::updates::UpdateSink>,
     ) -> SearchResult
     where
         F: FnMut(&SearchInfo),
@@ -1395,8 +1478,13 @@ impl Search {
 
         // go nodes は全スレッドの合計で打ち切る。
         // helper が無いときは自分のノード数だけで判定し、共有カウンタの atomic 操作を避ける。
+        // 途中経過の局面数も補助スレッドの分を含めるため、同じ共有カウンタで集計する。
+        #[cfg(feature = "search-updates")]
+        let share_nodes = limits.nodes > 0 || updates.is_some();
+        #[cfg(not(feature = "search-updates"))]
+        let share_nodes = limits.nodes > 0;
         limits.searched_nodes =
-            (limits.nodes > 0 && helper_search_enabled).then(|| Arc::new(AtomicU64::new(0)));
+            (share_nodes && helper_search_enabled).then(|| Arc::new(AtomicU64::new(0)));
 
         // 時間管理
         let mut time_manager =
@@ -1405,6 +1493,8 @@ impl Search {
         time_manager.set_previous_time_reduction(self.previous_time_reduction);
         // ply（現在の手数）は局面から取得、max_moves_to_drawはデフォルトを使う
         time_manager.init(&limits, pos.side_to_move(), ply, self.max_moves_to_draw);
+        #[cfg(feature = "search-updates")]
+        time_manager.set_updates(updates);
         log::trace!(
             target: "rshogi_core::search::time",
             "event=init ply={} side={:?} remaining_ms={} increment_ms={} byoyomi_ms={} optimum_ms={} maximum_ms={} minimum_ms={} network_delay_ms={} network_delay2_ms={} slow_mover={} round_up={} ponder={} usi_ponder={} stochastic_ponder={}",
@@ -1956,6 +2046,27 @@ struct MainThreadState<'a> {
 }
 
 impl MainThreadState<'_> {
+    /// メインスレッドの局面数に補助スレッドの分を足す。
+    fn total_nodes(&self, main_nodes: u64) -> u64 {
+        // Native: Use helper_threads() to get node counts
+        #[cfg(not(target_arch = "wasm32"))]
+        let helper_nodes = self
+            .thread_pool
+            .helper_threads()
+            .iter()
+            .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
+
+        // Wasm with wasm-threads: Use helper_nodes() for realtime node counts
+        #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+        let helper_nodes = self.thread_pool.helper_nodes();
+
+        // Wasm without wasm-threads: No helper threads
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        let helper_nodes = 0u64;
+
+        main_nodes.saturating_add(helper_nodes)
+    }
+
     fn compute_time_factors(
         &self,
         best_value: Value,
@@ -2249,6 +2360,16 @@ where
             if !pv_aborted {
                 processed_pv = pv_idx + 1;
             }
+
+            // 最後の本は反復の終わりの on_info で全部の本と一緒に出す。
+            #[cfg(feature = "search-updates")]
+            if let Some(ref ms) = main_state
+                && !pv_aborted
+                && pv_idx + 1 < effective_multi_pv
+                && time_manager.updates_active(worker.state.nodes)
+            {
+                report_finished_pv_lines(worker, ms, time_manager, depth, pv_idx + 1);
+            }
         }
 
         // MultiPVループ完了後の最終ソート
@@ -2274,24 +2395,7 @@ where
         {
             let elapsed = ms.start_time.elapsed();
             let time_ms = elapsed.as_millis() as u64;
-
-            // Native: Use helper_threads() to get node counts
-            #[cfg(not(target_arch = "wasm32"))]
-            let helper_nodes = ms
-                .thread_pool
-                .helper_threads()
-                .iter()
-                .fold(0u64, |acc, thread| acc.saturating_add(thread.nodes()));
-
-            // Wasm with wasm-threads: Use helper_nodes() for realtime node counts
-            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-            let helper_nodes = ms.thread_pool.helper_nodes();
-
-            // Wasm without wasm-threads: No helper threads
-            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-            let helper_nodes = 0u64;
-
-            let total_nodes = worker.state.nodes.saturating_add(helper_nodes);
+            let total_nodes = ms.total_nodes(worker.state.nodes);
             let nps = total_nodes.saturating_mul(1000).checked_div(time_ms).unwrap_or(0);
 
             for pv_idx in 0..processed_pv {
@@ -2515,6 +2619,44 @@ fn legal_pv_prefix_len(root: &Position, pv: &[Move], rule: EnteringKingRule) -> 
         }
     }
     pv.len()
+}
+
+/// 反復の途中で確定した先頭 `lines` 本の読み筋を途中経過として渡す。
+#[cfg(feature = "search-updates")]
+fn report_finished_pv_lines(
+    worker: &SearchWorker,
+    ms: &MainThreadState<'_>,
+    time_manager: &mut TimeManagement,
+    depth: Depth,
+    lines: usize,
+) {
+    // SearchUpdate::Progress と同じ時刻・共有カウンタを基準にし、続けて届く値が逆戻りしないようにする。
+    // 補助スレッドの反復ごとの値（ms.total_nodes）は反復の途中の分を含まないので、多い方を使う。
+    let time_ms = time_manager.elapsed().max(0) as u64;
+    time_manager.publish_nodes(worker.state.nodes);
+    let total_nodes = time_manager
+        .budget_nodes(worker.state.nodes)
+        .max(ms.total_nodes(worker.state.nodes));
+    let nps = total_nodes.saturating_mul(1000).checked_div(time_ms).unwrap_or(0);
+    let hashfull = ms.tt.hashfull(3) as u32;
+    for (idx, root_move) in worker.state.root_moves.iter().take(lines).enumerate() {
+        if !root_score_is_initialized(root_move.score) {
+            continue;
+        }
+        let info = SearchInfo {
+            depth,
+            sel_depth: root_move.sel_depth,
+            score: root_move.score,
+            bound: root_move.score_bound(),
+            nodes: total_nodes,
+            time_ms,
+            nps,
+            hashfull,
+            pv: root_move.pv.clone(),
+            multi_pv: idx + 1,
+        };
+        time_manager.report_pv_line(worker.state.nodes, &info);
+    }
 }
 
 fn root_score_is_initialized(score: Value) -> bool {

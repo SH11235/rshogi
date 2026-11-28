@@ -30,6 +30,8 @@ rshogi-book = { version = "0.1", path = "../rshogi-book", default-features = fal
 # default は rshogi-core 側 default (edition-universal) と一致させる。
 default = ["edition-universal"]
 wasm-threads = ["rshogi-core/wasm-threads"]
+# 長い探索で段の途中の currmove と読み筋 1 本ごとの値を info で出す（既定では無効）。
+search-updates = ["rshogi-core/search-updates"]
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = ["rshogi-core/search-stats"]
 # NNUE統計収集（refresh/update比率等のカウント）
