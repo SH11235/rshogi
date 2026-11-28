@@ -15,6 +15,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 ## Unreleased
 
 - LayerStacks-DenseConcat に FT 幅 4096 / 6144 / 8192 / 12288 の edition を追加。すべて Threat なしと全幅に対応し、6144 は部分幅 3072、8192 は部分幅 2816 にも対応。
+- rshogi-core に cargo feature `search-updates` を足した（既定では無効）。`Search::go_with_updates` に渡したコールバックが、メインスレッドの局面数がしきい値（既定 1000 万）を超えてから、段の途中の進み具合（一定間隔）・`currmove`・MultiPV の読み筋 1 本ごとの確定値を受け取る。rshogi-usi も同名の feature で、`currmove` と読み筋 1 本ごとの値を `info` で出す。
 - `tournament` は既定で worker あたりのエンジン常駐数を 2 本に抑え、対局カードに応じて入れ替える。`--max-live-engines-per-worker 0` で全エンジンを常駐できる。
 
 ## v1.11.0 — 2026-11-26

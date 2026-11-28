@@ -11,6 +11,8 @@ mod in_tree_declaration;
 mod lazy_evaluate;
 mod multi_pv;
 mod node_limit;
+#[cfg(feature = "search-updates")]
+mod search_updates;
 mod skill;
 mod time_management;
 #[cfg(feature = "search-tree-sample")]

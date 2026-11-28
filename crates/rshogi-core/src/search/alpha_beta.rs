@@ -1154,6 +1154,8 @@ impl SearchWorker {
 
             let elapsed = time_manager.elapsed();
             let elapsed_effective = time_manager.elapsed_from_ponderhit();
+            #[cfg(feature = "search-updates")]
+            time_manager.report_progress(self.state.root_depth, self.state.nodes, elapsed);
 
             // フェーズ1: search_end 設定済み → 即座に停止
             if !time_manager.is_pondering()
@@ -1403,6 +1405,14 @@ impl SearchWorker {
             }
 
             move_count += 1;
+            #[cfg(feature = "search-updates")]
+            time_manager.report_currmove(
+                self.state.root_depth,
+                self.state.nodes,
+                mv,
+                move_count as usize,
+                1,
+            );
 
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
@@ -2069,6 +2079,14 @@ impl SearchWorker {
             }
 
             let mv = self.state.root_moves[rm_idx].mv();
+            #[cfg(feature = "search-updates")]
+            time_manager.report_currmove(
+                self.state.root_depth,
+                self.state.nodes,
+                mv,
+                rm_idx + 1,
+                pv_idx + 1,
+            );
             let gives_check = pos.gives_check(mv);
             let is_capture = pos.is_capture(mv);
 

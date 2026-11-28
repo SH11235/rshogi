@@ -36,6 +36,8 @@ mod tt_history;
 mod tt_sanity;
 mod tune_params;
 mod types;
+#[cfg(feature = "search-updates")]
+mod updates;
 
 #[cfg(test)]
 mod tests;
@@ -62,3 +64,5 @@ pub use tree_sample::{TreeSample, TreeSampleConfig, TreeSampleStats};
 pub use tt_history::*;
 pub use tune_params::*;
 pub use types::*;
+#[cfg(feature = "search-updates")]
+pub use updates::*;

@@ -68,6 +68,9 @@ tt-write-stats = []
 # WebAssembly スレッドビルド (wasm-bindgen-rayon + rayon で LazySMP)。
 # 詳細は docs/wasm-multithreading-investigation.md を参照。
 wasm-threads = ["rayon"]
+# アプリ向け: 長い探索の途中経過（一定間隔の進み具合・currmove・読み筋 1 本ごとの値）を
+# `Search::go_with_updates` のコールバックへ渡す。無効の build には判定のコードを含めない。
+search-updates = []
 # アプリ向け指し手特徴量抽出（解説生成等で使用）
 move-features = []
 # TT trace / helper TT write 制御（並列探索デバッグ用）。

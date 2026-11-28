@@ -56,7 +56,7 @@ done
 # threat-profile-* のうち edition に含まれるものも同様で、
 # どの edition にも含まれない threat-profile-cross-side だけをここで検査する。
 for feature in prepacked-nnue search-stats nnue-stats diagnostics allocation-stats tt-write-stats tt-trace \
-  threat-profile-cross-side search-pass-rules use-lazy-evaluate; do
+  threat-profile-cross-side search-pass-rules use-lazy-evaluate search-updates; do
   run -p rshogi-usi --all-targets --features "${feature}"
   run -p rshogi-core --all-targets --features "${feature}"
 done

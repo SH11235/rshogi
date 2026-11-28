@@ -246,6 +246,10 @@ jobs:
         run: |
           cargo test -p rshogi-core --lib --features search-tree-sample tree_sample -- --test-threads=2
           cargo test -p tools --features search-tree-sample --lib --bin gensfen --test integration tree_sample -- --test-threads=2
+      - name: Test search updates
+        # 段の途中の経過を渡す search-updates は opt-in なので、既定構成のテストでは一度もコンパイルされない。
+        if: matrix.shard == 1
+        run: cargo test -p rshogi-core --lib --features search-updates search_updates -- --test-threads=2
       - name: Test search with lazy evaluate
         # TT eval を再利用する use-lazy-evaluate は opt-in なので、既定構成のテストでは一度もコンパイルされない。
         if: matrix.shard == 3

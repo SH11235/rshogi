@@ -92,6 +92,8 @@ fn check_abort_slow(
 
         let elapsed = time_manager.elapsed();
         let elapsed_effective = time_manager.elapsed_from_ponderhit();
+        #[cfg(feature = "search-updates")]
+        time_manager.report_progress(st.root_depth, st.nodes, elapsed);
 
         // フェーズ1: search_end 設定済み → 即座に停止
         if !time_manager.is_pondering()
